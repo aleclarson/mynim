@@ -16,6 +16,7 @@ import ../image
 include text/types
 include text/boundaries
 include text/engine
+include text/lang
 when defined(macosx):
   include text/coretext
   proc newEngine(): Engine =
@@ -24,9 +25,16 @@ when defined(macosx):
     except CatchableError as e:
       stderr.writeLine("mynim: " & e.msg & ": text will not show")
       StubEngine()
+elif defined(linux):
+  include text/pango
+  proc newEngine(): Engine =
+    try:
+      newPango()
+    except CatchableError as e:
+      stderr.writeLine("mynim: " & e.msg & ": text will not show")
+      StubEngine()
 else:
   proc newEngine(): Engine = StubEngine()
-include text/lang
 include text/layout
 include text/edit
 include text/caret
