@@ -37,6 +37,7 @@ proc loadPreferences() =
 ## own domain alone when own, else of the global domain alone.
 proc appleLanguages(own: bool): seq[string] =
   loadPreferences()
+  var res: seq[string]
   var app = cfAnyApplication
   if own:
     app = cfCurrentApplication
@@ -51,16 +52,19 @@ proc appleLanguages(own: bool): seq[string] =
       return
     for s in arrayItems(v):
       if sendBool(s, "isKindOfClass:", argu(`class`("NSString"))):
-        result.add goString(s))
+        res.add goString(s))
+  res
 
 method preferredLanguages*(a: appController): seq[string] =
   result = appleLanguages(false)
   if result.len > 0:
     return
   # A user who never ordered languages: the system's.
+  var res: seq[string]
   withPool(proc() =
     for s in arrayItems(send(`class`("NSLocale"), "preferredLanguages")):
-      result.add goString(s))
+      res.add goString(s))
+  result.add res
 
 method savedLocale*(a: appController): tuple[tag: string, kept: bool] =
   let langs = appleLanguages(true)

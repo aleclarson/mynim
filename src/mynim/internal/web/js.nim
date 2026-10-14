@@ -6,6 +6,8 @@
 ## Callbacks into wasm go through the function-pointer table: JS calls
 ## jsDispatch, which finds the Nim proc registered for the handle.
 
+import std/tables
+
 type
   JsValue* = distinct int32
     ## A handle of a JS value kept in __myjs.vals.

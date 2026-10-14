@@ -501,8 +501,8 @@ proc dragPoint*(s: macSurface, info: id): tuple[x, y: float64] =
 
 proc registerSurfaceClass*() =
   registerDataDragClasses()
-  proc mouseOf(kind: SurfaceEventKind,
-               button: int): pointer =
+  template mouseOf(kind: SurfaceEventKind,
+                   button: int): pointer =
     cast[pointer](proc(self: id, cmd: SEL, ev: id) {.cdecl.} =
       let s = theBackend.surfaceOf(self)
       if s == nil:
@@ -528,7 +528,7 @@ proc registerSurfaceClass*() =
       s.mouse(kind, ev, btn)
       if kind == pointerUp and button == 0:
         s.ctrlClick = false)
-  proc commandOf(name: string): MethodDef =
+  template commandOf(name: string): MethodDef =
     methodDef(name & ":",
       cast[pointer](proc(self: id, cmd: SEL, sender: id) {.cdecl.} =
         let s = theBackend.surfaceOf(self)

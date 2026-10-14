@@ -85,8 +85,9 @@ method write*(st: schemeTask, p: openArray[byte]) =
     return
   if not st.responded:
     st.respond(200, HeaderMap())
+  let bytes = @p
   withPool(proc() =
-    discard send(st.task, "didReceiveData:", argu(nsData(p))))
+    discard send(st.task, "didReceiveData:", argu(nsData(bytes))))
 
 method finish*(st: schemeTask) =
   if st.stopped or st.done:

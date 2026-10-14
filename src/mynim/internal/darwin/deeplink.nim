@@ -40,11 +40,14 @@ method unregisterURLScheme*(a: appController, scheme, id,
 
 method isURLSchemeRegistered*(a: appController, scheme, id,
                               name: string): bool =
+  var res: bool
   withPool(proc() =
     let handler = lsCopyDefaultHandlerForURLScheme(nsString(scheme))
     if handler.isNil:
       return
     defer: cfRelease(handler)
-    result = toLowerAscii(goString(handler)) ==
+    res = toLowerAscii(goString(handler)) ==
       toLowerAscii(goString(send(send(`class`("NSBundle"), "mainBundle"),
                     "bundleIdentifier"))))
+
+  res

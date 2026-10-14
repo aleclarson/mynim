@@ -16,7 +16,8 @@ elif defined(macosx):
   proc newBackend(): platform.Backend =
     platform.Backend(darwin.newBackend())
 elif defined(linux):
-  proc newBackend(): platform.Backend = newUnsupportedBackend()
+  proc newBackend(): platform.Backend =
+    platform.Backend(linux.newBackend())
 elif defined(windows):
   proc newBackend(): platform.Backend = newUnsupportedBackend()
 else:

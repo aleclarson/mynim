@@ -21,6 +21,8 @@ when defined(emscripten):
   import mynim/internal/web
 elif defined(macosx):
   import mynim/internal/darwin
+elif defined(linux):
+  import mynim/internal/linux
 
 export transfer, image, platform, i18n
 

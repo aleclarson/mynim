@@ -398,9 +398,11 @@ method setDocumentEdited*(w: macWindow, edited: bool) =
   w.layoutTrafficLights()
 
 method title*(w: macWindow): string =
+  var res: string
   withPool(proc() =
-    result = goString(send(w.win, "title")))
+    res = goString(send(w.win, "title")))
 
+  res
 method setBounds*(w: macWindow, r: platform.Rect) =
   msgSetRectBool(w.win, sel("setFrame:display:"), rectToMac(r), true)
 
@@ -939,9 +941,11 @@ method canGoForward*(w: macWindow): bool =
 method isLoading*(w: macWindow): bool = sendBool(w.web, "isLoading")
 
 method url*(w: macWindow): string =
+  var res: string
   withPool(proc() =
-    result = goString(send(send(w.web, "URL"), "absoluteString")))
+    res = goString(send(send(w.web, "URL"), "absoluteString")))
 
+  res
 ## addUserScripts gives the content controller the scripts of the
 ## options, and the script that tells the bridge the room of the
 ## traffic lights.
@@ -1008,11 +1012,13 @@ method setUserAgent*(w: macWindow, ua: string) =
     discard send(w.web, "setCustomUserAgent:", argu(s)))
 
 method userAgent*(w: macWindow): string =
+  var res: string
   withPool(proc() =
-    result = goString(send(w.web, "customUserAgent"))
-    if result == "" and respondsTo(w.web, "_userAgent"):
-      result = goString(send(w.web, "_userAgent")))
+    res = goString(send(w.web, "customUserAgent"))
+    if res == "" and respondsTo(w.web, "_userAgent"):
+      res = goString(send(w.web, "_userAgent")))
 
+  res
 proc inspector(w: macWindow): id =
   if not w.opts.devTools or not respondsTo(w.web, "_inspector"):
     return nil
@@ -1181,6 +1187,7 @@ method print*(w: macWindow) =
 ## draggedFiles returns the paths of the files on the pasteboard of a
 ## drag.
 proc draggedFiles(info: id): seq[string] =
+  var res: seq[string]
   withPool(proc() =
     let opts = send(`class`("NSDictionary"),
       "dictionaryWithObject:forKey:", argu(nsBool(true)),
@@ -1191,8 +1198,9 @@ proc draggedFiles(info: id): seq[string] =
     for u in arrayItems(urls):
       let p = goString(send(send(u, "filePathURL"), "path"))
       if p != "":
-        result.add p)
+        res.add p)
 
+  res
 method droppedFiles*(w: macWindow): seq[string] =
   result = w.dropped
   w.dropped = @[]
@@ -1228,7 +1236,7 @@ proc registerWindowClasses*() =
   # WebKit moves the keyboard out of a page past its ends through the
   # window's key view loop: a web view in native UI gives it back to
   # the content.
-  proc selectKeyView(cls: string, back: bool): pointer =
+  template selectKeyView(cls: string, back: bool): pointer =
     cast[pointer](proc(self: id, cmd: SEL, view: id) {.cdecl.} =
       let w = webViewOf(view)
       if w != nil and w.host != nil:

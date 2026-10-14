@@ -96,6 +96,11 @@ proc contains*(r: RectF, x, y: float64): bool =
 proc contains*(r: Rect, x, y: int): bool =
   x >= r.x and y >= r.y and x < r.x + r.width and y < r.y + r.height
 
+proc `in`*(r, clip: Rect): bool =
+  ## Whether r lies inside clip wholly, as image.Rectangle.In does.
+  clip.contains(r.x, r.y) and clip.contains(r.x + r.width - 1,
+    r.y + r.height - 1)
+
 proc rectF*(x, y, w, h: float64): RectF = RectF(x: x, y: y, w: w, h: h)
 
 type
@@ -530,3 +535,11 @@ proc keyByPosition*(key, physical: Key, mods: Modifiers): bool =
   ## modifier is held, so that typing stays on the layout.
   key == keyUnknown and physical != keyUnknown and
     (mods and (modCtrl or modAlt or modSuper)) != 0
+
+proc `==`*(a, b: Size): bool =
+  a.width == b.width and a.height == b.height
+proc `==`*(a, b: Rect): bool =
+  a.x == b.x and a.y == b.y and a.width == b.width and
+    a.height == b.height
+proc `==`*(a, b: TitleBar): bool =
+  a.height == b.height and a.left == b.left and a.right == b.right

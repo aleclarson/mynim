@@ -250,7 +250,7 @@ proc closeWebViews*(w: macWindow) =
 ## page is the content's alone, which sets the cursor there; the page
 ## hears that it left.
 proc webViewMethods*(): seq[MethodDef] =
-  proc pressOf(button: int): pointer =
+  template pressOf(button: int): pointer =
     cast[pointer](proc(self: id, cmd: SEL, ev: id) {.cdecl.} =
       let w = theBackend.byWebView.getOrDefault(self)
       if w != nil and w.host != nil:

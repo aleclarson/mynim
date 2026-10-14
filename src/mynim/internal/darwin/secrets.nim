@@ -96,8 +96,9 @@ method setSecret*(s: secretsImpl, service, account: string,
   if k.err != nil:
     raise k.err
   var err: ref CatchableError = nil
+  let bytes = @secret
   withPool(proc() =
-    let data = nsData(secret)
+    let data = nsData(bytes)
     let update = send(`class`("NSMutableDictionary"), "dictionary")
     discard send(update, "setObject:forKey:", argu(data),
                  argu(k.valueData))
@@ -124,6 +125,7 @@ method secret*(s: secretsImpl, service, account: string): seq[byte] =
   if k.err != nil:
     raise k.err
   var err: ref CatchableError = nil
+  var res: seq[byte]
   withPool(proc() =
     let q = k.query(service, account)
     discard send(q, "setObject:forKey:", argu(k.cfTrue),
@@ -138,10 +140,11 @@ method secret*(s: secretsImpl, service, account: string): seq[byte] =
     if data.isNil:
       err = newException(IOError, "keychain: read: no data")
       return
-    result = goBytes(id(data))
+    res = goBytes(id(data))
     cfRelease(data))
   if err != nil:
     raise err
+  res
 
 method deleteSecret*(s: secretsImpl, service, account: string) =
   let k = keychain()

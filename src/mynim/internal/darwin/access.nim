@@ -511,8 +511,10 @@ const legacyActions: seq[tuple[name: string, action: AccessActions,
   ("AXScrollToVisible", actionScrollIntoView, accessScrollIntoView),
 ]
 
+var allowedActions*: Table[string, AccessActions]
+
 proc registerAccessClass*() =
-  let allowed = {
+  allowedActions = {
     "accessibilityPerformPress": actionPress,
     "accessibilityPerformIncrement": actionIncrement,
     "accessibilityPerformDecrement": actionDecrement,
@@ -581,7 +583,7 @@ proc registerAccessClass*() =
       cast[pointer](proc(self: id, cmd: SEL, selector: SEL): bool {.cdecl.} =
         let el = theBackend.accessElementOf(self)
         if el != nil:
-          for name, action in allowed:
+          for name, action in allowedActions:
             if sel(name) == selector:
               return (el.node.actions and action) != 0.AccessActions
         sendSuper(self, "MyNimAccessibilityElement", cmd,

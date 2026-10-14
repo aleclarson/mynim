@@ -14,36 +14,43 @@ const
 proc pasteboard(): id = send(`class`("NSPasteboard"), "generalPasteboard")
 
 method readText*(c: clipboardImpl): string =
+  var s: string
   withPool(proc() =
-    result = goString(send(pasteboard(), "stringForType:",
-                           argu(nsString(utString)))))
+    s = goString(send(pasteboard(), "stringForType:",
+                      argu(nsString(utString)))))
+  s
 
 method writeText*(c: clipboardImpl, text: string) =
   c.writeData(textData(text), nil)
 
 method readHTML*(c: clipboardImpl): string =
+  var s: string
   withPool(proc() =
-    result = goString(send(pasteboard(), "stringForType:",
-                           argu(nsString(utHTML)))))
+    s = goString(send(pasteboard(), "stringForType:",
+                      argu(nsString(utHTML)))))
+  s
 
 method writeHTML*(c: clipboardImpl, markup: string) =
   c.writeData(newData(newItem(
     bytes(transfer.HTML, markup), bytes(transfer.Text, markup))), nil)
 
 method readImage*(c: clipboardImpl): seq[byte] =
+  var r: seq[byte]
   withPool(proc() =
     let pb = pasteboard()
     let data = send(pb, "dataForType:", argu(nsString(utPNG)))
     if not data.isNil:
-      result = goBytes(data)
+      r = goBytes(data)
       return
     let tiff = send(pb, "dataForType:", argu(nsString(utTIFF)))
     if not tiff.isNil:
       let rep = send(`class`("NSBitmapImageRep"), "imageRepWithData:",
                      argu(tiff))
       if not rep.isNil:
-        result = goBytes(send(rep, "representationUsingType:properties:",
-          argu(4), argu(send(`class`("NSDictionary"), "dictionary")))))
+        let dict = send(`class`("NSDictionary"), "dictionary")
+        r = goBytes(send(rep, "representationUsingType:properties:",
+          argu(4), argu(dict))))
+  r
 
 method writeImage*(c: clipboardImpl, png: seq[byte]) =
   var invalid = false
@@ -62,9 +69,11 @@ method clear*(c: clipboardImpl) =
       macClipboard.release())
 
 method availableFormats*(c: clipboardImpl): seq[string] =
+  var r: seq[string]
   withPool(proc() =
     for t in arrayItems(send(pasteboard(), "types")):
-      result.add goString(t))
+      r.add goString(t))
+  r
 
 # Shell (NSWorkspace).
 
@@ -118,6 +127,7 @@ method beep*(s: shellImpl) = nsBeep()
 type screenImpl = ref object of Screen
 
 method displays*(s: screenImpl): seq[Display] =
+  var r: seq[Display]
   withPool(proc() =
     let screens = arrayItems(send(`class`("NSScreen"), "screens"))
     if screens.len == 0:
@@ -137,7 +147,8 @@ method displays*(s: screenImpl): seq[Display] =
         primary: i == 0)
       if respondsTo(scr, "localizedName"):
         d.label = goString(send(scr, "localizedName"))
-      result.add d)
+      r.add d)
+  r
 
 method cursorPoint*(s: screenImpl): platform.Point =
   let p = msgPoint(`class`("NSEvent"), sel("mouseLocation"))
