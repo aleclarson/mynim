@@ -328,11 +328,40 @@ type
     calls*: Table[int, proc(r: string, err: ref CatchableError) {.closure.}]
     nextCall*: int
 
-  ## uiaTree is the surface's UI Automation provider
+  ## uiaIface is an interface pointer of an element: COM calls its
+  ## methods with its address.
+  uiaIface* = object
+    vtbl*: ptr uint
+    e*: uiaElement
+
+  ## uiaElement is a node of the tree as UI Automation sees it, or
+  ## the root.
+  uiaElement* = ref object
+    ifaces*: array[13, uiaIface]
+    refs*: int32
+    tree*: uiaTree
+    root*: bool
+    dead*: bool
+    n*: AccessNode
+    # textRunes are the runes of n.value, runesOf the value they
+    # are of.
+    textRunes*: seq[Rune]
+    runesOf*: string
+    parent*: uiaElement
+    children*: seq[uiaElement]
+
+  ## uiaTree is what UI Automation sees of a surface
   ## (surface_access.nim).
   uiaTree* = ref object
     s*: w32Surface
     hwnd*: uint
+    root*: uiaElement
+    nodes*: Table[uint64, uiaElement]
+    order*: seq[uiaElement] # in the order of the content's tree
+    focus*: uint64
+    quiet*: bool # building the tree a client asked for
+    # announced is the text of the live region of announcements.
+    announced*: string
 
   ## webLayer composes the web views under a surface's frames
   ## (webview_embed.nim).

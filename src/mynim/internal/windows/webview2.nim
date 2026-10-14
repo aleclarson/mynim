@@ -118,6 +118,8 @@ const
   accelGetKeyEventKind* = 3
   accelGetVirtualKey* = 4
   accelPutHandled* = 8
+  comp2GetAutomationProvider* = 11 # ICoreWebView2CompositionController2
+  env4GetAutomationProviderForWindow* = 11 # ICoreWebView2Environment4
 
 var
   iidICoreWebView2Controller2* = guid(
@@ -356,3 +358,15 @@ method webViewSupported*(b: WinBackend): bool =
     return true
   let (_, _, err) = webview2.find()
   err.isNil
+
+## automationProvider returns WebView2's UI Automation provider of
+## the page, which the window keeps a reference to, or 0.
+proc automationProvider*(w: w32Window): uint =
+  if w.uia == 0 and w.comp != 0:
+    let comp2 = queryInterface(w.comp,
+      addr iidICoreWebView2CompositionController2)
+    if comp2 != 0:
+      discard comCall(comp2, comp2GetAutomationProvider,
+        cast[uint](addr w.uia))
+      release(comp2)
+  w.uia

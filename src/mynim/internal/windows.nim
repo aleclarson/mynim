@@ -45,3 +45,5 @@ when defined(windows) and (defined(amd64) or defined(arm64)):
   include windows/flyout
   include windows/compositor
   include windows/menu
+  include windows/surface_access
+  include windows/uia_text
