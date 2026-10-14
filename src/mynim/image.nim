@@ -345,7 +345,7 @@ proc zlibStore(data: string): string =
     if data.len == 0: break
   result.add u32be(adler32(data))
 
-proc unpremultiply(c: Rgba): Nrgba =
+proc unpremultiply*(c: Rgba): Nrgba =
   if c.a == 0: return Nrgba()
   if c.a == 255: return Nrgba(r: c.r, g: c.g, b: c.b, a: 255)
   let a = c.a.uint32
@@ -386,3 +386,285 @@ proc pngEncode*(img: Image): seq[byte] =
   outb.add crcChunk("IDAT", zlibStore(raw))
   outb.add crcChunk("IEND", "")
   cast[seq[byte]](outb)
+
+## --- PNG decoding (image/png's Decode) ---
+
+## inflate decodes a zlib (RFC 1950) stream: the wrapper, the DEFLATE
+## (RFC 1951) stream of stored, fixed-Huffman and dynamic-Huffman
+## blocks.
+proc inflate*(data: openArray[byte]): seq[byte] =
+  if data.len < 6:
+    raise newException(ValueError, "zlib: corrupt stream")
+  var pos = 2 ## skip the zlib header
+  var bit = 0
+  var outb: seq[byte]
+  proc bit1(): int =
+    let v = (int(data[pos]) shr bit) and 1
+    inc bit
+    if bit == 8:
+      bit = 0
+      inc pos
+    v
+  proc bits(n: int): int =
+    for i in 0 ..< n:
+      result = result or bit1() shl i
+  # Huffman decoder over a code-lengths table.
+  proc huffBuild(lens: openArray[int]): tuple[maxLen: int,
+      codes: seq[tuple[code, len, sym: int]]] =
+    var counts = newSeq[int](16)
+    for l in lens:
+      if l > 0: inc counts[l]
+    var next = newSeq[int](16)
+    var code = 0
+    for l in 1 ..< 16:
+      code = (code + counts[l - 1]) shl 1
+      next[l] = code
+    var codes: seq[tuple[code, len, sym: int]]
+    var mx = 0
+    for s, l in lens:
+      if l > 0:
+        codes.add (next[l], l, s)
+        inc next[l]
+        mx = max(mx, l)
+    (mx, codes)
+  proc huffDecode(maxLen: int,
+      codes: seq[tuple[code, len, sym: int]]): int =
+    var code = 0
+    for l in 1 .. maxLen:
+      code = (code shl 1) or bit1()
+      for c in codes:
+        if c.len == l and c.code == code:
+          return c.sym
+    raise newException(ValueError, "zlib: bad code")
+  # The order dynamic headers list code lengths in.
+  const codeOrder = [16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3,
+    13, 2, 14, 1, 15]
+  const lenBase = [3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 15, 17, 19, 23, 27,
+    31, 35, 43, 51, 59, 67, 83, 99, 115, 131, 163, 195, 227, 258]
+  const lenExtra = [0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 3,
+    3, 3, 3, 4, 4, 4, 4, 5, 5, 5, 5, 0]
+  const distBase = [1, 2, 3, 4, 5, 7, 9, 13, 17, 25, 33, 49, 65, 97,
+    129, 193, 257, 385, 513, 769, 1025, 1537, 2049, 3073, 4097, 6145,
+    8193, 12289, 16385, 24577]
+  const distExtra = [0, 0, 0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7,
+    7, 8, 8, 9, 9, 10, 10, 11, 11, 12, 12, 13, 13]
+  while true:
+    let final = bit1()
+    let typ = bits(2)
+    if typ == 0: ## stored
+      if bit != 0:
+        bit = 0
+        inc pos
+      let n = int(data[pos]) or (int(data[pos + 1]) shl 8)
+      for i in 0 ..< n:
+        outb.add data[pos + i]
+      pos += n + 2 ## LEN + NLEN
+    else:
+      var litMax: int
+      var litCodes, distCodes: seq[tuple[code, len, sym: int]]
+      if typ == 1: ## fixed Huffman
+        var lens = newSeq[int](288)
+        for i in 0 ..< 144: lens[i] = 8
+        for i in 144 ..< 256: lens[i] = 9
+        for i in 256 ..< 280: lens[i] = 7
+        for i in 280 ..< 288: lens[i] = 8
+        let l = huffBuild(lens)
+        litMax = l.maxLen
+        litCodes = l.codes
+        var dl = newSeq[int](30)
+        for i in 0 ..< 30: dl[i] = 5
+        let d = huffBuild(dl)
+        distCodes = d.codes
+        var distMax = d.maxLen
+        discard distMax
+      elif typ == 2: ## dynamic Huffman
+        let hlit = bits(5) + 257
+        let hdist = bits(5) + 1
+        let hclen = bits(4) + 4
+        var clens = newSeq[int](19)
+        for i in 0 ..< hclen:
+          clens[codeOrder[i]] = bits(3)
+        let cl = huffBuild(clens)
+        var lens = newSeq[int](hlit + hdist)
+        var i = 0
+        while i < hlit + hdist:
+          let s = huffDecode(cl.maxLen, cl.codes)
+          if s < 16:
+            lens[i] = s
+            inc i
+          elif s == 16:
+            let rep = bits(2) + 3
+            for j in 0 ..< rep:
+              lens[i + j] = lens[i - 1]
+            i += rep
+          elif s == 17:
+            i += bits(3) + 3
+          else:
+            i += bits(7) + 11
+        let l = huffBuild(lens.toOpenArray(0, hlit - 1))
+        litMax = l.maxLen
+        litCodes = l.codes
+        let d = huffBuild(lens.toOpenArray(hlit, lens.len - 1))
+        distCodes = d.codes
+      else:
+        raise newException(ValueError, "zlib: bad block type")
+      ## LZ77 pass.
+      while true:
+        let s = huffDecode(litMax, litCodes)
+        if s < 256:
+          outb.add byte(s)
+        elif s == 256:
+          break
+        else:
+          let li = s - 257
+          if li >= lenBase.len:
+            raise newException(ValueError, "zlib: bad length")
+          let n = lenBase[li] + bits(lenExtra[li])
+          let ds = huffDecode(15, distCodes)
+          let dist = distBase[ds] + bits(distExtra[ds])
+          for j in 0 ..< n:
+            outb.add outb[outb.len - dist]
+      let huffDone = true
+      discard huffDone
+    if final != 0:
+      break
+  outb
+
+proc pngErr(msg: string): ref CatchableError =
+  newException(CatchableError, "png: " & msg)
+
+## pngDecode decodes a PNG image (image/png's Decode): 8-bit color
+## types, not interlaced, which is what every exporter writes of
+## clipboard and drag images.
+proc pngDecode*(data: seq[byte]): tuple[img: NrgbaImage,
+    err: ref CatchableError] =
+  let sig = [0x89'u8, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]
+  if data.len < 8:
+    return (nil, pngErr("not a PNG"))
+  for i in 0 ..< 8:
+    if data[i] != sig[i]:
+      return (nil, pngErr("not a PNG"))
+  var pos = 8
+  var w, h, depth, colorType, interlace: int
+  var idat: seq[byte]
+  var palette: seq[byte]
+  var trns: seq[byte]
+  while pos + 8 <= data.len:
+    let n = (int(data[pos]) shl 24) or (int(data[pos + 1]) shl 16) or
+      (int(data[pos + 2]) shl 8) or int(data[pos + 3])
+    var kind = newString(4)
+    for i in 0 ..< 4:
+      kind[i] = char(data[pos + 4 + i])
+    template body(i: int): byte = data[pos + 8 + i]
+    if kind == "IHDR":
+      w = (int(body(0)) shl 24) or (int(body(1)) shl 16) or
+        (int(body(2)) shl 8) or int(body(3))
+      h = (int(body(4)) shl 24) or (int(body(5)) shl 16) or
+        (int(body(6)) shl 8) or int(body(7))
+      depth = int(body(8))
+      colorType = int(body(9))
+      interlace = int(body(12))
+    elif kind == "PLTE":
+      palette = data[pos + 8 ..< pos + 8 + n]
+    elif kind == "tRNS":
+      trns = data[pos + 8 ..< pos + 8 + n]
+    elif kind == "IDAT":
+      for i in 0 ..< n:
+        idat.add body(i)
+    elif kind == "IEND":
+      break
+    pos += 12 + n
+  if w <= 0 or h <= 0 or depth != 8 or interlace != 0 or
+      colorType notin {0, 2, 3, 4, 6}:
+    return (nil, pngErr("unsupported PNG format"))
+  let channels = case colorType
+    of 0, 3: 1
+    of 4: 2
+    of 2: 3
+    else: 4
+  var raw: seq[byte]
+  try:
+    raw = inflate(idat)
+  except CatchableError as e:
+    return (nil, e)
+  let stride = w * channels
+  if raw.len < h * (stride + 1):
+    return (nil, pngErr("truncated image"))
+  var img = NrgbaImage(pix: newSeq[uint8](w * h * 4),
+    stride: w * 4, rect: rect(0, 0, w, h))
+  var prev = newSeq[byte](stride)
+  var cur = newSeq[byte](stride)
+  for y in 0 ..< h:
+    let fp = y * (stride + 1)
+    let filter = raw[fp]
+    for i in 0 ..< stride:
+      cur[i] = raw[fp + 1 + i]
+    case filter
+    of 1: ## sub
+      for i in channels ..< stride:
+        cur[i] = byte((int(cur[i]) + int(cur[i - channels])) and 0xff)
+    of 2: ## up
+      for i in 0 ..< stride:
+        cur[i] = byte((int(cur[i]) + int(prev[i])) and 0xff)
+    of 3: ## average
+      for i in 0 ..< stride:
+        let a = if i >= channels: int(cur[i - channels]) else: 0
+        cur[i] = byte((int(cur[i]) + ((a + int(prev[i])) div 2)) and 0xff)
+    of 4: ## paeth
+      for i in 0 ..< stride:
+        let a = if i >= channels: int(cur[i - channels]) else: 0
+        let b = int(prev[i])
+        let c = if i >= channels: int(prev[i - channels]) else: 0
+        let p = a + b - c
+        let pa = abs(p - a)
+        let pb = abs(p - b)
+        let pc = abs(p - c)
+        let pr = if pa <= pb and pa <= pc: a
+          elif pb <= pc: b else: c
+        cur[i] = byte((int(cur[i]) + pr) and 0xff)
+    elif filter != 0:
+      return (nil, pngErr("unknown filter"))
+    for x in 0 ..< w:
+      let d = y * img.stride + x * 4
+      let so = x * channels
+      case colorType
+      of 0:
+        img.pix[d] = cur[so]; img.pix[d + 1] = cur[so]
+        img.pix[d + 2] = cur[so]
+        var a = 255'u8
+        if trns.len >= 2:
+          let tg = int(trns[0]) shl 8 or int(trns[1])
+          if int(cur[so]) * 257 == tg:
+            a = 0
+        img.pix[d + 3] = a
+      of 2:
+        img.pix[d] = cur[so]; img.pix[d + 1] = cur[so + 1]
+        img.pix[d + 2] = cur[so + 2]
+        var a = 255'u8
+        if trns.len >= 6:
+          let r = int(cur[so]) * 257
+          let g = int(cur[so + 1]) * 257
+          let bb = int(cur[so + 2]) * 257
+          let tr = int(trns[0]) shl 8 or int(trns[1])
+          let tg = int(trns[2]) shl 8 or int(trns[3])
+          let tb = int(trns[4]) shl 8 or int(trns[5])
+          if r == tr and g == tg and bb == tb:
+            a = 0
+        img.pix[d + 3] = a
+      of 3:
+        let idx = int(cur[so])
+        if idx * 3 + 2 >= palette.len:
+          return (nil, pngErr("bad palette index"))
+        img.pix[d] = palette[idx * 3]
+        img.pix[d + 1] = palette[idx * 3 + 1]
+        img.pix[d + 2] = palette[idx * 3 + 2]
+        img.pix[d + 3] = if idx < trns.len: trns[idx] else: 255
+      of 4:
+        img.pix[d] = cur[so]; img.pix[d + 1] = cur[so]
+        img.pix[d + 2] = cur[so]
+        img.pix[d + 3] = cur[so + 1]
+      else:
+        img.pix[d] = cur[so]; img.pix[d + 1] = cur[so + 1]
+        img.pix[d + 2] = cur[so + 2]; img.pix[d + 3] = cur[so + 3]
+    swap(prev, cur)
+  (img, nil)
