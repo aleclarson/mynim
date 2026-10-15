@@ -8,10 +8,24 @@ type
 
   ElementOwner = ref object
     nodes: seq[ElementNode]
+    natural: seq[NaturalSize]
+    rectScratch: seq[Rect]
+    flexSizes, flexBases, flexMin, flexMax, flexFactors: seq[float32]
     generation: uint32
     parent: int32
     inBuild: bool
+    hasFrame: bool
     closed: bool
+
+  UiLengthKind = enum
+    lengthAuto, lengthPixels, lengthPercent
+
+  UiLength = object
+    value: float32
+    kind: UiLengthKind
+
+  NaturalSize = object
+    w, h: float32
 
   Element* = object
     ## A checked 16-byte handle on 64-bit targets; it expires after its build callback.
@@ -22,11 +36,37 @@ type
   ElementNode = object
     parent, firstChild, lastChild, nextSibling: int32
     row: bool
+    width, height, minW, minH, maxW, maxH, basis: UiLength
+    grow, shrink: float32
+    pad, margin: array[4, float32]
+    gapX, gapY: float32
+    justify, align, selfAlign: Align
+
+  LayoutResult* = object
+    ## Snapshot bounds calculated from a completed build.
+    root*: Rect
+    owner: ElementOwner
+    generation: uint32
+    rects: seq[Rect]
 
 proc newContext*(): Context =
   ## Creates a stable context. Call close when its owner shuts down.
   new(result)
   new(result.owner)
+
+proc retire(owner: ElementOwner) =
+  owner.closed = true
+  owner.inBuild = false
+  owner.hasFrame = false
+  owner.parent = -1
+  owner.nodes = @[]
+  owner.natural = @[]
+  owner.rectScratch = @[]
+  owner.flexSizes = @[]
+  owner.flexBases = @[]
+  owner.flexMin = @[]
+  owner.flexMax = @[]
+  owner.flexFactors = @[]
 
 proc node(e: Element): ptr ElementNode =
   if e.owner == nil or e.owner.closed or not e.owner.inBuild or
@@ -45,8 +85,12 @@ proc newElement(c: Context; row: bool): Element =
     raise newException(ValueError, "ui: too many elements in one frame")
 
   let slot = uint32(c.owner.nodes.len)
-  c.owner.nodes.add(ElementNode(parent: c.owner.parent, firstChild: -1,
-                                lastChild: -1, nextSibling: -1, row: row))
+  let node = ElementNode(parent: c.owner.parent, firstChild: -1,
+                         lastChild: -1, nextSibling: -1, row: row,
+                         shrink: 1, justify: Align.Start,
+                         align: if row: Align.Center else: Align.Auto,
+                         selfAlign: Align.Auto)
+  c.owner.nodes.add(node)
   let p = int(c.owner.parent)
   if c.owner.nodes[p].lastChild >= 0:
     c.owner.nodes[int(c.owner.nodes[p].lastChild)].nextSibling = int32(slot)
@@ -88,26 +132,29 @@ proc build*(c: Context; view: proc(c: Context) {.closure.}) =
   if c.owner.inBuild:
     raise newException(ValueError, "ui: nested frame build")
   if c.owner.generation == high(uint32):
-    c.owner.closed = true
+    c.owner.retire()
     new(c.owner)
   inc c.owner.generation
   c.owner.nodes.setLen(0)
   c.owner.nodes.add(ElementNode(parent: -1, firstChild: -1,
-                                lastChild: -1, nextSibling: -1))
+                                lastChild: -1, nextSibling: -1,
+                                shrink: 1, justify: Align.Start,
+                                align: Align.Auto, selfAlign: Align.Auto))
   c.owner.parent = 0
   c.owner.inBuild = true
+  c.owner.hasFrame = false
+  var built = false
   try:
     if view != nil:
       view(c)
+    built = true
   finally:
     c.owner.inBuild = false
     c.owner.parent = -1
+    c.owner.hasFrame = built
 
 proc close*(c: Context) =
   ## Detaches saved handles and releases frame storage when the context closes.
   if c == nil or c.owner.closed:
     return
-  c.owner.closed = true
-  c.owner.inBuild = false
-  c.owner.parent = -1
-  c.owner.nodes.setLen(0)
+  c.owner.retire()
