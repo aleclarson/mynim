@@ -7,6 +7,7 @@ import mynim/internal/platform
 import mynim/internal/surface
 import mynim/internal/raster as raster
 import mynim/internal/text as textStack
+import mynim/internal/svg as svgRenderer
 import mynim/image as sourceImage
 when defined(macosx):
   import mynim/internal/gpu/metal as metalGpu

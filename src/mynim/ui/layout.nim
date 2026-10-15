@@ -86,6 +86,9 @@ proc measureTree(nodes: seq[ElementNode]; natural: var seq[NaturalSize]) =
     if node.bitmap != nil and node.bitmap.image != nil:
       contentW = max(contentW, float32(node.bitmap.image.w))
       contentH = max(contentH, float32(node.bitmap.image.h))
+    if node.vector != nil:
+      contentW = max(contentW, node.vector.width)
+      contentH = max(contentH, node.vector.height)
     var childCount = 0
     var child = int(node.firstChild)
     while child >= 0:
@@ -676,7 +679,7 @@ proc fit*(e: Element; value: Fit): Element =
   ## Sets how a bitmap fills its element.
   result = e
   let n = e.node
-  if n != nil and n.bitmap != nil:
+  if n != nil and (n.bitmap != nil or n.vector != nil):
     n.fit = value
 
 proc pixelated*(e: Element): Element =
@@ -685,6 +688,13 @@ proc pixelated*(e: Element): Element =
   let n = e.node
   if n != nil and n.bitmap != nil:
     n.bitmap.pixelated = true
+
+proc svgColor*(e: Element; value: Color): Element =
+  ## Sets the color SVG shapes use for `currentColor`.
+  result = e
+  let n = e.node
+  if n != nil and n.vector != nil:
+    n.vectorColor = value
 
 proc marginX*(e: Element; value: float32): Element =
   result = e

@@ -38,6 +38,18 @@ type
     image: scene.Image
     pixelated: bool
 
+  Svg* = ref object
+    ## A parsed vector image and its recently rasterized sizes/colors.
+    doc: svgRenderer.Doc
+    width, height: float32
+    pictures: seq[SvgPicture]
+
+  SvgPicture = ref object
+    width, height: int
+    color: Color
+    stretch: bool
+    image: scene.Image
+
   ElementNode = object
     parent, firstChild, lastChild, nextSibling: int32
     row: bool
@@ -48,6 +60,8 @@ type
     shapedText: textStack.Layout
     clickHandler: proc() {.closure.}
     bitmap: Bitmap
+    vector: Svg
+    vectorColor: Color
     fit: Fit
     width, height, minW, minH, maxW, maxH, basis: UiLength
     grow, shrink: float32
@@ -144,12 +158,35 @@ proc pixelated*(bitmap: Bitmap): Bitmap =
   if result != nil:
     result.pixelated = true
 
+proc parseSvg*(data: openArray[byte] | string):
+    tuple[svg: Svg, error: string] =
+  ## Parses an SVG document once for reuse by image elements.
+  let (doc, error) = svgRenderer.parse(data)
+  if error.len > 0:
+    return (nil, error)
+  let (width, height) = svgRenderer.size(doc)
+  (Svg(doc: doc, width: float32(width), height: float32(height)), "")
+
+proc size*(vector: Svg): tuple[width, height: float32] =
+  ## Reports an SVG's intrinsic size in DIPs.
+  if vector != nil:
+    result = (vector.width, vector.height)
+
 proc image*(c: Context; bitmap: Bitmap): Element =
   ## Adds a bitmap element with its natural pixel size in DIPs.
   result = c.newElement(false)
   let n = result.node
   if n != nil:
     n.bitmap = bitmap
+    n.fit = Fit.Contain
+
+proc svg*(c: Context; vector: Svg): Element =
+  ## Adds an SVG element with its intrinsic size in DIPs.
+  result = c.newElement(false)
+  let n = result.node
+  if n != nil:
+    n.vector = vector
+    n.vectorColor = rgb(0, 0, 0)
     n.fit = Fit.Contain
 
 proc text*(c: Context; value: string): Element =

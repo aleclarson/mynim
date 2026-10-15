@@ -208,6 +208,108 @@ proc fitImage(box: Rect; bitmap: Bitmap; fit: Fit):
     result.src = scene.Rect(x: result.rect.x - x, y: result.rect.y - y,
                             w: width, h: height)
 
+proc fitVector(box: Rect; imageW, imageH: float32; fit: Fit):
+    tuple[raw, shown: Rect, src: scene.Rect, stretch: bool] =
+  if imageW <= 0 or imageH <= 0 or box.w <= 0 or box.h <= 0:
+    return
+  result.stretch = fit == Fit.FillBox
+  case fit
+  of Fit.FillBox:
+    result.raw = box
+    result.shown = box
+  of Fit.Contain, Fit.ScaleDown:
+    var factor = min(box.w / imageW, box.h / imageH)
+    if fit == Fit.ScaleDown:
+      factor = min(factor, 1'f32)
+    let width = imageW * factor
+    let height = imageH * factor
+    result.raw = Rect(x: box.x + (box.w - width) / 2,
+                      y: box.y + (box.h - height) / 2,
+                      w: width, h: height)
+    result.shown = result.raw
+  of Fit.Cover:
+    let factor = max(box.w / imageW, box.h / imageH)
+    let width = imageW * factor
+    let height = imageH * factor
+    result.raw = Rect(x: box.x + (box.w - width) / 2,
+                      y: box.y + (box.h - height) / 2,
+                      w: width, h: height)
+    result.shown = box
+  of Fit.NaturalSize:
+    result.raw = Rect(x: box.x + (box.w - imageW) / 2,
+                      y: box.y + (box.h - imageH) / 2,
+                      w: imageW, h: imageH)
+    let x0 = max(result.raw.x, box.x)
+    let y0 = max(result.raw.y, box.y)
+    let x1 = min(result.raw.x + result.raw.w, box.x + box.w)
+    let y1 = min(result.raw.y + result.raw.h, box.y + box.h)
+    if x1 <= x0 or y1 <= y0:
+      return
+    result.shown = Rect(x: x0, y: y0, w: x1 - x0, h: y1 - y0)
+
+  result.src = scene.Rect(x: result.shown.x - result.raw.x,
+    y: result.shown.y - result.raw.y, w: result.shown.w, h: result.shown.h)
+
+proc picture(vector: Svg; width, height: int; color: Color;
+             stretch: bool): scene.Image =
+  if vector == nil or width <= 0 or height <= 0 or width > 4096 or
+      height > 4096 or width > (16 * 1024 * 1024) div height:
+    return
+  let usesColor = svgRenderer.usesCurrentColor(vector.doc)
+  let cacheColor = if usesColor: color.srgb else: transparent
+  for cached in vector.pictures:
+    if cached.width == width and cached.height == height and
+        cached.color == cacheColor and cached.stretch == stretch:
+      return cached.image
+
+  result = scene.newImageRgba(width, height, newSeq[byte](4 * width * height))
+  let current = if usesColor:
+    sourceImage.Nrgba(r: cacheColor.r, g: cacheColor.g,
+                      b: cacheColor.b, a: cacheColor.a)
+  else:
+    sourceImage.Nrgba()
+  let dst = sourceImage.RgbaImage(pix: result.pix, stride: 4 * width,
+    rect: sourceImage.rect(0, 0, width, height))
+  svgRenderer.draw(vector.doc, dst, current, stretch)
+  result.pix = dst.pix
+
+  if vector.pictures.len >= 8:
+    vector.pictures.delete(0)
+  vector.pictures.add(SvgPicture(width: width, height: height,
+    color: cacheColor, stretch: stretch, image: result))
+
+proc paintSvg(s: scene.Scene; node: ElementNode; rect, root: Rect;
+              scale: float32) =
+  if node.vector == nil:
+    return
+  let box = Rect(x: rect.x + node.pad[3] + node.border[3],
+    y: rect.y + node.pad[0] + node.border[0],
+    w: max(rect.w - node.contentInsetX, 0'f32),
+    h: max(rect.h - node.contentInsetY, 0'f32))
+  let fitted = fitVector(box, node.vector.width, node.vector.height, node.fit)
+  if fitted.raw.w <= 0 or fitted.raw.h <= 0 or
+      fitted.shown.w <= 0 or fitted.shown.h <= 0:
+    return
+
+  let rasterRect = fitted.raw.sceneRect(root, scale)
+  let pixelRect = fitted.shown.sceneRect(root, scale)
+  let rasterW = int(rasterRect.w)
+  let rasterH = int(rasterRect.h)
+  if rasterRect.empty or pixelRect.empty or rasterW <= 0 or rasterH <= 0:
+    return
+  let image = node.vector.picture(rasterW, rasterH, node.vectorColor,
+                                  fitted.stretch)
+  if image == nil:
+    return
+  let factorX = rasterW.float32 / fitted.raw.w
+  let factorY = rasterH.float32 / fitted.raw.h
+  let src = scene.Rect(x: fitted.src.x * factorX,
+    y: fitted.src.y * factorY, w: fitted.src.w * factorX,
+    h: fitted.src.h * factorY)
+  s.ops.add(scene.Op(kind: scene.opImage, rect: pixelRect,
+    radii: node.radius.scaledEdges(scale), continuous: continuousCorners,
+    image: image, src: src))
+
 proc paintBitmap(s: scene.Scene; node: ElementNode; rect, root: Rect;
                  scale: float32) =
   if node.bitmap == nil or node.bitmap.image == nil:
@@ -262,7 +364,7 @@ proc paintScene*(layout: LayoutResult; scale = 1'f32;
         let fillVisible = node.background.a > 0
         let borderVisible = node.borderColor.a > 0 and scene.hasBorder(node.border)
         if not fillVisible and not borderVisible and not node.hasText and
-            node.bitmap == nil:
+            node.bitmap == nil and node.vector == nil:
           continue
 
         let rect = layout.rects[slot].sceneRect(layout.root, scale)
@@ -287,6 +389,7 @@ proc paintScene*(layout: LayoutResult; scale = 1'f32;
           result.ops.add(op)
         result.paintText(node, layout.rects[slot], layout.root, scale, system)
         result.paintBitmap(node, layout.rects[slot], layout.root, scale)
+        result.paintSvg(node, layout.rects[slot], layout.root, scale)
 
       if not system.full() or attempt == 2:
         break
