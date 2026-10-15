@@ -2636,14 +2636,40 @@ proc onClick*(e: Element;
     if handler != nil:
       n.focusable = true
 
+proc changed*(e: Element): bool =
+  ## Reports a value change delivered to this element in the current build.
+  let n = e.node
+  n != nil and n[].changed
+
+proc submitted*(e: Element): bool =
+  ## Reports a submission delivered to this element in the current build.
+  let n = e.node
+  n != nil and n[].submitted
+
+proc onChange*(e: Element; action: proc() {.closure.}): Element =
+  ## Runs after text input changes this element, before the next view build.
+  result = e
+  let n = e.node
+  if n != nil and action != nil:
+    e.owner.actions.add(UiAction(identity: n[].identity,
+      generation: e.generation, kind: actionChange, action: action))
+
+proc onSubmit*(e: Element; action: proc() {.closure.}): Element =
+  ## Runs when Enter submits the focused text input on this element.
+  result = e
+  let n = e.node
+  if n != nil and action != nil:
+    e.owner.actions.add(UiAction(identity: n[].identity,
+      generation: e.generation, kind: actionSubmit, action: action))
+
 proc onShortcut*(e: Element; mods: platform.Modifiers; key: platform.Key;
                  action: proc() {.closure.}): Element =
   ## Runs action when this element or one of its descendants has focus.
   result = e
   let n = e.node
   if n != nil and action != nil:
-    e.owner.shortcutActions.add(HandleShortcut(
-      identity: n[].identity, generation: e.generation,
+    e.owner.actions.add(UiAction(
+      identity: n[].identity, generation: e.generation, kind: actionShortcut,
       modifiers: mods, key: key, action: action))
 
 proc label*(e: Element; value: string): Element =

@@ -389,8 +389,9 @@ proc runShortcutAction(rt: Runtime; mods: platform.Modifiers;
       0'u64
   var winner = -1
   var bestDistance = high(int)
-  for index, shortcut in owner.shortcutActions:
-    if shortcut.modifiers != mods or shortcut.key != key or
+  for index, shortcut in owner.actions:
+    if shortcut.kind != actionShortcut or shortcut.modifiers != mods or
+        shortcut.key != key or
         shortcut.identity == 0 or shortcut.generation != owner.generation:
       continue
     if owner.idSlots.getOrDefault(shortcut.identity, -1) < 0:
@@ -414,14 +415,53 @@ proc runShortcutAction(rt: Runtime; mods: platform.Modifiers;
       dec remaining
   if winner < 0:
     return false
-  let action = owner.shortcutActions[winner].action
+  let action = owner.actions[winner].action
   if action == nil:
     return false
   action()
   rt.requestFrame()
   true
 
+proc runElementActions(rt: Runtime; identity: uint64; generation: uint32;
+                       kind: UiActionKind): bool =
+  let owner = rt.context.owner
+  if owner == nil or owner.closed or owner.generation != generation or
+      owner.idSlots.getOrDefault(identity, -1) < 0:
+    return false
+  for index in 0..<owner.actions.len:
+    if rt.closed or owner.closed:
+      return result
+    let action = owner.actions[index]
+    if action.kind == kind and action.identity == identity and
+        action.generation == generation and action.action != nil:
+      action.action()
+      result = true
+
+proc submitFocusedText(rt: Runtime; mods: platform.Modifiers): bool =
+  let owner = rt.context.owner
+  if owner == nil or owner.closed or not owner.focusActive or mods != 0 or
+      rt.focusSlot <= 0 or rt.focusSlot >= owner.nodes.len:
+    return false
+  let node = owner.nodes[rt.focusSlot]
+  if node.textClient == nil:
+    return false
+  let identity = node.identity
+  for action in owner.actions:
+    if action.kind != actionSubmit or action.identity != identity or
+        action.generation != owner.generation:
+      continue
+    let notices = owner.pendingNotices.getOrDefault(identity)
+    if (notices and noticeSubmitted) != 0:
+      return true
+    owner.pendingNotices[identity] =
+      notices or noticeSubmitted
+    discard rt.runElementActions(identity, owner.generation, actionSubmit)
+    rt.requestFrame()
+    return true
+  false
+
 proc updateTextInput(rt: Runtime)
+proc inputChanged(rt: Runtime; slot: int; before: string)
 
 proc inputTarget(adapter: TextInputAdapter): platform.TextInputClient =
   if adapter == nil or adapter.runtime == nil:
@@ -435,10 +475,24 @@ proc inputTarget(adapter: TextInputAdapter): platform.TextInputClient =
     return nil
   adapter.client
 
-proc inputChanged(adapter: TextInputAdapter) =
+proc inputChanged(adapter: TextInputAdapter; before: string) =
   if adapter.inputTarget() != nil:
-    adapter.runtime.requestFrame()
-    adapter.runtime.updateTextInput()
+    adapter.runtime.inputChanged(adapter.slot, before)
+
+proc inputChanged(rt: Runtime; slot: int; before: string) =
+  if rt == nil or rt.closed:
+    return
+  let owner = rt.frameLayout.owner
+  if owner != nil and not owner.closed and slot > 0 and
+      slot < owner.nodes.len and owner.nodes[slot].textClient != nil:
+    let identity = owner.nodes[slot].identity
+    if platform.clientTextContext(owner.nodes[slot].textClient).text != before:
+      let notices = owner.pendingNotices.getOrDefault(identity)
+      if (notices and noticeChanged) == 0:
+        owner.pendingNotices[identity] = notices or noticeChanged
+        discard rt.runElementActions(identity, owner.generation, actionChange)
+  rt.requestFrame()
+  rt.updateTextInput()
 
 method textForRange*(adapter: TextInputAdapter; r: platform.TextRange):
     tuple[s: string, actual: platform.TextRange] =
@@ -464,21 +518,24 @@ method replaceText*(adapter: TextInputAdapter; r: ref platform.TextRange;
                     value: string) =
   let client = adapter.inputTarget()
   if client != nil:
+    let before = platform.clientTextContext(adapter).text
     client.replaceText(r, value)
-    adapter.inputChanged()
+    adapter.inputChanged(before)
 
 method setMarkedText*(adapter: TextInputAdapter; r: ref platform.TextRange;
                       value: string; selected: platform.TextRange) =
   let client = adapter.inputTarget()
   if client != nil:
+    let before = platform.clientTextContext(adapter).text
     client.setMarkedText(r, value, selected)
-    adapter.inputChanged()
+    adapter.inputChanged(before)
 
 method unmarkText*(adapter: TextInputAdapter) =
   let client = adapter.inputTarget()
   if client != nil:
+    let before = platform.clientTextContext(adapter).text
     client.unmarkText()
-    adapter.inputChanged()
+    adapter.inputChanged(before)
 
 method boundsForRange*(adapter: TextInputAdapter; r: platform.TextRange):
     tuple[bounds: platform.RectF, actual: platform.TextRange, ok: bool] =
@@ -960,6 +1017,8 @@ proc event(rt: Runtime; ev: platform.SurfaceEvent): bool =
         rt.refreshPointer()
         rt.requestFrame()
       return true
+    if ev.key == platform.keyEnter and rt.submitFocusedText(ev.mods):
+      return true
     if rt.runShortcutAction(ev.mods, ev.key):
       return true
     var dx, dy, page: float32
@@ -1302,6 +1361,7 @@ proc event(rt: Runtime; ev: platform.SurfaceEvent): bool =
       if owner != nil and slot > 0 and slot < owner.nodes.len and
           owner.nodes[slot].textClient != nil:
         let client = owner.nodes[slot].textClient
+        let before = platform.clientTextContext(client).text
         let (_, actual) = client.textForRange(platform.TextRange(
           start: 0, `end`: high(int)))
         let replacement = new platform.TextRange
@@ -1311,8 +1371,7 @@ proc event(rt: Runtime; ev: platform.SurfaceEvent): bool =
         rt.focusSlot = slot
         rt.keyboardFocusVisible = false
         rt.inputComposition.reset()
-        rt.updateTextInput()
-        rt.requestFrame()
+        rt.inputChanged(slot, before)
         result = true
     return result
   else:

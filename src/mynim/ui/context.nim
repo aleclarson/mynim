@@ -31,10 +31,14 @@ type
   HandleFocusRequest = object
     handleIdentity, identity: uint64
 
-  HandleShortcut = object
+  UiActionKind = enum
+    actionShortcut, actionChange, actionSubmit
+
+  UiAction = object
     handle: HandleState
     identity: uint64
     generation: uint32
+    kind: UiActionKind
     modifiers: platform.Modifiers
     key: platform.Key
     action: proc() {.closure.}
@@ -46,7 +50,8 @@ type
     previousInteraction: Table[uint64, uint8]
     keyedSeen: HashSet[string]
     focusRequests: seq[HandleFocusRequest]
-    shortcutActions: seq[HandleShortcut]
+    actions: seq[UiAction]
+    pendingNotices: Table[uint64, uint8]
     committedRects: seq[Rect]
     focusIdentity: uint64
     focusActive: bool
@@ -139,7 +144,7 @@ type
       listRowHeader, listRowPinnedHeader: bool
     listRowAction: bool
     textAlign: Align
-    hovered, pressed, clicked: bool
+    hovered, pressed, clicked, changed, submitted: bool
     label: string
     textValue: string
     textStyle: textStack.Style
@@ -209,6 +214,8 @@ const
   identityClicked = 1'u8 shl 2
   identityFocused = 1'u8 shl 3
   identityFocusVisible = 1'u8 shl 4
+  noticeChanged = 1'u8 shl 0
+  noticeSubmitted = 1'u8 shl 1
   rootIdentity = 0x6A09E667F3BCC909'u64
   identitySalt = 0xA5A5A5A5A5A5A5A5'u64
   identityGolden = 0x9E3779B97F4A7C15'u64
@@ -298,6 +305,7 @@ proc newContext*(): Context =
   result.owner.identityParents = initTable[uint64, uint64]()
   result.owner.previousInteraction = initTable[uint64, uint8]()
   result.owner.keyedSeen = initHashSet[string]()
+  result.owner.pendingNotices = initTable[uint64, uint8]()
   result.theme = lightTheme()
 
 proc multiplyWrap(a, b: uint64): uint64 {.inline.} =
@@ -343,6 +351,9 @@ proc applyPreviousInteraction(owner: ElementOwner; node: var ElementNode) =
   node.clicked = (state and identityClicked) != 0
   node.focused = (state and identityFocused) != 0
   node.focusVisible = (state and identityFocusVisible) != 0
+  let notices = owner.pendingNotices.getOrDefault(node.identity)
+  node.changed = (notices and noticeChanged) != 0
+  node.submitted = (notices and noticeSubmitted) != 0
 
 proc assignKey(owner: ElementOwner; node: var ElementNode; parent: uint64;
                token: string) =
@@ -554,7 +565,8 @@ proc retire(owner: ElementOwner) =
   owner.previousInteraction.clear()
   owner.keyedSeen.clear()
   owner.focusRequests = @[]
-  owner.shortcutActions = @[]
+  owner.actions = @[]
+  owner.pendingNotices.clear()
   owner.committedRects = @[]
   owner.focusIdentity = 0
   owner.focusActive = false
@@ -623,8 +635,8 @@ proc onShortcut*(handle: var Handle; c: Context; mods: platform.Modifiers;
   if c == nil or c.owner == nil or c.owner.closed or not c.owner.inBuild or
       action == nil:
     return
-  c.owner.shortcutActions.add(HandleShortcut(handle: handle.initState(),
-    modifiers: mods, key: key, action: action))
+  c.owner.actions.add(UiAction(handle: handle.initState(),
+    kind: actionShortcut, modifiers: mods, key: key, action: action))
 
 proc onShortcut*(c: Context; mods: platform.Modifiers; key: platform.Key;
                  action: proc() {.closure.}) =
@@ -635,9 +647,10 @@ proc onShortcut*(c: Context; mods: platform.Modifiers; key: platform.Key;
   let slot = int(c.owner.parent)
   if slot < 0 or slot >= c.owner.nodes.len:
     return
-  c.owner.shortcutActions.add(HandleShortcut(
+  c.owner.actions.add(UiAction(
     identity: c.owner.nodes[slot].identity,
-    generation: c.owner.generation, modifiers: mods, key: key,
+    generation: c.owner.generation, kind: actionShortcut,
+    modifiers: mods, key: key,
     action: action))
 
 proc key*(e: Element; value: string): Element =
@@ -841,8 +854,9 @@ proc build*(c: Context; view: proc(c: Context) {.closure.}) =
     c.owner.identityParents = initTable[uint64, uint64]()
     c.owner.previousInteraction = initTable[uint64, uint8]()
     c.owner.keyedSeen = initHashSet[string]()
+    c.owner.pendingNotices = initTable[uint64, uint8]()
   inc c.owner.generation
-  c.owner.shortcutActions.setLen(0)
+  c.owner.actions.setLen(0)
   c.owner.nodes.setLen(0)
   c.owner.idSlots.clear()
   c.owner.committedRects.setLen(0)
@@ -865,14 +879,15 @@ proc build*(c: Context; view: proc(c: Context) {.closure.}) =
   try:
     if view != nil:
       view(c)
-    for index in 0..<c.owner.shortcutActions.len:
-      if c.owner.shortcutActions[index].handle != nil:
-        let binding = c.owner.shortcutActions[index].handle.handleBinding(
+    for index in 0..<c.owner.actions.len:
+      if c.owner.actions[index].kind == actionShortcut and
+          c.owner.actions[index].handle != nil:
+        let binding = c.owner.actions[index].handle.handleBinding(
           c.owner, false)
         if binding != nil and binding.generation == c.owner.generation:
-          c.owner.shortcutActions[index].identity = binding.identity
-          c.owner.shortcutActions[index].generation = binding.generation
-        c.owner.shortcutActions[index].handle = nil
+          c.owner.actions[index].identity = binding.identity
+          c.owner.actions[index].generation = binding.generation
+        c.owner.actions[index].handle = nil
     for slot, node in c.owner.nodes:
       c.owner.idSlots[node.identity] = slot
     c.owner.identityParents.clear()
@@ -886,7 +901,8 @@ proc build*(c: Context; view: proc(c: Context) {.closure.}) =
     c.owner.parent = -1
     c.owner.hasFrame = built
     if not built:
-      c.owner.shortcutActions.setLen(0)
+      c.owner.actions.setLen(0)
+    c.owner.pendingNotices.clear()
     c.hasPendingKey = false
     c.pendingKey.setLen(0)
     c.owner.previousInteraction.clear()
@@ -900,5 +916,5 @@ proc close*(c: Context) =
   ## Detaches saved handles and releases frame storage when the context closes.
   if c == nil or c.owner.closed:
     return
-  c.owner.shortcutActions.setLen(0)
+  c.owner.actions.setLen(0)
   c.owner.retire()

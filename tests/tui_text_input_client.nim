@@ -74,10 +74,16 @@ app.handleReady()
 let editor = Editor(value: "A😀B",
   selected: ui.TextSelection(`range`: ui.TextRange(start: 3, `end`: 3)))
 var editorFocused, otherFocused: bool
+var changedSeen, submittedSeen: bool
+var changeActions, submitActions: int
 let uiContent = ui.newContent(proc(ctx: ui.Context) =
   discard ctx.column().size(180, 100).padding(8).label("Panel").children(proc() =
     let input = ctx.box().size(100, 30).label("Editor").textInput(editor)
+      .onChange(proc() = inc changeActions)
+      .onSubmit(proc() = inc submitActions)
     editorFocused = input.focused()
+    changedSeen = input.changed()
+    submittedSeen = input.submitted()
     let other = ctx.box().size(100, 30).label("Other")
       .onClick(proc() = discard)
     otherFocused = other.focused()
@@ -89,6 +95,7 @@ let native = fake.windows[^1].surface
 
 doAssert native.frame()
 doAssert not native.lastTextInput().active
+doAssert not changedSeen and not submittedSeen
 doAssert native.send(platform.SurfaceEvent(kind: platform.accessibilityOn))
 let (initialTree, _) = native.accessibility()
 doAssert initialTree != nil and initialTree.nodes.len == 3
@@ -125,37 +132,60 @@ doAssert native.send(platform.SurfaceEvent(kind: platform.textInput,
 doAssert editor.value == "AXB"
 doAssert editor.hasReplacement
 doAssert editor.lastReplacement == ui.TextRange(start: 1, `end`: 3)
+doAssert changeActions == 1
+doAssert native.frame()
+doAssert changedSeen and not submittedSeen
 inputState = native.lastTextInput()
 doAssert inputState.text == "AXB"
 
 doAssert native.send(platform.SurfaceEvent(kind: platform.textComposition,
   text: "e", caret: 1))
 doAssert editor.value == "AXeB" and editor.hasMark
+doAssert changeActions == 1
+doAssert native.frame()
+doAssert not changedSeen and not submittedSeen
 inputState = native.lastTextInput()
 doAssert inputState.text == "AXB"
 doAssert inputState.start == 2 and inputState.`end` == 2
 discard native.send(platform.SurfaceEvent(kind: platform.textComposition))
 doAssert not editor.hasMark and editor.unmarks == 1
+doAssert changeActions == 2
 doAssert native.send(platform.SurfaceEvent(kind: platform.textInput, text: "é"))
 doAssert editor.value == "AXéB"
 doAssert editor.lastReplacement == ui.TextRange(start: 2, `end`: 3)
+doAssert changeActions == 2
+doAssert native.frame()
+doAssert changedSeen and not submittedSeen
 
 let (focusedTree, _) = native.accessibility()
 doAssert native.send(platform.SurfaceEvent(kind: platform.accessAction,
   id: focusedTree.nodes[1].id, action: platform.accessSetValue, text: "value"))
 doAssert editor.value == "value"
+doAssert changeActions == 3
 doAssert native.frame()
+doAssert changedSeen and not submittedSeen
 let (updatedTree, _) = native.accessibility()
 doAssert updatedTree.nodes[1].value == "value"
+
+doAssert native.send(platform.SurfaceEvent(kind: platform.keyPressed,
+  key: platform.keyEnter))
+doAssert submitActions == 1
+doAssert native.send(platform.SurfaceEvent(kind: platform.keyPressed,
+  key: platform.keyEnter))
+doAssert submitActions == 1
+doAssert native.frame()
+doAssert submittedSeen and not changedSeen
 
 doAssert native.send(platform.SurfaceEvent(kind: platform.keyPressed,
   key: platform.keyTab))
 doAssert native.frame()
 doAssert otherFocused and not editorFocused
+doAssert not changedSeen and not submittedSeen
 inputState = native.lastTextInput()
 doAssert not inputState.active and inputState.client == nil
 adapter.replaceText(nil, "stale")
 doAssert editor.value == "value"
+doAssert changeActions == 3 and submitActions == 1
 
 doAssert native.send(platform.SurfaceEvent(kind: platform.keyPressed,
   key: platform.keyTab, mods: platform.modShift))
@@ -166,6 +196,7 @@ inputState = native.lastTextInput()
 doAssert not inputState.active and inputState.client == nil
 adapter.replaceText(nil, "blurred")
 doAssert editor.value == "value"
+doAssert changeActions == 3 and submitActions == 1
 
 win.destroy()
 loop.shutdown()
