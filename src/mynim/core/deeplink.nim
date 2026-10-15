@@ -1,10 +1,37 @@
 ## deeplink.go — URL schemes and files passed to the application.
 
 const
+  ## Set by the app build from mynim.config.ts for packaged metadata.
+  packageName {.strdefine.} = ""
+  packageVersion {.strdefine.} = ""
+  packageIdentifier {.strdefine.} = ""
   ## Set by the app build from mynim.config.ts for schemes and file
   ## associations that are part of the package.
   packageURLSchemes {.strdefine.} = ""
   packageFileExtensions {.strdefine.} = ""
+
+var packageState = block:
+  var s: tuple[mu: Lock, loaded: bool, info: platform.PackageInfo, ok: bool]
+  s.mu.initLock()
+  s
+
+proc packageInfo(): tuple[info: platform.PackageInfo, ok: bool] =
+  ## Returns OS bundle metadata or the values supplied by the app build.
+  packageState.mu.acquire()
+  try:
+    if not packageState.loaded:
+      let (info, ok) = backend().app().package()
+      if ok:
+        packageState.info = info
+        packageState.ok = true
+      elif packageIdentifier != "":
+        packageState.info = platform.PackageInfo(name: packageName,
+          version: packageVersion, identifier: packageIdentifier)
+        packageState.ok = true
+      packageState.loaded = true
+    result = (packageState.info, packageState.ok)
+  finally:
+    packageState.mu.release()
 
 var registeredSchemes = block:
   var s: tuple[mu: Lock, values: HashSet[string]]

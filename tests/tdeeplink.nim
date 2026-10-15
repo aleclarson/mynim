@@ -9,6 +9,13 @@ backendMade = true
 fake.init(AppHandlerImpl(), platform.AppOptions(name: "deeplink test"))
 app.initialized = true
 
+when packageIdentifier == "com.example.mynim":
+  doAssert app.name() == "Configured"
+  doAssert app.version() == "1.2.3"
+  doAssert app.isPackaged()
+else:
+  doAssert not packageInfo().ok
+
 doAssert app.registerURLScheme("mynim-test").isNil
 doAssert app.isURLSchemeRegistered("MYNIM-TEST")
 doAssert not app.isURLSchemeRegistered("bad scheme")

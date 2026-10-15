@@ -17,10 +17,6 @@ proc stopCookieCalls() =
 
 ## --- login.go / updater.go / deeplink.go / tsgen.go / watch.go ---
 
-proc packageInfo(): tuple[info: platform.PackageInfo, ok: bool] =
-  ## pending: login.go — reads the platform's package metadata.
-  (platform.PackageInfo(), false)
-
 proc quitOnSignals() =
   ## pending: signals.go — quits the app on SIGINT/SIGTERM.
   discard
