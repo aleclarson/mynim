@@ -477,6 +477,20 @@ proc dispatchClick(layout: LayoutResult; pressed: Element;
   handler()
   true
 
+proc dispatchAccessPress(layout: LayoutResult; id: uint64): bool =
+  if layout.owner == nil or layout.owner.closed or layout.owner.inBuild or
+      not layout.owner.hasFrame or
+      layout.generation != layout.owner.generation:
+    return false
+  for slot in 1..<layout.owner.nodes.len:
+    if uint64(slot + 1) != id:
+      continue
+    let handler = layout.owner.nodes[slot].clickHandler
+    if handler == nil:
+      return false
+    handler()
+    return true
+
 proc len*(layout: LayoutResult): int = max(layout.rects.len - 1, 0)
 
 proc updateDimension(e: Element; dimension: LayoutDimension;
@@ -702,6 +716,13 @@ proc onClick*(e: Element; handler: proc() {.closure.}): Element =
   let n = e.node
   if n != nil:
     n.clickHandler = handler
+
+proc label*(e: Element; value: string): Element =
+  ## Gives an element an accessible name.
+  result = e
+  let n = e.node
+  if n != nil:
+    n.label = value
 
 proc fit*(e: Element; value: Fit): Element =
   ## Sets how an image fills its element.

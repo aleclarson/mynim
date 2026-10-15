@@ -54,6 +54,7 @@ type
     parent, firstChild, lastChild, nextSibling: int32
     row: bool
     hasText: bool
+    label: string
     textValue: string
     textStyle: textStack.Style
     textColor: Color

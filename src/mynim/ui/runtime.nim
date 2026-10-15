@@ -15,6 +15,7 @@ type
     pressTarget: Element
     frameScene: scene.Scene
     hasScene: bool
+    accessibilityOn: bool
     inFrame, closed, ready, gpuTried: bool
     gpuError: string
     software: raster.Renderer
@@ -118,6 +119,50 @@ proc present(rt: Runtime; frame: scene.Scene) =
   let image = rt.software.image
   rt.conn.surface.presentPixels(image.pix, image.stride, image.w, image.h)
 
+proc accessibilityTree(layout: LayoutResult): platform.AccessTree =
+  let owner = layout.owner
+  if owner == nil or owner.closed or layout.generation != owner.generation or
+      layout.rects.len != owner.nodes.len:
+    return
+  var accessIndex = newSeq[int](owner.nodes.len)
+  for index in accessIndex.mitems:
+    index = -1
+  for slot in 1..<owner.nodes.len:
+    let node = owner.nodes[slot]
+    let image = node.bitmap != nil or node.vector != nil
+    if image and node.label.len == 0:
+      continue
+    if not image and not node.hasText and node.clickHandler == nil and
+        node.label.len == 0:
+      continue
+
+    let role = if node.clickHandler != nil:
+        platform.roleButton
+      elif node.hasText:
+        platform.roleText
+      elif image:
+        platform.roleImage
+      else:
+        platform.roleGroup
+    var label = node.label
+    if label.len == 0 and node.hasText:
+      label = node.textValue
+    let parentSlot = int(node.parent)
+    let parent = if parentSlot >= 0: accessIndex[parentSlot] else: -1
+    let rect = layout.rects[slot]
+    var accessible = platform.AccessNode(id: uint64(slot + 1),
+      parent: parent, role: role, label: label,
+      bounds: platform.RectF(x: rect.x.float64, y: rect.y.float64,
+        w: rect.w.float64, h: rect.h.float64))
+    if role == platform.roleButton:
+      accessible.actions = platform.actionPress
+    result.nodes.add(accessible)
+    accessIndex[slot] = result.nodes.high
+
+proc updateAccessibility(rt: Runtime) =
+  if rt.accessibilityOn and rt.conn.surface != nil:
+    rt.conn.surface.updateAccessibility(rt.frameLayout.accessibilityTree())
+
 proc renderFrame(rt: Runtime; presentFrame = true) =
   if rt.closed or rt.inFrame:
     return
@@ -138,6 +183,7 @@ proc renderFrame(rt: Runtime; presentFrame = true) =
   rt.frameLayout = layout
   rt.frameScene = layout.paintScene(scale)
   rt.hasScene = true
+  rt.updateAccessibility()
   if presentFrame:
     rt.present(rt.frameScene)
 
@@ -181,6 +227,16 @@ proc event(rt: Runtime; ev: platform.SurfaceEvent): bool =
   of platform.surfaceBlur:
     rt.pressTarget = Element()
     false
+  of platform.accessibilityOn:
+    rt.accessibilityOn = true
+    rt.updateAccessibility()
+    true
+  of platform.accessAction:
+    if ev.action == platform.accessPress:
+      result = rt.frameLayout.dispatchAccessPress(ev.id)
+      if result:
+        rt.requestFrame()
+    return result
   else:
     false
 
