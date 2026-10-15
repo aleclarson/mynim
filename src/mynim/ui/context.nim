@@ -8,6 +8,7 @@ type
     theme: Theme
     treeState: TreeState
     checkboxGroup: CheckboxGroupBuild
+    segmentedToggles: bool
     pendingKey: string
     rightToLeft: bool
     hasPendingKey: bool

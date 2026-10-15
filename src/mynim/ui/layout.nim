@@ -2708,6 +2708,25 @@ proc switchBase*(c: Context; on: var bool): Element =
     if on:
       n.accessExtraStates = n.accessExtraStates or platform.accessChecked
 
+proc toggleBase*(c: Context; on: var bool): Element =
+  ## Creates a toggle button without a look. Pointer or Space activation
+  ## changes on and reports changed() in this build; set a label for access.
+  result = c.row().focusable()
+  let node = result.node
+  if node == nil:
+    return
+  result = result.onClick(proc() = discard)
+  let n = result.node
+  if n != nil:
+    if n[].clicked:
+      on = not on
+      result.markBoundValueChanged()
+    n.activateEnter = false
+    n.accessRole = platform.roleToggleButton
+    n.accessRoleSet = true
+    if on:
+      n.accessExtraStates = n.accessExtraStates or platform.accessChecked
+
 proc radioBase*[T](c: Context; selected: var T; value: T): Element =
   ## Creates a radio option without a look. Style its contents and set a
   ## label; pointer, Space, or accessibility activation selects value and

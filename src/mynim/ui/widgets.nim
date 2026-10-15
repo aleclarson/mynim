@@ -96,6 +96,90 @@ proc checkboxGroup*(c: Context; label: string;
       group.markBoundValueChanged()
   )
 
+proc toggle*(c: Context; on: var bool; label: string): Element =
+  ## Creates a themed toggle button. Use toggleGroup to join toggles into a
+  ## single keyboard stop.
+  let theme = c.theme
+  var frameOn = on
+  result = c.toggleBase(frameOn).gap(theme.space(1.5))
+  if result.changed():
+    on = frameOn
+  result = result.label(label)
+  let wasHovered = result.hovered()
+  result = result.padding(theme.space(1), theme.space(2)).center()
+  if c.segmentedToggles:
+    result = result.radius(max(theme.radius - theme.space(0.5), 0'f32))
+      .background(if frameOn:
+        (if theme.dark: theme.surfacePressed else: theme.background)
+      elif wasHovered: theme.surfaceHover else: rgba(0, 0, 0, 0))
+  else:
+    result = result.radius(theme.radius)
+      .background(if frameOn: theme.surfacePressed
+        elif wasHovered: theme.surfaceHover else: theme.surface)
+      .border(1, theme.border)
+  if label.len > 0:
+    result = result.children(proc() = discard c.text(label))
+
+proc toggleGroup*(c: Context; build: proc() {.closure.}): Element =
+  ## Builds toggle buttons as joined segments with one Tab stop.
+  let theme = c.theme
+  result = c.row().shrink(0).alignItems(Align.Stretch)
+    .padding(theme.space(0.5)).gap(theme.space(0.5))
+    .radius(theme.radius).background(theme.surface)
+    .border(1, theme.border).focusGroup(FocusOrientation.Both)
+  let previous = c.segmentedToggles
+  c.segmentedToggles = true
+  try:
+    result = result.children(build)
+  finally:
+    c.segmentedToggles = previous
+
+proc segmented*(c: Context; selected: var int;
+                labels: openArray[string]): Element =
+  ## Creates a radio-style segmented control whose selected index changes on
+  ## click or group arrow navigation. Set its accessible name with label().
+  let theme = c.theme
+  let segmentLabels = @labels
+  var frameSelection = selected
+  if segmentLabels.len > 0:
+    frameSelection = max(0, min(frameSelection, segmentLabels.high))
+    selected = frameSelection
+  result = c.row().shrink(0).alignItems(Align.Stretch)
+    .padding(theme.space(0.5)).gap(theme.space(0.5))
+    .radius(theme.radius).background(theme.surface)
+    .border(1, theme.border)
+    .focusGroup(FocusOrientation.Both, selects = true)
+  let track = result
+  let node = track.node
+  if node != nil:
+    node.accessRole = platform.roleRadioGroup
+    node.accessRoleSet = true
+  var selectionChanged = false
+  result = result.children(proc() =
+    for index, label in segmentLabels:
+      var segment = c.radioBase(frameSelection, index)
+        .gap(theme.space(1.5)).padding(theme.space(1), theme.space(3))
+        .radius(max(theme.radius - theme.space(0.5), 0'f32))
+        .center().focusRing(false)
+      let segmentNode = segment.node
+      if segmentNode != nil:
+        segmentNode.accessExtraStates =
+          segmentNode.accessExtraStates or platform.accessSegment
+      if segment.changed():
+        selectionChanged = true
+      let isSelected = frameSelection == index
+      segment = segment.label(label).background(if isSelected:
+        (if theme.dark: theme.surfacePressed else: theme.background)
+      elif segment.hovered(): theme.surfaceHover else: rgba(0, 0, 0, 0))
+      if isSelected:
+        segment = segment.shadow(0, 1, 2, 0,
+          rgba(0, 0, 0, 0.12'f32))
+      discard segment.children(proc() = discard c.text(label))
+  )
+  if selectionChanged:
+    selected = frameSelection
+    track.markBoundValueChanged()
+
 proc radio*[T](c: Context; selected: var T; value: T;
                label: string): Element =
   ## Creates a themed radio option with a label.
