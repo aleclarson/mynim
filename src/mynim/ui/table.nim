@@ -261,6 +261,7 @@ proc tableCells(c: Context; state: ListState;
         box.node.label = column.title
       box.node.tableState = state
       box.node.tableColumnId = column.columnId
+      box.node.tableColumnIndex = columnIndex
       box.node.tableColumnFixed = column.fixed
       box.node.tableColumnHeader = role == platform.roleColumnHeader
       box.node.tableColumnFlexible = not size.fixed
@@ -314,6 +315,8 @@ proc table*(c: Context; state: ListState; columns: openArray[TableColumn];
     if header.node != nil:
       header.node.accessRole = platform.roleRow
       header.node.accessRoleSet = true
+      header.node.tableState = state
+      header.node.tableHeaderMenuArea = true
     discard header.children(proc() =
       c.tableCells(state, columnList, order, state.columns, flexMin,
         platform.roleColumnHeader, proc(index: int; box: Element) =

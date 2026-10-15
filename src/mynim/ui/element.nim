@@ -106,6 +106,18 @@ type
   ListRowHeader* = proc(row: int): bool {.closure.} ## Marks section header rows.
   ListRowReorder* = proc(rows: seq[int]; beforeRow: int) {.closure.}
     ## Receives ordered row indices and the insertion index; rowCount means end.
+  MenuSession = ref object
+    nextId, chosenId: int
+    chosenLabel: string
+    choiceSeen: bool
+  Menu* = ref object ## A native menu being built for a table header.
+    snapshot: platform.Menu
+    session: MenuSession
+  MenuItem* = ref object ## One item in a UI menu.
+    owner: Menu
+    snapshot: platform.MenuItem
+  TableHeaderMenu* = proc(menu: Menu; column: int) {.closure.}
+    ## Builds a header menu; column is the original index, or -1 past columns.
   ListRowAccess = object
     role: platform.AccessRole
     level: int
@@ -179,6 +191,7 @@ type
     columns*: TableLayout ## Saved table column order and user widths.
     sort*: SortOrder ## Primary table sort; title fallback uses column ID.
     sortBy*: seq[SortOrder] ## Optional ordered, multi-column sort.
+    headerMenu*: TableHeaderMenu ## Builds a context menu for a table header.
     multiSort*: bool ## Keeps multi-sort enabled when sortBy is empty.
     tableRowsRole: bool
     outlineMode: bool

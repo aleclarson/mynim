@@ -656,6 +656,49 @@ proc beginTableResize(rt: Runtime; target: Element): bool =
     slot = int(node.parent)
   false
 
+proc showTableHeaderMenu(rt: Runtime; target: Element;
+                         x, y: float32): bool =
+  if target.owner == nil or target.owner != rt.frameLayout.owner or
+      rt.conn.popupMenu == nil:
+    return false
+  var slot = int(target.slot)
+  var state: ListState
+  var column = -1
+  var rightToLeft = false
+  while slot > 0 and slot < target.owner.nodes.len:
+    let node = target.owner.nodes[slot]
+    if node.tableState != nil and node.tableColumnHeader:
+      state = node.tableState
+      column = node.tableColumnIndex
+      rightToLeft = node.rightToLeft
+      break
+    if state == nil and node.tableHeaderMenuArea:
+      state = node.tableState
+      rightToLeft = node.rightToLeft
+    slot = int(node.parent)
+  if state == nil or state.headerMenu == nil:
+    return false
+
+  let build = state.headerMenu
+  let opening = newUiMenu(0, "", rightToLeft)
+  build(opening, column)
+  if opening.snapshot.items.len > 0:
+    rt.conn.popupMenu(opening.snapshot, float64(x), float64(y),
+      proc(id: int) =
+        if rt.closed:
+          return
+        var chosenLabel = ""
+        for item in opening.snapshot.items:
+          if item.id == id:
+            chosenLabel = item.label
+            break
+        let selection = newUiMenu(id, chosenLabel, rightToLeft)
+        build(selection, column)
+        if selection.session.choiceSeen:
+          rt.requestFrame()
+    )
+  true
+
 proc listReorderTarget(rt: Runtime; state: ListState) =
   if state == nil or rt.frameLayout.owner == nil:
     return
@@ -875,6 +918,21 @@ proc event(rt: Runtime; ev: platform.SurfaceEvent): bool =
       rt.requestFrame()
     false
   of platform.pointerDown:
+    var contextClick = ev.button == 1
+    when defined(macosx):
+      if ev.button == 0 and (ev.mods and platform.modCtrl) != 0:
+        contextClick = true
+    if contextClick:
+      let previousHover = rt.hoverSlots
+      rt.pointerX = float32(ev.x)
+      rt.pointerY = float32(ev.y)
+      rt.hasPointer = true
+      rt.refreshPointer()
+      let target = rt.frameLayout.targetAt(rt.pointerX, rt.pointerY)
+      if rt.showTableHeaderMenu(target, rt.pointerX, rt.pointerY):
+        if rt.hoverSlots != previousHover:
+          rt.requestFrame()
+        return true
     if ev.button != 0:
       return false
     let previousHover = rt.hoverSlots
