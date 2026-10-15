@@ -33,10 +33,6 @@ proc relaunchNow() =
   ## pending: updater.go — relaunches the app after an update.
   discard
 
-proc launchArgs() =
-  ## pending: deeplink.go — delivers a deep link the OS launched with.
-  discard
-
 proc writeTypeScript*(outPath: string) =
   ## pending: tsgen.go — generates the TypeScript client for bound
   ## methods and events.

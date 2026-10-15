@@ -17,6 +17,7 @@ import mynim/internal/platform, mynim/internal/callcontext,
        mynim/internal/accelerator, mynim/internal/bridge,
        mynim/internal/surface, mynim/internal/l10n, mynim/i18n
 import mynim/internal/vfs, mynim/internal/unsupported
+import mynim/internal/launchargs as launchargs
 export newUnsupportedBackend
 when defined(emscripten):
   import mynim/internal/web
@@ -41,6 +42,7 @@ include mynim/core/ipc
 include mynim/core/window
 include mynim/core/protocol
 include mynim/core/app
+include mynim/core/deeplink
 include mynim/core/clipboard
 include mynim/core/menu
 include mynim/core/modules
