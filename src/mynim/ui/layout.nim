@@ -2636,6 +2636,29 @@ proc onClick*(e: Element;
     if handler != nil:
       n.focusable = true
 
+proc checkboxBase*(c: Context; checked: var bool): Element =
+  ## Creates a check box without a look. Style its contents and set a label;
+  ## pointer or Space activation toggles checked and reports changed().
+  let value = addr checked
+  result = c.row().focusable()
+  let owner = result.owner
+  let generation = result.generation
+  let node = result.node
+  if node == nil:
+    return
+  let identity = node[].identity
+  result = result.onClick(proc() =
+    value[] = not value[]
+    discard owner.notifyAction(identity, generation, actionChange)
+  )
+  let n = result.node
+  if n != nil:
+    n.activateEnter = false
+    n.accessRole = platform.roleCheckBox
+    n.accessRoleSet = true
+    if value[]:
+      n.accessExtraStates = n.accessExtraStates or platform.accessChecked
+
 proc changed*(e: Element): bool =
   ## Reports a value change delivered to this element in the current build.
   let n = e.node
@@ -2647,7 +2670,7 @@ proc submitted*(e: Element): bool =
   n != nil and n[].submitted
 
 proc onChange*(e: Element; action: proc() {.closure.}): Element =
-  ## Runs after text input changes this element, before the next view build.
+  ## Runs after input changes this element, before the next view build.
   result = e
   let n = e.node
   if n != nil and action != nil:

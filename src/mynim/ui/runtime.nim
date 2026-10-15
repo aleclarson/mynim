@@ -206,6 +206,18 @@ proc clickableSlot(layout: LayoutResult; slot: int): bool =
     layout.generation == owner.generation and slot > 0 and
     slot < owner.nodes.len and owner.nodes[slot].clickHandler != nil
 
+proc keyboardActivationSlot(layout: LayoutResult; slot: int;
+                            key: platform.Key): bool =
+  if not layout.clickableSlot(slot):
+    return false
+  case key
+  of platform.keyEnter:
+    layout.owner.nodes[slot].activateEnter
+  of platform.keySpace:
+    true
+  else:
+    false
+
 proc nextFocusSlot(layout: LayoutResult; current: int; reverse: bool): int =
   let owner = layout.owner
   if owner == nil or owner.closed or owner.inBuild or not owner.hasFrame or
@@ -422,21 +434,6 @@ proc runShortcutAction(rt: Runtime; mods: platform.Modifiers;
   rt.requestFrame()
   true
 
-proc runElementActions(rt: Runtime; identity: uint64; generation: uint32;
-                       kind: UiActionKind): bool =
-  let owner = rt.context.owner
-  if owner == nil or owner.closed or owner.generation != generation or
-      owner.idSlots.getOrDefault(identity, -1) < 0:
-    return false
-  for index in 0..<owner.actions.len:
-    if rt.closed or owner.closed:
-      return result
-    let action = owner.actions[index]
-    if action.kind == kind and action.identity == identity and
-        action.generation == generation and action.action != nil:
-      action.action()
-      result = true
-
 proc submitFocusedText(rt: Runtime; mods: platform.Modifiers): bool =
   let owner = rt.context.owner
   if owner == nil or owner.closed or not owner.focusActive or mods != 0 or
@@ -451,11 +448,8 @@ proc submitFocusedText(rt: Runtime; mods: platform.Modifiers): bool =
         action.generation != owner.generation:
       continue
     let notices = owner.pendingNotices.getOrDefault(identity)
-    if (notices and noticeSubmitted) != 0:
-      return true
-    owner.pendingNotices[identity] =
-      notices or noticeSubmitted
-    discard rt.runElementActions(identity, owner.generation, actionSubmit)
+    if (notices and noticeSubmitted) == 0:
+      discard owner.notifyAction(identity, owner.generation, actionSubmit)
     rt.requestFrame()
     return true
   false
@@ -487,10 +481,7 @@ proc inputChanged(rt: Runtime; slot: int; before: string) =
       slot < owner.nodes.len and owner.nodes[slot].textClient != nil:
     let identity = owner.nodes[slot].identity
     if platform.clientTextContext(owner.nodes[slot].textClient).text != before:
-      let notices = owner.pendingNotices.getOrDefault(identity)
-      if (notices and noticeChanged) == 0:
-        owner.pendingNotices[identity] = notices or noticeChanged
-        discard rt.runElementActions(identity, owner.generation, actionChange)
+      discard owner.notifyAction(identity, owner.generation, actionChange)
   rt.requestFrame()
   rt.updateTextInput()
 
@@ -1009,7 +1000,7 @@ proc event(rt: Runtime; ev: platform.SurfaceEvent): bool =
       return true
     if ev.key in {platform.keyEnter, platform.keySpace} and
         ev.mods == 0 and rt.focusSlot > 0 and
-        rt.frameLayout.clickableSlot(rt.focusSlot):
+        rt.frameLayout.keyboardActivationSlot(rt.focusSlot, ev.key):
       if not ev.repeat:
         rt.keyPressSlot = rt.focusSlot
         rt.keyPressKey = ev.key
@@ -1056,7 +1047,7 @@ proc event(rt: Runtime; ev: platform.SurfaceEvent): bool =
     if ev.key == rt.keyPressKey and rt.keyPressSlot > 0:
       let slot = rt.keyPressSlot
       let activate = rt.focusSlot == slot and
-        rt.frameLayout.clickableSlot(slot)
+        rt.frameLayout.keyboardActivationSlot(slot, rt.keyPressKey)
       rt.cancelKeyPress()
       if activate:
         let handler = rt.frameLayout.owner.nodes[slot].clickHandler

@@ -133,8 +133,8 @@ type
     keyed: bool
     keyScope: string
     row, reverse, wrap, wrapReverse, grid, absolute, alignSet,
-      justifySet, focusable, focused, focusVisible, focusRingDisabled,
-      scrollX, scrollY,
+      justifySet, focusable, activateEnter, focused, focusVisible,
+      focusRingDisabled, scrollX, scrollY,
       revealInScroll, rightToLeft, directionSet: bool
     logical: uint8
     clipX, clipY, hasFollowScroll: bool
@@ -354,6 +354,32 @@ proc applyPreviousInteraction(owner: ElementOwner; node: var ElementNode) =
   let notices = owner.pendingNotices.getOrDefault(node.identity)
   node.changed = (notices and noticeChanged) != 0
   node.submitted = (notices and noticeSubmitted) != 0
+
+proc notifyAction(owner: ElementOwner; identity: uint64; generation: uint32;
+                  kind: UiActionKind): bool =
+  if owner == nil or owner.closed or owner.generation != generation or
+      owner.idSlots.getOrDefault(identity, -1) < 0:
+    return false
+  let bit = case kind
+    of actionChange: noticeChanged
+    of actionSubmit: noticeSubmitted
+    of actionShortcut: 0'u8
+  if bit == 0:
+    return false
+  let notices = owner.pendingNotices.getOrDefault(identity)
+  if (notices and bit) != 0:
+    return false
+  owner.pendingNotices[identity] = notices or bit
+  var callbacks: seq[proc() {.closure.}]
+  for action in owner.actions:
+    if action.kind == kind and action.identity == identity and
+        action.generation == generation and action.action != nil:
+      callbacks.add(action.action)
+  for callback in callbacks:
+    if owner.closed or owner.generation != generation:
+      break
+    callback()
+  true
 
 proc assignKey(owner: ElementOwner; node: var ElementNode; parent: uint64;
                token: string) =
@@ -699,6 +725,7 @@ proc newElement(c: Context; row: bool;
                          pressed: index in c.owner.pressedSlots,
                          clicked: index in c.owner.clickedSlots,
                          focused: index in c.owner.focusedSlots,
+                         activateEnter: true,
                          focusVisible: index in c.owner.focusVisibleSlots,
                          focusRingColor: c.theme.focus,
                          scrollbarColor: c.theme.scrollbar,
