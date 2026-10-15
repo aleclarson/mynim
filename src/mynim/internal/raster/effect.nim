@@ -15,6 +15,7 @@ type
   bandJob = object
     ## What the bands of drawOps draw: operations first to last of s
     ## within area, in bands of rows rows.
+    renderers: seq[renderer]
     dst: ptr Image
     s: scene.Scene
     area: image.Rectangle
@@ -147,6 +148,11 @@ proc line(bd: var backdrop; member, i: int) =
   else:
     bd.blur(img.pix, bd.tmp, 4 * img.w, 4, img.h, i)
 
+proc backdropLineWork(context: pointer; member, part: int)
+    {.gcsafe, nimcall.} =
+  {.cast(gcsafe).}:
+    line(cast[ptr backdrop](context)[], member, part)
+
 proc run(bd: var backdrop; pass, n, work: int) =
   ## Does lines 0 to n-1 of pass, each work texels times taps, on
   ## several cores when they are worth it.
@@ -157,10 +163,13 @@ proc run(bd: var backdrop; pass, n, work: int) =
     for i in 0 ..< n:
       bd.line(0, i)
     return
-  bd.lines.`do` = proc(member, part: int) {.gcsafe.} =
-    {.cast(gcsafe).}:
-      bd.line(member, part)
-  bd.lines.run(workers, n)
+  bd.lines.work = backdropLineWork
+  bd.lines.context = addr bd
+  try:
+    bd.lines.run(workers, n)
+  finally:
+    bd.lines.work = nil
+    bd.lines.context = nil
 
 proc read(bd: var backdrop; dst: ptr Image; b: scene.Backdrop) =
   ## Computes the backdrop b of dst.

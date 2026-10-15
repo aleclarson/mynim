@@ -620,14 +620,19 @@ proc render(r: var renderer; dst: ptr Image; s: scene.Scene;
         r.clips.setLen(r.clips.len - 1)
         r.updateBounds()
 
-proc band(d: var drawer; member, part: int) =
-  ## Draws band part of d.job with the renderer of member.
-  let j = addr d.job
+proc band(j: ptr bandJob; member, part: int) =
+  ## Draws one band with its renderer. The job remains owned by drawer
+  ## until every worker has joined.
   var band = j.area
   band.min.y = j.area.min.y + part * j.rows
   band.max.y = min(band.min.y + j.rows, j.area.max.y)
-  d.rs[member].render(j.dst, j.s, band, j.bounds, j.first, j.last,
-                      j.px, j.b)
+  j.renderers[member].render(j.dst, j.s, band, j.bounds, j.first,
+                             j.last, j.px, j.b)
+
+proc drawBandWork(context: pointer; member, part: int)
+    {.gcsafe, nimcall.} =
+  {.cast(gcsafe).}:
+    cast[ptr bandJob](context).band(member, part)
 
 proc drawOps(d: var drawer; dst: ptr Image; s: scene.Scene;
              area: image.Rectangle; bounds: seq[image.Rectangle];
@@ -652,13 +657,17 @@ proc drawOps(d: var drawer; dst: ptr Image; s: scene.Scene;
   if n2 == 1:
     d.rs[0].render(dst, s, area, bounds, first, last, px, b)
     return
-  d.job = bandJob(dst: dst, s: s, area: area, bounds: bounds,
-                  first: first, last: last, rows: rows, px: px, b: b)
-  d.bands.`do` = proc(member, part: int) {.gcsafe.} =
-    {.cast(gcsafe).}:
-      d.band(member, part)
-  d.bands.run(n2, bands)
-  d.job = bandJob()
+  d.job = bandJob(renderers: d.rs, dst: dst, s: s, area: area,
+                  bounds: bounds, first: first, last: last, rows: rows,
+                  px: px, b: b)
+  d.bands.work = drawBandWork
+  d.bands.context = cast[pointer](addr d.job)
+  try:
+    d.bands.run(n2, bands)
+  finally:
+    d.bands.work = nil
+    d.bands.context = nil
+    d.job = bandJob()
 
 proc draw*(d: var drawer; dst: ptr Image; s: scene.Scene;
            area: image.Rectangle; bounds: seq[image.Rectangle]) =

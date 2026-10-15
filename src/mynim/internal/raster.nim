@@ -4,7 +4,7 @@
 ## rectangles, so edges, corners and clips are anti-aliased the way
 ## the GPU shaders do it (internal/raster).
 
-import std/[math, locks, atomics, tables, cpuinfo]
+import std/[math, atomics, tables, cpuinfo]
 import scene
 import ../image
 

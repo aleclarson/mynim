@@ -88,6 +88,11 @@ proc row(m: var clipMasker; member, y: int) =
     m.dst.pix[at + 3] = to8(cov)
     inc x
 
+proc clipMaskRowWork(context: pointer; member, part: int)
+    {.gcsafe, nimcall.} =
+  {.cast(gcsafe).}:
+    row(cast[ptr clipMasker](context)[], member, part)
+
 proc clipMask*(dst: scene.Image; clips: seq[scene.ClipShape];
                area: image.Rectangle): scene.Image =
   ## Updates a retained coverage image for nested clips in area. GPU
@@ -140,8 +145,11 @@ proc clipMask*(dst: scene.Image; clips: seq[scene.ClipShape];
       m.row(0, y)
   else:
     var t: team
-    t.`do` = proc(member, part: int) {.gcsafe.} =
-      {.cast(gcsafe).}:
-        m.row(member, part)
-    t.run(workers, h)
+    t.work = clipMaskRowWork
+    t.context = addr m
+    try:
+      t.run(workers, h)
+    finally:
+      t.work = nil
+      t.context = nil
   result.changed()

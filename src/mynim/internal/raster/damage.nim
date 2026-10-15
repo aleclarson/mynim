@@ -239,21 +239,21 @@ proc diff(r: var Renderer; s: scene.Scene): bool =
   let (colorRects, ok2) = r.color.changes(s.colorAtlas)
   if not ok2:
     return false
-  let same = proc(i, j: int): bool =
-    r.same(i, s, j, maskRects, colorRects)
   let
     n = r.ops.len
     m = s.ops.len
   var pre = 0
-  while pre < n and pre < m and same(pre, pre):
+  while pre < n and pre < m and
+      r.same(pre, s, pre, maskRects, colorRects):
     inc pre
   var suf = 0
-  while suf < n - pre and suf < m - pre and same(n - 1 - suf, m - 1 - suf):
+  while suf < n - pre and suf < m - pre and
+      r.same(n - 1 - suf, s, m - 1 - suf, maskRects, colorRects):
     inc suf
   r.damage.setLen(0)
   if n == m:
     for k in pre ..< n - suf:
-      if not same(k, k):
+      if not r.same(k, s, k, maskRects, colorRects):
         r.damage = addRect(r.damage, r.bounds[k])
         r.damage = addRect(r.damage, r.next[k])
   else:
