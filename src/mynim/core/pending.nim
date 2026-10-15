@@ -18,10 +18,6 @@ proc stopCookieCalls() =
 ## --- login.go / updater.go / deeplink.go / tsgen.go / watch.go ---
 
 
-proc writeTypeScript*(outPath: string) =
-  ## pending: tsgen.go — generates the TypeScript client for bound
-  ## methods and events.
-  raise errUnsupported()
 
 proc stopFileWatches() =
   ## pending: watch.go — stops fsnotify watchers on quit.

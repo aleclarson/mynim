@@ -5,10 +5,9 @@
 ## `bind` takes the service's name and its methods, each of which
 ## receives a CallContext (the calling window and page, and the call's
 ## cancellation context) and the call's arguments as JSON, and returns
-## its result as JSON or an error. A `bind` macro that derives the table
-## from a type's methods comes with the TypeScript generator; until
-## then apps register methods by hand, which is what the generated
-## client's calls resolve to either way.
+## its result as JSON or an error. Since that handler signature does not
+## retain Nim argument types, `bindTypeScript` supplies optional client
+## signatures; unannotated methods remain `unknown` in the generated client.
 
 type
   CallContext* = ref object
@@ -26,6 +25,16 @@ type
     ## Runs on a call thread: shared state it touches is its own to
     ## guard.
 
+  TypeScriptParam* = object
+    ## Type metadata for one argument of a bound method. Supply the
+    ## TypeScript type expression used by the generated client.
+    name*: string
+      ## The argument name; empty uses `argN`.
+    tsType*: string
+      ## The TypeScript type expression, e.g. `string` or `{ id: number }`.
+    channel*: bool
+      ## Wraps the type in `Channel<...>` and marks the IPC argument as a channel.
+
   IpcMethod = object
     service*, name*: string
     fn*: BoundMethod
@@ -33,6 +42,9 @@ type
     ## any is (streams).
     chans: seq[bool]
     streams: bool
+    tsParams: seq[TypeScriptParam]
+    tsResult: string
+    hasTsSignature: bool
 
   IpcService = object
     name*: string
@@ -41,6 +53,7 @@ type
 
   EventInfo = object
     name: string
+    tsType: string
 
 var ipcMu: Lock
 var ipcServices: seq[ref IpcService]
@@ -93,12 +106,49 @@ proc bindChannels*(service, meth: string; positions: openArray[int]) =
   defer: release(ipcMu)
   let mi = ipcMethods.getOrDefault(service & "." & meth)
   if mi == nil: return
-  var chans = newSeq[bool](positions.len)
-  for i, p in positions.pairs:
-    chans[i] = true
-    discard p
+  var chans: seq[bool]
+  for p in positions:
+    if p < 0:
+      raise newException(ValueError, "mynim: channel argument position cannot be negative")
+    if mi.hasTsSignature and p >= mi.tsParams.len:
+      raise newException(ValueError,
+        "mynim: channel argument position is outside the TypeScript signature")
+    if p >= chans.len:
+      chans.setLen(p + 1)
+    chans[p] = true
+  if mi.hasTsSignature:
+    chans.setLen(mi.tsParams.len)
+    for i in 0 ..< mi.tsParams.len:
+      mi.tsParams[i].channel = chans[i]
   mi.chans = chans
   mi.streams = positions.len > 0
+
+proc bindTypeScript*(service, meth: string;
+    params: openArray[TypeScriptParam]; resultType = "void") =
+  ## Adds TypeScript parameter and result types to a method registered
+  ## with `bind`. The values are TypeScript type expressions; this API
+  ## is needed because a BoundMethod's JSON signature does not retain
+  ## the Nim types behind its handler.
+  if resultType.strip().len == 0:
+    raise newException(ValueError, "mynim: TypeScript result type cannot be empty")
+  var chans = newSeq[bool](params.len)
+  for i, p in params.pairs:
+    if p.tsType.strip().len == 0:
+      raise newException(ValueError,
+        "mynim: TypeScript parameter " & $i & " type cannot be empty")
+    chans[i] = p.channel
+  acquire(ipcMu)
+  defer: release(ipcMu)
+  let mi = ipcMethods.getOrDefault(service & "." & meth)
+  if mi == nil:
+    raise newException(ValueError,
+      "mynim: cannot set TypeScript signature for unbound method " &
+      service & "." & meth)
+  mi.tsParams = @params
+  mi.tsResult = resultType
+  mi.hasTsSignature = true
+  mi.chans = chans
+  mi.streams = chans.anyIt(it)
 
 proc lookupMethod(name: string): ref IpcMethod =
   acquire(ipcMu)
@@ -334,19 +384,22 @@ proc handleCall(w: Window; ctx: CancelCtx; raw: string; trusted: bool) =
 ##   Progress.emit(win, %*{"done": 1, "total": 3})
 ##
 ## and subscribe in the frontend with `events.progress.on(p => ...)`.
-proc newEvent*[T](name: string): Event[T] =
+proc newEvent*[T](name: string; typeScriptType = "unknown"): Event[T] =
   ## Declares an event with payload type T. Names must be unique;
-  ## those starting with "mynim:" are reserved.
+  ## those starting with "mynim:" are reserved. `typeScriptType` is
+  ## used for the payload type in the generated TypeScript client.
   if name.startsWith("mynim:") or name.startsWith("mygo:"):
     raise newException(ValueError, "mynim: event " & name.escape() &
       ": names starting with \"mynim:\" are reserved")
+  if typeScriptType.strip().len == 0:
+    raise newException(ValueError, "mynim: TypeScript event type cannot be empty")
   acquire(ipcMu)
   defer: release(ipcMu)
   for e in ipcEvents:
     if e.name == name:
       raise newException(ValueError, "mynim: event " & name.escape() &
         " is already declared")
-  ipcEvents.add (ref EventInfo)(name: name)
+  ipcEvents.add (ref EventInfo)(name: name, tsType: typeScriptType)
   Event[T](name: name)
 
 proc name*[T](e: Event[T]): string = e.name
