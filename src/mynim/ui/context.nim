@@ -33,6 +33,11 @@ type
     slot: uint32
     generation: uint32
 
+  Bitmap* = ref object
+    ## A stable scene image created once and reused across frame builds.
+    image: scene.Image
+    pixelated: bool
+
   ElementNode = object
     parent, firstChild, lastChild, nextSibling: int32
     row: bool
@@ -42,6 +47,8 @@ type
     textColor: Color
     shapedText: textStack.Layout
     clickHandler: proc() {.closure.}
+    bitmap: Bitmap
+    fit: Fit
     width, height, minW, minH, maxW, maxH, basis: UiLength
     grow, shrink: float32
     pad, margin: array[4, float32]
@@ -120,6 +127,30 @@ proc row*(c: Context): Element =
 proc column*(c: Context): Element =
   ## Adds a column container to the current parent.
   c.newElement(false)
+
+proc newBitmap*(source: sourceImage.Image): Bitmap =
+  ## Converts an image.Image to a reusable premultiplied scene bitmap.
+  if source != nil:
+    result = Bitmap(image: scene.newSceneImage(source))
+
+proc size*(bitmap: Bitmap): tuple[width, height: int] =
+  ## Reports a bitmap's intrinsic size in pixels.
+  if bitmap != nil and bitmap.image != nil:
+    result = (bitmap.image.w, bitmap.image.h)
+
+proc pixelated*(bitmap: Bitmap): Bitmap =
+  ## Uses nearest-neighbor sampling when the bitmap is enlarged.
+  result = bitmap
+  if result != nil:
+    result.pixelated = true
+
+proc image*(c: Context; bitmap: Bitmap): Element =
+  ## Adds a bitmap element with its natural pixel size in DIPs.
+  result = c.newElement(false)
+  let n = result.node
+  if n != nil:
+    n.bitmap = bitmap
+    n.fit = Fit.Contain
 
 proc text*(c: Context; value: string): Element =
   ## Adds a text element using the system UI font at its natural size.

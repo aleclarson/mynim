@@ -171,6 +171,64 @@ proc paintText(s: scene.Scene; node: ElementNode; rect, root: Rect;
     s.ops.add(scene.Op(kind: scene.opGlyphs, first: int32(start),
                        last: int32(s.glyphs.len)))
 
+proc fitImage(box: Rect; bitmap: Bitmap; fit: Fit):
+    tuple[rect: Rect, src: scene.Rect] =
+  if bitmap == nil or bitmap.image == nil or bitmap.image.w <= 0 or
+      bitmap.image.h <= 0 or box.w <= 0 or box.h <= 0:
+    return
+  let imageW = float32(bitmap.image.w)
+  let imageH = float32(bitmap.image.h)
+  result.src = scene.Rect(w: imageW, h: imageH)
+  case fit
+  of Fit.FillBox:
+    result.rect = box
+  of Fit.Contain, Fit.ScaleDown:
+    var scale = min(box.w / imageW, box.h / imageH)
+    if fit == Fit.ScaleDown:
+      scale = min(scale, 1'f32)
+    let width = imageW * scale
+    let height = imageH * scale
+    result.rect = Rect(x: box.x + (box.w - width) / 2,
+                       y: box.y + (box.h - height) / 2,
+                       w: width, h: height)
+  of Fit.Cover:
+    let scale = max(box.w / imageW, box.h / imageH)
+    let width = box.w / scale
+    let height = box.h / scale
+    result.src = scene.Rect(x: (imageW - width) / 2,
+      y: (imageH - height) / 2, w: width, h: height)
+    result.rect = box
+  of Fit.NaturalSize:
+    let width = min(imageW, box.w)
+    let height = min(imageH, box.h)
+    let x = box.x + (box.w - imageW) / 2
+    let y = box.y + (box.h - imageH) / 2
+    result.rect = Rect(x: max(x, box.x), y: max(y, box.y),
+      w: width, h: height)
+    result.src = scene.Rect(x: result.rect.x - x, y: result.rect.y - y,
+                            w: width, h: height)
+
+proc paintBitmap(s: scene.Scene; node: ElementNode; rect, root: Rect;
+                 scale: float32) =
+  if node.bitmap == nil or node.bitmap.image == nil:
+    return
+  let box = Rect(x: rect.x + node.pad[3] + node.border[3],
+    y: rect.y + node.pad[0] + node.border[0],
+    w: max(rect.w - node.contentInsetX, 0'f32),
+    h: max(rect.h - node.contentInsetY, 0'f32))
+  let fitted = fitImage(box, node.bitmap, node.fit)
+  if fitted.rect.w <= 0 or fitted.rect.h <= 0:
+    return
+  let pixelRect = fitted.rect.sceneRect(root, scale)
+  if pixelRect.empty:
+    return
+  let enlarged = fitted.rect.w * scale >= fitted.src.w or
+    fitted.rect.h * scale >= fitted.src.h
+  s.ops.add(scene.Op(kind: scene.opImage, rect: pixelRect,
+    radii: node.radius.scaledEdges(scale), continuous: continuousCorners,
+    image: node.bitmap.image, src: fitted.src,
+    pixelated: node.bitmap.pixelated and enlarged))
+
 proc paintScene*(layout: LayoutResult; scale = 1'f32;
                  clear = transparent): scene.Scene =
   ## Converts a current layout into a device-pixel scene for Mygo's renderers.
@@ -203,7 +261,8 @@ proc paintScene*(layout: LayoutResult; scale = 1'f32;
       for slot, node in layout.owner.nodes:
         let fillVisible = node.background.a > 0
         let borderVisible = node.borderColor.a > 0 and scene.hasBorder(node.border)
-        if not fillVisible and not borderVisible and not node.hasText:
+        if not fillVisible and not borderVisible and not node.hasText and
+            node.bitmap == nil:
           continue
 
         let rect = layout.rects[slot].sceneRect(layout.root, scale)
@@ -227,6 +286,7 @@ proc paintScene*(layout: LayoutResult; scale = 1'f32;
           op.wide = result.addWide(wide)
           result.ops.add(op)
         result.paintText(node, layout.rects[slot], layout.root, scale, system)
+        result.paintBitmap(node, layout.rects[slot], layout.root, scale)
 
       if not system.full() or attempt == 2:
         break

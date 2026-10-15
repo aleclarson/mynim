@@ -83,6 +83,9 @@ proc measureTree(nodes: seq[ElementNode]; natural: var seq[NaturalSize]) =
     if node.hasText and node.shapedText != nil:
       contentW = node.shapedText.width
       contentH = node.shapedText.height
+    if node.bitmap != nil and node.bitmap.image != nil:
+      contentW = max(contentW, float32(node.bitmap.image.w))
+      contentH = max(contentH, float32(node.bitmap.image.h))
     var childCount = 0
     var child = int(node.firstChild)
     while child >= 0:
@@ -668,6 +671,20 @@ proc onClick*(e: Element; handler: proc() {.closure.}): Element =
   let n = e.node
   if n != nil:
     n.clickHandler = handler
+
+proc fit*(e: Element; value: Fit): Element =
+  ## Sets how a bitmap fills its element.
+  result = e
+  let n = e.node
+  if n != nil and n.bitmap != nil:
+    n.fit = value
+
+proc pixelated*(e: Element): Element =
+  ## Uses nearest-neighbor sampling for enlarged bitmap pixels.
+  result = e
+  let n = e.node
+  if n != nil and n.bitmap != nil:
+    n.bitmap.pixelated = true
 
 proc marginX*(e: Element; value: float32): Element =
   result = e
