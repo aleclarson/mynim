@@ -115,7 +115,9 @@ type
     treeAccessFocus: TreeAccessFocus
     tableState: ListState
     tableColumnId: string
-    tableColumnFixed: bool
+    tableColumnFixed, tableColumnHeader, tableColumnFlexible: bool
+    tableColumnMinWidth, tableColumnMaxWidth: float32
+    tableResizeHandle, tableFitMeasure: bool
     bitmap: Bitmap
     imageRegion: Rect
     flipX, flipY: bool

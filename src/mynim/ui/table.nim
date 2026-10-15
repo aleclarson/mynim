@@ -56,11 +56,55 @@ proc beginTableColumnDrag(state: ListState; column: string;
   state.tableDrag = TableDrag(column: column, startX: x, lastX: x)
   true
 
+proc beginTableColumnResize(state: ListState; column: string; x: float32;
+                            nodes: openArray[ElementNode];
+                            rects: openArray[Rect]): bool =
+  if state == nil or column.len == 0:
+    return false
+  var headers: seq[int]
+  for slot in 1..<nodes.len:
+    if nodes[slot].tableState == state and
+        nodes[slot].tableColumnHeader and
+        nodes[slot].tableColumnId.len > 0:
+      headers.add(slot)
+  var at = -1
+  for index, slot in headers:
+    if nodes[slot].tableColumnId == column:
+      at = index
+      break
+  if at < 0:
+    return false
+
+  let header = headers[at]
+  if nodes[header].tableColumnFixed:
+    return false
+  for index in 0..<at:
+    let previous = headers[index]
+    if nodes[previous].tableColumnFlexible:
+      state.columns.setWidth(TableColumn(id: nodes[previous].tableColumnId,
+        minWidth: nodes[previous].tableColumnMinWidth,
+        maxWidth: nodes[previous].tableColumnMaxWidth), rects[previous].w)
+
+  state.tableDrag = TableDrag(column: column, startX: x, lastX: x,
+    startWidth: rects[header].w,
+    minWidth: nodes[header].tableColumnMinWidth,
+    maxWidth: nodes[header].tableColumnMaxWidth,
+    rightToLeft: nodes[header].rightToLeft, resizing: true)
+  true
+
 proc updateTableColumnDrag(state: ListState; nodes: openArray[ElementNode];
                            rects: openArray[Rect]; x: float32): bool =
   if state == nil or state.tableDrag == nil:
     return false
   let drag = state.tableDrag
+  if drag.resizing:
+    let delta = (x - drag.startX) *
+      (if drag.rightToLeft: -1'f32 else: 1'f32)
+    state.columns.setWidth(TableColumn(id: drag.column,
+      minWidth: drag.minWidth, maxWidth: drag.maxWidth),
+      drag.startWidth + delta)
+    drag.moving = drag.moving or abs(delta) > 0.01'f32
+    return true
   drag.offsetX += x - drag.lastX
   drag.lastX = x
   if not drag.moving and abs(x - drag.startX) >= 4'f32:
@@ -71,6 +115,7 @@ proc updateTableColumnDrag(state: ListState; nodes: openArray[ElementNode];
   var headers: seq[int]
   for slot in 1..<nodes.len:
     if nodes[slot].tableState == state and
+        nodes[slot].tableColumnHeader and
         nodes[slot].tableColumnId.len > 0:
       headers.add(slot)
   var at = -1
@@ -190,7 +235,8 @@ proc sortHeader(state: ListState; id: string;
   state.sortClicked(id, (mods and
     (platform.modSuper or platform.modShift)) != 0)
 
-proc tableCells(c: Context; columns: openArray[TableColumn]; order: seq[int];
+proc tableCells(c: Context; state: ListState;
+                columns: openArray[TableColumn]; order: seq[int];
                 layout: TableLayout; flexMin: float32; role: platform.AccessRole;
                 fill: proc(column: int; box: Element) {.closure.}) =
   let theme = c.theme
@@ -200,10 +246,12 @@ proc tableCells(c: Context; columns: openArray[TableColumn]; order: seq[int];
     let box = c.row().padding(theme.space(1.5), theme.space(2.5))
       .alignItems(Align.Center).shrink(0).clip()
     let size = layout.columnWidth(column)
-    if size.fixed:
-      discard box.width(size.width)
-    else:
-      discard box.grow().shrink(1).minWidth(max(column.minWidth, flexMin))
+    let fitting = state.tableFitColumn == column.columnId
+    if not fitting:
+      if size.fixed:
+        discard box.width(size.width)
+      else:
+        discard box.grow().shrink(1).minWidth(max(column.minWidth, flexMin))
     if column.align == Align.Center or column.align == Align.End:
       discard box.justify(column.align)
     if box.node != nil:
@@ -211,6 +259,14 @@ proc tableCells(c: Context; columns: openArray[TableColumn]; order: seq[int];
       box.node.accessRoleSet = true
       if role == platform.roleColumnHeader:
         box.node.label = column.title
+      box.node.tableState = state
+      box.node.tableColumnId = column.columnId
+      box.node.tableColumnFixed = column.fixed
+      box.node.tableColumnHeader = role == platform.roleColumnHeader
+      box.node.tableColumnFlexible = not size.fixed
+      box.node.tableColumnMinWidth = column.minWidth
+      box.node.tableColumnMaxWidth = column.maxWidth
+      box.node.tableFitMeasure = fitting
     discard box.children(proc() =
       if fill != nil:
         fill(columnIndex, box)
@@ -259,13 +315,9 @@ proc table*(c: Context; state: ListState; columns: openArray[TableColumn];
       header.node.accessRole = platform.roleRow
       header.node.accessRoleSet = true
     discard header.children(proc() =
-      c.tableCells(columnList, order, state.columns, flexMin,
+      c.tableCells(state, columnList, order, state.columns, flexMin,
         platform.roleColumnHeader, proc(index: int; box: Element) =
           let column = columnList[index]
-          if box.node != nil:
-            box.node.tableState = state
-            box.node.tableColumnId = column.columnId
-            box.node.tableColumnFixed = column.fixed
           let title = c.text(column.title).textWeight(600)
             .textColor(theme.textMuted).shrink(1)
           discard title
@@ -288,6 +340,15 @@ proc table*(c: Context; state: ListState; columns: openArray[TableColumn];
                   platform.accessSortDescending
                 else:
                   platform.accessSortAscending
+          if not column.fixed:
+            let edge = c.box().absolute().top(0).bottom(0).width(2)
+              .endInset(0)
+            if edge.node != nil:
+              edge.node.tableState = state
+              edge.node.tableColumnId = column.columnId
+              edge.node.tableResizeHandle = true
+            discard edge.background(if edge.hovered() or edge.pressed():
+              theme.accent else: theme.border)
       )
     )
 
@@ -307,7 +368,7 @@ proc table*(c: Context; state: ListState; columns: openArray[TableColumn];
           )
         else:
           discard row.children(proc() =
-            c.tableCells(columnList, order, state.columns, flexMin,
+            c.tableCells(state, columnList, order, state.columns, flexMin,
               platform.roleCell, proc(index: int; box: Element) =
                 if cell != nil:
                   cell(rowIndex, index)

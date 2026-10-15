@@ -20,6 +20,8 @@ type
     focusSlot, keyPressSlot: int
     keyPressKey: platform.Key
     listReorder, tableReorder: ListState
+    pointerCursor: platform.Cursor
+    hasPointerCursor: bool
     textInputAdapter: TextInputAdapter
     lastTextInput: platform.TextInputState
     inputComposition: platform.InputComposition
@@ -494,6 +496,18 @@ proc updateTextInput(rt: Runtime) =
   rt.lastTextInput = state
   rt.hasTextInputState = true
 
+proc updatePointerCursor(rt: Runtime) =
+  var cursor = platform.cursorDefault
+  if rt.hasPointer:
+    let target = rt.frameLayout.targetAt(rt.pointerX, rt.pointerY)
+    if target.owner != nil and
+        rt.frameLayout.owner.nodes[int(target.slot)].tableResizeHandle:
+      cursor = platform.cursorResizeEW
+  if not rt.hasPointerCursor or rt.pointerCursor != cursor:
+    rt.conn.surface.setCursor(cursor)
+    rt.pointerCursor = cursor
+    rt.hasPointerCursor = true
+
 proc refreshPointer(rt: Runtime) =
   rt.hoverSlots.setLen(0)
   rt.pressedSlots.setLen(0)
@@ -512,6 +526,7 @@ proc refreshPointer(rt: Runtime) =
   if rt.frameLayout.clickableSlot(rt.keyPressSlot) and
       rt.focusSlot == rt.keyPressSlot and rt.keyPressSlot notin rt.pressedSlots:
     rt.pressedSlots.add(rt.keyPressSlot)
+  rt.updatePointerCursor()
 
 proc autoScrollListReorder(rt: Runtime; state: ListState): bool
 
@@ -563,6 +578,7 @@ proc renderFrame(rt: Runtime; presentFrame = true) =
       layout.owner.nodes[slot].focusVisible = false
     rt.requestFrame()
   rt.frameLayout = layout
+  rt.updatePointerCursor()
   if presentFrame and rt.listReorder != nil and
       rt.listReorder.reorderDragging and rt.autoScrollListReorder(rt.listReorder):
     rt.requestFrame()
@@ -616,13 +632,29 @@ proc beginTableReorder(rt: Runtime; target: Element) =
   var slot = int(target.slot)
   while slot > 0 and slot < target.owner.nodes.len:
     let node = target.owner.nodes[slot]
-    if node.tableState != nil and node.tableColumnId.len > 0 and
+    if node.tableState != nil and node.tableColumnHeader and
+        node.tableColumnId.len > 0 and
         not node.tableColumnFixed and
         node.tableState.beginTableColumnDrag(node.tableColumnId,
           rt.pointerX):
       rt.tableReorder = node.tableState
       return
     slot = int(node.parent)
+
+proc beginTableResize(rt: Runtime; target: Element): bool =
+  rt.cancelTableReorder()
+  if target.owner == nil or target.owner != rt.frameLayout.owner:
+    return false
+  var slot = int(target.slot)
+  while slot > 0 and slot < target.owner.nodes.len:
+    let node = target.owner.nodes[slot]
+    if node.tableResizeHandle and node.tableState != nil and
+        node.tableState.beginTableColumnResize(node.tableColumnId,
+          rt.pointerX, target.owner.nodes, rt.frameLayout.rects):
+      rt.tableReorder = node.tableState
+      return true
+    slot = int(node.parent)
+  false
 
 proc listReorderTarget(rt: Runtime; state: ListState) =
   if state == nil or rt.frameLayout.owner == nil:
@@ -864,7 +896,8 @@ proc event(rt: Runtime; ev: platform.SurfaceEvent): bool =
     rt.pressMods = ev.mods
     rt.pressHoverSlots = rt.frameLayout.slotsAt(rt.pointerX, rt.pointerY)
     rt.beginListReorder(rt.pressTarget)
-    rt.beginTableReorder(rt.pressTarget)
+    if not rt.beginTableResize(rt.pressTarget):
+      rt.beginTableReorder(rt.pressTarget)
     if rt.pressTarget.owner != nil:
       var slot = int(rt.pressTarget.slot)
       let targetNode = rt.frameLayout.owner.nodes[slot]
@@ -929,6 +962,17 @@ proc event(rt: Runtime; ev: platform.SurfaceEvent): bool =
         rt.refreshPointer()
         rt.requestFrame()
         return true
+      if ev.clicks >= 2 and rt.pressTarget.owner == rt.frameLayout.owner:
+        let target = rt.pressTarget
+        let node = target.owner.nodes[int(target.slot)]
+        if node.tableResizeHandle and node.tableState != nil:
+          node.tableState.tableFitColumn = node.tableColumnId
+          rt.pressTarget = Element()
+          rt.pressMods = 0
+          rt.pressHoverSlots.setLen(0)
+          rt.refreshPointer()
+          rt.requestFrame()
+          return true
     var clickedSlot = -1
     result = rt.frameLayout.dispatchClick(rt.pressTarget,
       rt.pointerX, rt.pointerY, rt.pressMods, clickedSlot)

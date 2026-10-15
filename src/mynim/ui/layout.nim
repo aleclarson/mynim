@@ -1507,6 +1507,33 @@ proc updateListReorderTarget(nodes: seq[ElementNode]; rects: seq[Rect];
     state.reorderIndicatorY = min(bottom, afterY)
     state.reorderTargetValid = true
 
+proc applyTableFits(nodes: var seq[ElementNode]; natural: seq[NaturalSize]): bool =
+  for slot in 1..<nodes.len:
+    if not nodes[slot].tableFitMeasure or nodes[slot].tableState == nil:
+      continue
+    let state = nodes[slot].tableState
+    let column = nodes[slot].tableColumnId
+    var width: float32
+    for other in 1..<nodes.len:
+      if nodes[other].tableFitMeasure and nodes[other].tableState == state and
+          nodes[other].tableColumnId == column:
+        width = max(width, natural[other].w)
+    if nodes[slot].tableColumnMaxWidth > 0:
+      width = min(width, nodes[slot].tableColumnMaxWidth)
+    width = max(width, max(nodes[slot].tableColumnMinWidth, 16'f32))
+    if state.columns.widths.len == 0:
+      state.columns.widths = initTable[string, float32]()
+    state.columns.widths[column] = width
+    state.tableFitColumn.setLen(0)
+    for other in 1..<nodes.len:
+      if nodes[other].tableFitMeasure and nodes[other].tableState == state and
+          nodes[other].tableColumnId == column:
+        nodes[other].width = pixels(width)
+        nodes[other].grow = 0
+        nodes[other].shrink = 0
+        nodes[other].tableFitMeasure = false
+    result = true
+
 proc layoutAt(c: Context; bounds: Rect; now: MonoTime;
               reduceMotion: bool): LayoutResult =
   ## Lays out the latest completed build inside bounds.
@@ -1538,6 +1565,8 @@ proc layoutAt(c: Context; bounds: Rect; now: MonoTime;
   c.owner.gridScratch.values.setLen(0)
   shapeText(c.owner.nodes)
   discard measureTree(c.owner.nodes, c.owner.natural, c.owner.gridScratch)
+  if c.owner.nodes.applyTableFits(c.owner.natural):
+    discard measureTree(c.owner.nodes, c.owner.natural, c.owner.gridScratch)
   if c.owner.nodes.len > 0:
     var stable = false
     for attempt in 0..2:
@@ -1664,7 +1693,8 @@ proc targetAt(layout: LayoutResult; x, y: float32): Element =
         layout.insideClips(slot, x, y):
       let target = Element(owner: layout.owner, slot: uint32(slot),
                            generation: layout.generation)
-      if layout.owner.nodes[slot].listRowHeader:
+      if layout.owner.nodes[slot].listRowHeader or
+          layout.owner.nodes[slot].tableResizeHandle:
         return target
       if topmost.owner == nil:
         topmost = target

@@ -159,6 +159,8 @@ type
   TableDrag = ref object
     column: string
     startX, lastX, offsetX: float32
+    startWidth, minWidth, maxWidth: float32
+    rightToLeft, resizing: bool
     moving: bool
 
   ListSelectedRow = object
@@ -184,6 +186,7 @@ type
     rowAccessAction: ListRowAccessAction
     keyHandler: ListKeyHandler
     tableDrag: TableDrag
+    tableFitColumn: string
     headerCacheRow, headerCacheFrom, headerCacheStop: int
     headerCacheValid: bool
     keepOffset: bool
