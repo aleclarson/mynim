@@ -161,6 +161,7 @@ let multiState = ui.newListState(20, multiSelectable = true)
 var multiTheme = ui.lightTheme()
 multiTheme.accent = ui.rgb(255, 0, 0)
 multiTheme.accentText = ui.rgb(255, 255, 255)
+multiTheme.focus = ui.rgb(0, 255, 255)
 when defined(macosx):
   const selectionCommand = platform.modSuper
 else:
@@ -234,6 +235,7 @@ else:
     key: platform.keySpace, mods: platform.modCtrl))
   doAssert multiSurface.frame()
   doAssert multiState.selectedRows() == @[1, 3]
+  doAssert multiSurface.pixel(10, 40) == [255'u8, 255, 0, 255]
 
 doAssert multiSurface.send(platform.SurfaceEvent(kind: platform.keyPressed,
   key: platform.keyA, mods: selectionCommand))

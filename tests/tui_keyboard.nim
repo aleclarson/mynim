@@ -15,7 +15,10 @@ var firstFocused, firstVisible, firstPressed, firstClicked: bool
 var secondFocused, secondVisible, secondPressed: bool
 var customFocused, customVisible: bool
 var firstActivations, secondActivations: int
+var focusTheme = ui.lightTheme()
+focusTheme.focus = ui.rgb(0, 255, 255)
 let uiContent = ui.newContent(proc(ctx: ui.Context) =
+  ctx.setTheme(focusTheme)
   discard ctx.column().size(80, 80).children(proc() =
     let first = ctx.box().size(60, 30).label("First")
       .onClick(proc() = inc firstActivations)
@@ -29,7 +32,7 @@ let uiContent = ui.newContent(proc(ctx: ui.Context) =
     secondVisible = second.focusVisible()
     secondPressed = second.pressed()
     let custom = ctx.box().size(60, 30).label("Custom focus")
-      .focusable()
+      .focusable().focusRing(false)
     customFocused = custom.focused()
     customVisible = custom.focusVisible()
   )
@@ -51,6 +54,12 @@ doAssert native.send(platform.SurfaceEvent(kind: platform.keyPressed,
   key: platform.keyTab))
 doAssert native.frame()
 doAssert firstFocused and firstVisible and not secondFocused
+var firstRingVisible = false
+for y in 0..<100:
+  for x in 0..<100:
+    if native.pixel(x, y) == [255'u8, 255, 0, 255]:
+      firstRingVisible = true
+doAssert firstRingVisible
 let (firstTree, _) = native.accessibility()
 doAssert firstTree.focus == firstTree.nodes[0].id
 
@@ -108,6 +117,12 @@ doAssert native.send(platform.SurfaceEvent(kind: platform.keyPressed,
   key: platform.keyTab))
 doAssert native.frame()
 doAssert customFocused and customVisible
+var customRingVisible = false
+for y in 0..<100:
+  for x in 0..<100:
+    if native.pixel(x, y) == [255'u8, 255, 0, 255]:
+      customRingVisible = true
+doAssert not customRingVisible
 
 win.destroy()
 loop.shutdown()

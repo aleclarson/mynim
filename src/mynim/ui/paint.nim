@@ -542,6 +542,49 @@ proc paintScrollbar(sceneFrame: scene.Scene; layout: LayoutResult;
   for _ in 0..<clips:
     sceneFrame.ops.add(scene.Op(kind: scene.opPopClip))
 
+proc paintFocusRing(sceneFrame: scene.Scene; layout: LayoutResult;
+                    slot: int; scale: float32; inset = false) =
+  let node = layout.owner.nodes[slot]
+  let color = node.focusRingColor
+  if color.a == 0:
+    return
+  let bounds = layout.rects[slot].sceneRect(layout.root, scale)
+  let expand = 3'f32.scaled(scale)
+  let width = 2'f32.scaled(scale)
+  var rect = bounds
+  if not inset:
+    rect.x -= expand
+    rect.y -= expand
+    rect.w += expand * 2
+    rect.h += expand * 2
+  if not rect.x.finite or not rect.y.finite or not rect.w.finite or
+      not rect.h.finite:
+    raise newException(ValueError, "ui: focus ring exceeds the float range")
+  var radii = node.radius.scaledEdges(scale)
+  for radius in radii.mitems:
+    radius += expand
+    if not radius.finite:
+      raise newException(ValueError, "ui: focus ring radius exceeds the float range")
+  let opacity = opacityOf(layout.owner.nodes, slot)
+  if opacity == 0:
+    return
+  var clips = 0
+  var parent = int(node.parent)
+  while parent >= 0:
+    if layout.owner.nodes[parent].clipsChildren:
+      sceneFrame.ops.add(layout.clipOp(parent, scale))
+      inc clips
+    parent = int(layout.owner.nodes[parent].parent)
+  var op = scene.Op(kind: scene.opFill, rect: rect,
+    color: sceneColor(transparent), paint: scene.paintSolid,
+    radii: radii, border: [width, width, width, width],
+    continuous: continuousCorners, borderColor: sceneColor(color),
+    opacity: opacity)
+  op.wide = sceneFrame.addWide(wideColors(transparent, transparent, color))
+  sceneFrame.ops.add(op)
+  for _ in 0..<clips:
+    sceneFrame.ops.add(scene.Op(kind: scene.opPopClip))
+
 proc collectPaintOrder(nodes: seq[ElementNode]; slot: int;
                        order: var seq[int]) =
   order.add(slot)
@@ -672,6 +715,14 @@ proc paintScene*(layout: LayoutResult; scale = 1'f32;
         if bars.horizontal:
           paintScrollbar(result, layout, slot, bars.horizontalThumb, scale,
             opacity)
+
+      for slot in layout.owner.paintSlots:
+        let node = layout.owner.nodes[slot]
+        if node.listRowFocusVisible:
+          result.paintFocusRing(layout, slot, scale, inset = true)
+        elif node.focusVisible and node.focusable and
+            not node.focusRingDisabled:
+          result.paintFocusRing(layout, slot, scale)
 
       if not system.full() or attempt == 2:
         break

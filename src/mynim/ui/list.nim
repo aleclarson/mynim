@@ -22,7 +22,7 @@ proc list*(c: Context; state: ListState; count: Natural;
   let plan = state.beginList(int(count))
   result = c.column().scrollY(state.scrollState)
   if state.selectionEnabled:
-    discard result.focusable()
+    discard result.focusable().focusRing(false)
   let container = result.node
   if container == nil:
     return
@@ -31,6 +31,7 @@ proc list*(c: Context; state: ListState; count: Natural;
   state.frameOwner = cast[pointer](c.owner)
   state.frameSlot = int32(result.slot)
   state.generation = c.owner.generation
+  let leadRow = state.selected()
 
   discard result.children(proc() =
     if plan.first > 0 and plan.top > 0:
@@ -48,6 +49,8 @@ proc list*(c: Context; state: ListState; count: Natural;
           else:
             state.selected() == rowIndex
         rowNode.listRowSelected = selected
+        rowNode.listRowFocusVisible = state.multiSelectionEnabled and
+          container.focusVisible and leadRow == rowIndex and not selected
         if selected:
           rowNode.background = c.theme.accent
           rowNode.listSelectedTextColor = c.theme.accentText

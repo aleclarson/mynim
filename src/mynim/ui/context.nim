@@ -83,12 +83,13 @@ type
   ElementNode = object
     parent, firstChild, lastChild, nextSibling: int32
     row, reverse, wrap, wrapReverse, grid, absolute, alignSet,
-      justifySet, focusable, focused, focusVisible, scrollX, scrollY,
+      justifySet, focusable, focused, focusVisible, focusRingDisabled,
+      scrollX, scrollY,
       revealInScroll: bool
     clipX, clipY, hasFollowScroll: bool
     followScrollSlot: int32
     gridCol, gridRow, gridColSpan, gridRowSpan: int
-    hasText, textColorSet, listRowSelected: bool
+    hasText, textColorSet, listRowSelected, listRowFocusVisible: bool
     hovered, pressed, clicked: bool
     label: string
     textValue: string
@@ -114,7 +115,7 @@ type
     justify, align, selfAlign, alignContent, justifyItems,
       justifySelf: Align
     cols, rows: seq[Track]
-    background, borderColor, listSelectedTextColor: Color
+    background, borderColor, listSelectedTextColor, focusRingColor: Color
     opacity: float32
     opacitySet: bool
     scrollState: ScrollState
@@ -235,6 +236,7 @@ proc newElement(c: Context; row: bool): Element =
                          clicked: index in c.owner.clickedSlots,
                          focused: index in c.owner.focusedSlots,
                          focusVisible: index in c.owner.focusVisibleSlots,
+                         focusRingColor: c.theme.focus,
                          shrink: 1, justify: Align.Start,
                          align: if row: Align.Center else: Align.Auto,
                          selfAlign: Align.Auto,

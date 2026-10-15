@@ -1844,6 +1844,13 @@ proc focusable*(e: Element): Element =
   if n != nil:
     n.focusable = true
 
+proc focusRing*(e: Element; show = true): Element =
+  ## Shows the theme focus ring for keyboard focus, unless disabled here.
+  result = e
+  let n = e.node
+  if n != nil:
+    n.focusRingDisabled = not show
+
 proc focused*(e: Element): bool =
   ## Reports whether this element has keyboard focus during the current build.
   let n = e.node
