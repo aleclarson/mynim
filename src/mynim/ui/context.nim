@@ -144,7 +144,8 @@ type
       listRowHeader, listRowPinnedHeader: bool
     listRowAction: bool
     textAlign: Align
-    hovered, pressed, clicked, changed, submitted: bool
+    hovered, pressed, clicked, changed, submitted,
+      valueChangedInBuild: bool
     label: string
     textValue: string
     textStyle: textStack.Style

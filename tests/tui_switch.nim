@@ -16,11 +16,14 @@ var didFocus, didChange, valueSeen: bool
 var changes: int
 let uiContent = ui.newContent(proc(ctx: ui.Context) =
   discard ctx.column().size(140, 50).children(proc() =
-    let toggle = ctx.switchBase(on).size(120, 32).label("Wi-Fi")
+    var frameOn = on
+    let toggle = ctx.switchBase(frameOn).size(120, 32).label("Wi-Fi")
       .onChange(proc() = inc changes)
     didFocus = toggle.focused()
     didChange = toggle.changed()
-    valueSeen = on
+    valueSeen = frameOn
+    if didChange:
+      on = frameOn
   )
 )
 let win = newWindow(WindowOptions(width: 160, height: 70, hidden: true,
@@ -53,8 +56,9 @@ doAssert native.frame()
 doAssert on and not didChange
 doAssert native.send(platform.SurfaceEvent(kind: platform.keyReleased,
   key: platform.keySpace))
-doAssert not on and changes == 1
+doAssert on and changes == 0
 doAssert native.frame()
+doAssert not on and changes == 1
 doAssert didChange and not valueSeen
 tree = native.accessibility()[0]
 doAssert (tree.nodes[0].states and platform.accessChecked) ==
@@ -62,8 +66,9 @@ doAssert (tree.nodes[0].states and platform.accessChecked) ==
 
 doAssert native.send(platform.SurfaceEvent(kind: platform.accessAction,
   id: tree.nodes[0].id, action: platform.accessPress))
-doAssert on and changes == 2
+doAssert not on and changes == 1
 doAssert native.frame()
+doAssert on and changes == 2
 doAssert didChange and valueSeen
 
 tree = native.accessibility()[0]
@@ -75,8 +80,9 @@ doAssert native.send(platform.SurfaceEvent(kind: platform.pointerDown,
 doAssert native.frame()
 doAssert native.send(platform.SurfaceEvent(kind: platform.pointerUp,
   x: x, y: y))
-doAssert not on and changes == 3
+doAssert on and changes == 2
 doAssert native.frame()
+doAssert not on and changes == 3
 doAssert didChange and not valueSeen
 
 win.destroy()

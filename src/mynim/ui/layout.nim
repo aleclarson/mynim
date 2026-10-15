@@ -2636,75 +2636,72 @@ proc onClick*(e: Element;
     if handler != nil:
       n.focusable = true
 
+proc markBoundValueChanged(e: Element) =
+  let n = e.node
+  if n != nil:
+    n[].changed = true
+    n[].valueChangedInBuild = true
+    if e.owner.invalidate != nil:
+      e.owner.invalidate()
+
 proc checkboxBase*(c: Context; checked: var bool): Element =
   ## Creates a check box without a look. Style its contents and set a label;
-  ## pointer or Space activation toggles checked and reports changed().
-  let value = addr checked
+  ## pointer, Space, or accessibility activation toggles checked and reports
+  ## changed() during this frame's build.
   result = c.row().focusable()
-  let owner = result.owner
-  let generation = result.generation
   let node = result.node
   if node == nil:
     return
-  let identity = node[].identity
-  result = result.onClick(proc() =
-    value[] = not value[]
-    discard owner.notifyAction(identity, generation, actionChange)
-  )
+  result = result.onClick(proc() = discard)
   let n = result.node
   if n != nil:
+    if n[].clicked:
+      checked = not checked
+      result.markBoundValueChanged()
     n.activateEnter = false
     n.accessRole = platform.roleCheckBox
     n.accessRoleSet = true
-    if value[]:
+    if checked:
       n.accessExtraStates = n.accessExtraStates or platform.accessChecked
 
 proc switchBase*(c: Context; on: var bool): Element =
   ## Creates a switch without a look. Style its contents and set a label;
-  ## pointer or Space activation toggles on and reports changed().
-  let value = addr on
+  ## pointer, Space, or accessibility activation toggles on and reports
+  ## changed() during this frame's build.
   result = c.row().focusable()
-  let owner = result.owner
-  let generation = result.generation
   let node = result.node
   if node == nil:
     return
-  let identity = node[].identity
-  result = result.onClick(proc() =
-    value[] = not value[]
-    discard owner.notifyAction(identity, generation, actionChange)
-  )
+  result = result.onClick(proc() = discard)
   let n = result.node
   if n != nil:
+    if n[].clicked:
+      on = not on
+      result.markBoundValueChanged()
     n.activateEnter = false
     n.accessRole = platform.roleSwitch
     n.accessRoleSet = true
-    if value[]:
+    if on:
       n.accessExtraStates = n.accessExtraStates or platform.accessChecked
 
 proc radioBase*[T](c: Context; selected: var T; value: T): Element =
   ## Creates a radio option without a look. Style its contents and set a
-  ## label; pointer or Space activation selects value and reports changed().
-  let target = addr selected
+  ## label; pointer, Space, or accessibility activation selects value and
+  ## reports changed() during this frame's build.
   result = c.row().focusable()
-  let owner = result.owner
-  let generation = result.generation
   let node = result.node
   if node == nil:
     return
-  let identity = node[].identity
-  result = result.onClick(proc() =
-    if target[] == value:
-      return
-    target[] = value
-    discard owner.notifyAction(identity, generation, actionChange)
-  )
+  result = result.onClick(proc() = discard)
   let n = result.node
   if n != nil:
+    if n[].clicked and selected != value:
+      selected = value
+      result.markBoundValueChanged()
     n.activateEnter = false
     n.accessRole = platform.roleRadio
     n.accessRoleSet = true
-    if target[] == value:
+    if selected == value:
       n.accessExtraStates = n.accessExtraStates or platform.accessChecked
 
 proc changed*(e: Element): bool =
@@ -2718,12 +2715,15 @@ proc submitted*(e: Element): bool =
   n != nil and n[].submitted
 
 proc onChange*(e: Element; action: proc() {.closure.}): Element =
-  ## Runs after input changes this element, before the next view build.
+  ## Runs when input changes this element. Bound control changes run during
+  ## the current build; native text input changes run before the next build.
   result = e
   let n = e.node
   if n != nil and action != nil:
     e.owner.actions.add(UiAction(identity: n[].identity,
       generation: e.generation, kind: actionChange, action: action))
+    if n[].valueChangedInBuild:
+      action()
 
 proc onSubmit*(e: Element; action: proc() {.closure.}): Element =
   ## Runs when Enter submits the focused text input on this element.

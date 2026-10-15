@@ -20,14 +20,19 @@ var firstValueSeen, secondValueSeen: bool
 var firstChanges, secondChanges: int
 let uiContent = ui.newContent(proc(ctx: ui.Context) =
   discard ctx.column().size(140, 80).children(proc() =
-    let first = ctx.radioBase(selected, firstChoice).size(120, 30)
+    var frameSelection = selected
+    let first = ctx.radioBase(frameSelection, firstChoice).size(120, 30)
       .label("First").onChange(proc() = inc firstChanges)
     firstChanged = first.changed()
-    firstValueSeen = selected == firstChoice
-    let second = ctx.radioBase(selected, secondChoice).size(120, 30)
+    firstValueSeen = frameSelection == firstChoice
+    if firstChanged:
+      selected = frameSelection
+    let second = ctx.radioBase(frameSelection, secondChoice).size(120, 30)
       .label("Second").onChange(proc() = inc secondChanges)
     secondChanged = second.changed()
-    secondValueSeen = selected == secondChoice
+    secondValueSeen = frameSelection == secondChoice
+    if secondChanged:
+      selected = frameSelection
   )
 )
 let win = newWindow(WindowOptions(width: 160, height: 100, hidden: true,
@@ -61,9 +66,11 @@ doAssert native.send(platform.SurfaceEvent(kind: platform.keyPressed,
   key: platform.keySpace))
 doAssert native.send(platform.SurfaceEvent(kind: platform.keyReleased,
   key: platform.keySpace))
-doAssert selected == secondChoice and secondChanges == 1
+doAssert selected == firstChoice and secondChanges == 0
 doAssert native.frame()
+doAssert selected == secondChoice and secondChanges == 1
 doAssert secondChanged and secondValueSeen and not firstChanged
+doAssert native.frame() # The next build refreshes the other radio's state.
 tree = native.accessibility()[0]
 doAssert (tree.nodes[1].states and platform.accessChecked) ==
   platform.accessChecked
@@ -79,9 +86,11 @@ doAssert not secondChanged
 tree = native.accessibility()[0]
 doAssert native.send(platform.SurfaceEvent(kind: platform.accessAction,
   id: tree.nodes[0].id, action: platform.accessPress))
-doAssert selected == firstChoice and firstChanges == 1
+doAssert selected == secondChoice and firstChanges == 0
 doAssert native.frame()
+doAssert selected == firstChoice and firstChanges == 1
 doAssert firstChanged and firstValueSeen
+doAssert native.frame()
 tree = native.accessibility()[0]
 doAssert (tree.nodes[0].states and platform.accessChecked) ==
   platform.accessChecked
