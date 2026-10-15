@@ -99,6 +99,7 @@ type
 
   ListRowKey* = proc(row: int): string {.closure.} ## Returns a stable, unique row key.
   ListRowLabel* = proc(row: int): string {.closure.} ## Names and searches a list row.
+  ListRowHeader* = proc(row: int): bool {.closure.} ## Marks section header rows.
 
   ListSelectedRow = object
     row, nearRow: int
@@ -111,6 +112,9 @@ type
     heights: ListHeights
     rowKey: ListRowKey
     rowLabel: ListRowLabel
+    rowHeader: ListRowHeader
+    headerCacheRow, headerCacheFrom, headerCacheStop: int
+    headerCacheValid: bool
     keepOffset: bool
     rowCount: int
     viewportHeight: float32

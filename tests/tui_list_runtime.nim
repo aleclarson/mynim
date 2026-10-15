@@ -70,6 +70,75 @@ doAssert listSurface.send(platform.SurfaceEvent(kind: platform.keyPressed,
 doAssert listSurface.frame()
 doAssert listState.selected() == 99
 
+let headerState = ui.newListState(20, selectable = true,
+  rowLabel = proc(row: int): string = $row,
+  rowHeader = proc(row: int): bool = row mod 5 == 0)
+let headerContent = ui.newContent(proc(ctx: ui.Context) =
+  discard ctx.list(headerState, 20, proc(row: int) =
+    if row mod 5 == 0:
+      let color = case row
+        of 0: ui.rgb(255, 0, 0)
+        of 5: ui.rgb(0, 255, 0)
+        else: ui.rgb(0, 0, 255)
+      discard ctx.box().size(40, 30).shrink(0).background(color)
+    else:
+      discard ctx.box().size(40, 20).shrink(0)
+  ).size(40, 60)
+)
+discard newWindow(WindowOptions(width: 40, height: 60, hidden: true,
+  content: headerContent))
+let headerSurface = fake.windows[^1].surface
+
+doAssert headerSurface.frame()
+doAssert headerSurface.pixel(10, 10) == [0'u8, 0, 255, 255]
+doAssert headerSurface.send(platform.SurfaceEvent(kind: platform.accessibilityOn))
+let (headerTree, _) = headerSurface.accessibility()
+var foundHeaderAccessNode = false
+for accessible in headerTree.nodes:
+  if accessible.role == platform.roleListItem and accessible.label == "0":
+    doAssert (accessible.states and platform.accessSelectable) ==
+      platform.AccessStates(0)
+    doAssert (accessible.actions and platform.actionPress) ==
+      platform.AccessActions(0)
+    foundHeaderAccessNode = true
+doAssert foundHeaderAccessNode
+headerState.select(0)
+doAssert headerState.selected() == -1
+doAssert headerSurface.send(platform.SurfaceEvent(kind: platform.pointerDown,
+  x: 5, y: 35))
+doAssert headerSurface.send(platform.SurfaceEvent(kind: platform.pointerUp,
+  x: 5, y: 35))
+doAssert headerSurface.frame()
+doAssert headerState.selected() == 1
+doAssert headerSurface.send(platform.SurfaceEvent(kind: platform.keyPressed,
+  key: platform.keyHome))
+doAssert headerSurface.frame()
+doAssert headerState.selected() == 1
+discard headerSurface.send(platform.SurfaceEvent(kind: platform.keyPressed,
+  key: platform.keyUp))
+doAssert headerState.selected() == 1
+headerState.select(4)
+doAssert headerSurface.send(platform.SurfaceEvent(kind: platform.keyPressed,
+  key: platform.keyDown))
+doAssert headerSurface.frame()
+doAssert headerState.selected() == 6,
+  "keyboard navigation should skip section headers"
+
+headerState.scrollTo(9)
+discard headerSurface.send(platform.SurfaceEvent(kind: platform.surfaceResize))
+doAssert headerSurface.frame()
+discard headerSurface.send(platform.SurfaceEvent(kind: platform.pointerScroll,
+  x: 5, y: 55, dy: 30))
+doAssert headerSurface.frame()
+doAssert headerSurface.pixel(10, 5) == [0'u8, 255, 0, 255]
+doAssert headerSurface.pixel(10, 25) == [255'u8, 0, 0, 255]
+doAssert headerSurface.send(platform.SurfaceEvent(kind: platform.pointerDown,
+  x: 5, y: 5))
+doAssert headerSurface.send(platform.SurfaceEvent(kind: platform.pointerUp,
+  x: 5, y: 5))
+doAssert headerSurface.frame()
+doAssert headerState.selected() == 6
+
 var followCount = 100
 let followState = ui.newListState(20, followEnd = true)
 let followContent = ui.newContent(proc(ctx: ui.Context) =

@@ -1366,6 +1366,43 @@ proc shiftScrolledRects(nodes: seq[ElementNode]; rects: var seq[Rect]) =
             rects[slot].x -= follow.scrollState.offsetX
       parent = int(ancestor.parent)
 
+proc shiftDescendantRectsY(nodes: seq[ElementNode]; rects: var seq[Rect];
+                           slot: int; shiftY: float32) =
+  var child = int(nodes[slot].firstChild)
+  while child >= 0:
+    rects[child].y += shiftY
+    shiftDescendantRectsY(nodes, rects, child, shiftY)
+    child = int(nodes[child].nextSibling)
+
+proc pinActiveListHeaders(nodes: seq[ElementNode]; rects: var seq[Rect];
+                          state: ListState; listSlot: int) =
+  if listSlot <= 0 or listSlot >= nodes.len or rects.len != nodes.len:
+    return
+  for slot in 1..<nodes.len:
+    let header = nodes[slot]
+    if header.listState != state or not header.listRowPinnedHeader:
+      continue
+    var nextHeader = -1
+    for candidate in 1..<nodes.len:
+      let row = nodes[candidate]
+      if row.listState == state and row.listRowHeader and
+          row.listRowIndex > header.listRowIndex and
+          (nextHeader < 0 or row.listRowIndex <
+            nodes[nextHeader].listRowIndex):
+        nextHeader = candidate
+    let listNode = nodes[listSlot]
+    let viewportTop = rects[listSlot].y + listNode.border[0] +
+      listNode.pad[0]
+    let oldY = rects[slot].y
+    var pinnedY = max(oldY, viewportTop)
+    if nextHeader >= 0:
+      pinnedY = min(pinnedY, rects[nextHeader].y - rects[slot].h)
+    let shiftY = pinnedY - oldY
+    if shiftY == 0:
+      continue
+    rects[slot].y = pinnedY
+    shiftDescendantRectsY(nodes, rects, slot, shiftY)
+
 proc layoutAt(c: Context; bounds: Rect; now: MonoTime;
               reduceMotion: bool): LayoutResult =
   ## Lays out the latest completed build inside bounds.
@@ -1450,6 +1487,7 @@ proc layoutAt(c: Context; bounds: Rect; now: MonoTime;
         max(viewport.w - node.contentInsetX, 0'f32),
         max(viewport.h - node.contentInsetY, 0'f32), now, reduceMotion) or
         result.animating
+      pinActiveListHeaders(c.owner.nodes, result.rects, state, slot)
       let top = viewport.y + node.border[0] + node.pad[0]
       let bottom = viewport.y + viewport.h - node.border[2] - node.pad[2]
       for rowSlot in 1..<c.owner.nodes.len:
@@ -1521,6 +1559,8 @@ proc targetAt(layout: LayoutResult; x, y: float32): Element =
         layout.insideClips(slot, x, y):
       let target = Element(owner: layout.owner, slot: uint32(slot),
                            generation: layout.generation)
+      if layout.owner.nodes[slot].listRowHeader:
+        return target
       if topmost.owner == nil:
         topmost = target
       if layout.owner.nodes[slot].clickHandler != nil:
@@ -1797,7 +1837,8 @@ proc dispatchClick(layout: LayoutResult; pressed: Element;
     return false
   clickedSlot = int(target.slot)
   let node = layout.owner.nodes[clickedSlot]
-  if node.listState != nil and node.listRowIndex >= 0:
+  if node.listState != nil and node.listRowIndex >= 0 and
+      not node.listRowHeader:
     node.listState.clickListRow(node.listRowIndex, mods)
   else:
     let handler = node.clickHandler

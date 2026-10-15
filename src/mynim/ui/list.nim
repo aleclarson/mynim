@@ -3,6 +3,36 @@
 proc rowSelectionHandler(state: ListState; row: int): proc() {.closure.} =
   result = proc() = state.select(row)
 
+proc buildListRow(c: Context; state: ListState; rowIndex: int;
+                  buildRow: proc(row: int) {.closure.};
+                  pinnedHeader = false; listFocusVisible = false): Element =
+  result = c.box().shrink(0)
+  let rowNode = result.node
+  let isHeader = state.isListHeader(rowIndex)
+  if state.rowLabel != nil:
+    discard result.label(state.rowLabel(rowIndex))
+  if rowNode != nil:
+    rowNode.listState = state
+    rowNode.listRowIndex = rowIndex
+    rowNode.listRowHeader = isHeader
+    rowNode.listRowPinnedHeader = pinnedHeader
+    let selected = if state.multiSelectionEnabled:
+        state.isSelected(rowIndex)
+      else:
+        state.selected() == rowIndex
+    rowNode.listRowSelected = selected
+    rowNode.listRowFocusVisible = state.multiSelectionEnabled and
+      listFocusVisible and state.selected() == rowIndex and not selected
+    if selected:
+      rowNode.background = c.theme.accent
+      rowNode.listSelectedTextColor = c.theme.accentText
+  if state.selectionEnabled and not isHeader:
+    discard result.focusable().onClick(rowSelectionHandler(state, rowIndex))
+  discard result.children(proc() =
+    if buildRow != nil:
+      buildRow(rowIndex)
+  )
+
 proc list*(c: Context; state: ListState; count: Natural;
            buildRow: proc(row: int) {.closure.}): Element =
   ## Builds only the rows visible in the viewport and a small overscan.
@@ -31,35 +61,14 @@ proc list*(c: Context; state: ListState; count: Natural;
   state.frameOwner = cast[pointer](c.owner)
   state.frameSlot = int32(result.slot)
   state.generation = c.owner.generation
-  let leadRow = state.selected()
 
   discard result.children(proc() =
     if plan.first > 0 and plan.top > 0:
       discard c.box().height(plan.top).shrink(0)
     for rowIndex in plan.first..<plan.pastLast:
-      let row = c.box().shrink(0)
-      let rowNode = row.node
-      if state.rowLabel != nil:
-        discard row.label(state.rowLabel(rowIndex))
-      if rowNode != nil:
-        rowNode.listState = state
-        rowNode.listRowIndex = rowIndex
-        let selected = if state.multiSelectionEnabled:
-            state.isSelected(rowIndex)
-          else:
-            state.selected() == rowIndex
-        rowNode.listRowSelected = selected
-        rowNode.listRowFocusVisible = state.multiSelectionEnabled and
-          container.focusVisible and leadRow == rowIndex and not selected
-        if selected:
-          rowNode.background = c.theme.accent
-          rowNode.listSelectedTextColor = c.theme.accentText
-      if state.selectionEnabled:
-        discard row.focusable().onClick(rowSelectionHandler(state, rowIndex))
-      discard row.children(proc() =
-        if buildRow != nil:
-          buildRow(rowIndex)
-      )
+      discard c.buildListRow(state, rowIndex, buildRow,
+        pinnedHeader = rowIndex == plan.pinnedHeader,
+        listFocusVisible = container.focusVisible)
       if state.gap > 0 and rowIndex + 1 < plan.pastLast:
         discard c.box().height(state.gap).shrink(0)
     if plan.pastLast < state.rowCount:
@@ -67,4 +76,12 @@ proc list*(c: Context; state: ListState; count: Natural;
         discard c.box().height(state.gap).shrink(0)
       if plan.bottom > 0:
         discard c.box().height(plan.bottom).shrink(0)
+    if plan.pinnedHeader >= 0 and
+        (plan.pinnedHeader < plan.first or
+          plan.pinnedHeader >= plan.pastLast):
+      let y = listHeightFloat32(state.heights.listHeightTop(
+        plan.pinnedHeader, state.gap))
+      let header = c.buildListRow(state, plan.pinnedHeader, buildRow,
+        pinnedHeader = true)
+      discard header.absolute().top(y).left(0).right(0)
   )

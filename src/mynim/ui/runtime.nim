@@ -282,7 +282,8 @@ proc accessibilityTree(layout: LayoutResult;
     if node.focusable or node.clickHandler != nil or node.textClient != nil:
       accessible.states = platform.accessFocusable
       accessible.actions = platform.actionFocus
-    if listItem and node.listState.selectionEnabled:
+    if listItem and node.listState.selectionEnabled and
+        not node.listRowHeader:
       accessible.states = accessible.states or platform.accessSelectable
       let selected = if node.listState.multiSelectionEnabled:
           node.listState.isSelected(node.listRowIndex)
@@ -297,7 +298,8 @@ proc accessibilityTree(layout: LayoutResult;
     if node.textClient != nil:
       accessible.actions = accessible.actions or platform.actionSetValue
     if role == platform.roleButton or
-        (listItem and node.listState.selectionEnabled):
+        (listItem and node.listState.selectionEnabled and
+          not node.listRowHeader):
       accessible.actions = accessible.actions or platform.actionPress
     result.nodes.add(accessible)
     accessIndex[slot] = result.nodes.high
@@ -745,7 +747,8 @@ proc event(rt: Runtime; ev: platform.SurfaceEvent): bool =
     if rt.pressTarget.owner != nil:
       var slot = int(rt.pressTarget.slot)
       let targetNode = rt.frameLayout.owner.nodes[slot]
-      if targetNode.listState != nil and targetNode.listRowIndex >= 0:
+      if targetNode.listState != nil and targetNode.listRowIndex >= 0 and
+          not targetNode.listRowHeader:
         slot = int(targetNode.listState.frameSlot)
       if rt.frameLayout.focusableSlot(slot):
         rt.focusSlot = slot
@@ -824,7 +827,8 @@ proc event(rt: Runtime; ev: platform.SurfaceEvent): bool =
         let clickedSlot = int(ev.id - 1)
         var focusSlot = clickedSlot
         let targetNode = rt.frameLayout.owner.nodes[clickedSlot]
-        if targetNode.listState != nil and targetNode.listRowIndex >= 0:
+        if targetNode.listState != nil and targetNode.listRowIndex >= 0 and
+            not targetNode.listRowHeader:
           focusSlot = int(targetNode.listState.frameSlot)
         rt.clickedSlots = @[clickedSlot]
         rt.focusSlot = focusSlot

@@ -89,7 +89,8 @@ type
     clipX, clipY, hasFollowScroll: bool
     followScrollSlot: int32
     gridCol, gridRow, gridColSpan, gridRowSpan: int
-    hasText, textColorSet, listRowSelected, listRowFocusVisible: bool
+    hasText, textColorSet, listRowSelected, listRowFocusVisible,
+      listRowHeader, listRowPinnedHeader: bool
     hovered, pressed, clicked: bool
     label: string
     textValue: string

@@ -10,6 +10,7 @@ const
 type
   ListPlan = object
     first, pastLast: int
+    pinnedHeader: int
     top, bottom: float32
 
 proc estimatedHeight(heights: var ListHeights): float64
@@ -37,6 +38,47 @@ proc findListKey(state: ListState; key: string; nearRow: int): int =
       return int(after64)
   -1
 
+proc isListHeader(state: ListState; row: int): bool =
+  state != nil and state.rowHeader != nil and row >= 0 and
+    row < state.rowCount and state.rowHeader(row)
+
+proc listHeaderAbove(state: ListState; row: int): int =
+  if state == nil or state.rowHeader == nil or row < 0:
+    return -1
+  const searchWindow = 100_000
+  let cachedRow = state.headerCacheRow
+  if state.headerCacheValid and
+      (cachedRow < 0 or cachedRow < state.rowCount and
+        state.isListHeader(cachedRow)):
+    if row >= state.headerCacheFrom and
+        row - state.headerCacheFrom <= searchWindow:
+      if row > state.headerCacheFrom:
+        for candidate in countdown(row, state.headerCacheFrom + 1):
+          if state.isListHeader(candidate):
+            state.headerCacheRow = candidate
+            state.headerCacheFrom = row
+            state.headerCacheStop = candidate
+            return candidate
+      state.headerCacheFrom = row
+      return cachedRow
+    if row < state.headerCacheFrom and row >= state.headerCacheStop and
+        (cachedRow >= 0 or state.headerCacheStop == 0):
+      return cachedRow
+
+  let stop = max(0, row - searchWindow)
+  var found = -1
+  var checkedTo = stop
+  for candidate in countdown(row, stop):
+    if state.isListHeader(candidate):
+      found = candidate
+      checkedTo = candidate
+      break
+  state.headerCacheRow = found
+  state.headerCacheFrom = row
+  state.headerCacheStop = checkedTo
+  state.headerCacheValid = true
+  found
+
 proc resetListMeasurements(heights: var ListHeights) =
   let estimate = heights.estimatedHeight()
   heights.blockIds.setLen(0)
@@ -56,6 +98,7 @@ proc syncListAnchor(state: ListState) =
   if not oldAnchorChanged:
     return
 
+  state.headerCacheValid = false
   let newAnchor = state.findListKey(state.anchorKey, state.anchor)
   state.heights.resetListMeasurements()
   if newAnchor >= 0 and not state.keepOffset and
@@ -85,7 +128,7 @@ proc selectionEntry(state: ListState; row: int): ListSelectedRow =
     result.keyValid = true
 
 proc listRowIsSelected(state: ListState; row: int): bool =
-  if row < 0 or row >= state.rowCount:
+  if row < 0 or row >= state.rowCount or state.isListHeader(row):
     return false
   if state.rowKey != nil:
     state.selectedKeys.contains(state.rowKey(row))
@@ -93,7 +136,7 @@ proc listRowIsSelected(state: ListState; row: int): bool =
     state.selectedIndices.contains(row)
 
 proc setListRowSelected(state: ListState; row: int; selected: bool): bool =
-  if row < 0:
+  if row < 0 or (selected and state.isListHeader(row)):
     return false
   let entry = state.selectionEntry(row)
   let exists = if entry.keyValid:
@@ -124,6 +167,8 @@ proc setListRowSelected(state: ListState; row: int; selected: bool): bool =
   true
 
 proc setListCursor(state: ListState; row: int; pivot: bool) =
+  if state.isListHeader(row):
+    return
   state.selectedRow = row
   state.selectedKey = ""
   state.selectedKeyValid = state.rowKey != nil and row < state.rowCount
@@ -156,6 +201,16 @@ proc syncListSelection(state: ListState) =
           chosen.nearRow = moved
     state.chosenRows[i] = chosen
 
+  if state.chosenRows.len > 0:
+    for i in countdown(state.chosenRows.high, 0):
+      let chosen = state.chosenRows[i]
+      if state.isListHeader(chosen.row):
+        if chosen.keyValid:
+          state.selectedKeys.excl(chosen.key)
+        else:
+          state.selectedIndices.excl(chosen.row)
+        state.chosenRows.delete(i)
+
   if state.selectionPivotKeyValid and state.rowKey != nil:
     if state.selectionPivot >= 0 and
         state.selectionPivot < state.rowCount and
@@ -165,7 +220,16 @@ proc syncListSelection(state: ListState) =
       state.selectionPivot = state.findListKey(state.selectionPivotKey,
         state.selectionPivot)
 
+  if state.isListHeader(state.selectionPivot):
+    state.selectionPivot = -1
+    state.selectionPivotKey = ""
+    state.selectionPivotKeyValid = false
+    state.selectionSpan = 0
+
   if state.selectedRow < 0:
+    return
+  if state.isListHeader(state.selectedRow):
+    state.clearListSelection()
     return
   if state.selectedRow >= state.rowCount:
     if not state.selectedKeyValid:
@@ -355,7 +419,8 @@ proc newListState*(estimatedRowHeight = 28'f32; rowGap = 0'f32;
                    rowKey: ListRowKey = nil; keepOffset = false;
                    selectable = false; followEnd = false;
                    multiSelectable = false;
-                   rowLabel: ListRowLabel = nil): ListState =
+                   rowLabel: ListRowLabel = nil;
+                   rowHeader: ListRowHeader = nil): ListState =
   ## Creates persistent state for a virtualized list.
   ##
   ## rowKey should return a stable, unique key for each logical row. When a
@@ -367,6 +432,8 @@ proc newListState*(estimatedRowHeight = 28'f32; rowGap = 0'f32;
   ## multiSelectable enables multi-row selection and modifier handling; rowKey
   ## keeps those choices with their rows as they move.
   ## rowLabel names rows for accessibility and enables type-to-select.
+  ## rowHeader marks section headers, which stay pinned while their rows scroll
+  ## under them and are omitted from selection and keyboard navigation.
   if not estimatedRowHeight.finiteMotion or estimatedRowHeight <= 0 or
       not rowGap.finiteMotion or rowGap < 0:
     raise newException(ValueError,
@@ -380,6 +447,7 @@ proc newListState*(estimatedRowHeight = 28'f32; rowGap = 0'f32;
   result.gap = rowGap
   result.rowKey = rowKey
   result.rowLabel = rowLabel
+  result.rowHeader = rowHeader
   result.keepOffset = keepOffset
   result.selectionEnabled = selectable or multiSelectable or rowLabel != nil
   result.multiSelectionEnabled = multiSelectable
@@ -407,6 +475,8 @@ proc select*(state: ListState; row: int) =
     raise newException(ValueError, "ui: list state cannot be nil")
   if row < -1:
     raise newException(ValueError, "ui: selected row must be -1 or greater")
+  if state.isListHeader(row):
+    return
   state.selectionEnabled = true
   if row < 0:
     state.clearListSelection()
@@ -452,9 +522,11 @@ proc selectedRows*(state: ListState): seq[int] =
   for chosen in state.chosenRows:
     if chosen.keyValid:
       if chosen.row >= 0 and chosen.row < state.rowCount and
+          not state.isListHeader(chosen.row) and
           state.rowKey != nil and state.rowKey(chosen.row) == chosen.key:
         result.add(chosen.row)
-    elif chosen.row >= 0 and chosen.row < state.rowCount:
+    elif chosen.row >= 0 and chosen.row < state.rowCount and
+        not state.isListHeader(chosen.row):
       result.add(chosen.row)
 
 proc clearSelection*(state: ListState) =
@@ -472,6 +544,8 @@ proc toggleSelection*(state: ListState; row: int) =
     raise newException(ValueError, "ui: list state cannot be nil")
   if row < 0 or row >= state.rowCount:
     raise newException(ValueError, "ui: row is outside the list")
+  if state.isListHeader(row):
+    return
   discard state.setListRowSelected(row, not state.listRowIsSelected(row))
   state.multiSelectionEnabled = true
   state.selectionEnabled = true
@@ -548,10 +622,22 @@ proc typeSelectListLabel(state: ListState; text: string): bool =
   let prefix = unicode.toLower(query)
   for distance in 0..<state.rowCount:
     let row = (start + distance) mod state.rowCount
-    if unicode.toLower(state.rowLabel(row)).startsWith(prefix):
+    if not state.isListHeader(row) and
+        unicode.toLower(state.rowLabel(row)).startsWith(prefix):
       state.select(row)
       break
   true
+
+proc nearestSelectableListRow(state: ListState; row, direction: int): int =
+  if state == nil or state.rowCount <= 0:
+    return -1
+  var candidate = max(0, min(row, state.rowCount - 1))
+  let step = if direction < 0: -1 else: 1
+  while candidate >= 0 and candidate < state.rowCount:
+    if not state.isListHeader(candidate):
+      return candidate
+    candidate += step
+  -1
 
 proc selectListKey(state: ListState; key: platform.Key;
                    mods: platform.Modifiers): bool =
@@ -615,6 +701,14 @@ proc selectListKey(state: ListState; key: platform.Key;
         let step = if direction > 0: 1 else: -1
         target = max(0, min(state.rowCount - 1, start + step))
   else:
+    return false
+  if state.isListHeader(target):
+    let direction =
+      if current < 0: 1
+      elif key in {platform.keyUp, platform.keyPageUp, platform.keyEnd}: -1
+      else: 1
+    target = state.nearestSelectableListRow(target, direction)
+  if target < 0:
     return false
   if extend:
     state.extendListSelection(target, keep = (mods and commandMask) != 0)
@@ -702,7 +796,10 @@ proc atEnd*(state: ListState): bool =
   state.laidOut and state.atEnd
 
 proc beginList(state: ListState; count: int): ListPlan =
-  state.rowCount = max(count, 0)
+  let newCount = max(count, 0)
+  if newCount != state.rowCount:
+    state.headerCacheValid = false
+  state.rowCount = newCount
   state.heights.resizeListHeights(state.rowCount)
   state.syncListSelection()
   state.prepareListFollow()
@@ -727,11 +824,29 @@ proc beginList(state: ListState; count: int): ListPlan =
         let row = max(0, min(state.requestRow, state.rowCount - 1))
         let top = state.heights.listHeightTop(row, state.gap)
         let height = state.heights.listRowHeight(row)
+        let sectionHeader = if state.isListHeader(row):
+            -1
+          else:
+            state.listHeaderAbove(row)
+        let sectionHeaderTop = if sectionHeader >= 0:
+            state.heights.listHeightTop(sectionHeader, state.gap)
+          else:
+            0.0
+        let sectionHeaderHeight = if sectionHeader >= 0:
+            state.heights.listRowHeight(sectionHeader)
+          else:
+            0.0
         case state.request
         of listRequestIntoView:
           let current = float64(state.scrollState.offset().y)
-          if top < current:
-            target = top
+          let currentRow = state.heights.listRowAt(current, state.gap)
+          let currentHeader = state.listHeaderAbove(currentRow)
+          let currentHeaderHeight = if currentHeader >= 0:
+              state.heights.listRowHeight(currentHeader)
+            else:
+              0.0
+          if top < current + currentHeaderHeight:
+            target = max(sectionHeaderTop, top - sectionHeaderHeight)
           elif top + height > current + viewport64:
             target = top + height - viewport64
           else:
@@ -739,11 +854,13 @@ proc beginList(state: ListState; count: int): ListPlan =
         of listRequestToRow:
           case state.requestAlign
           of Align.Center:
-            target = top + (height - viewport64) / 2
+            let available = max(viewport64 - sectionHeaderHeight, 0.0)
+            target = max(sectionHeaderTop,
+              top - sectionHeaderHeight - (available - height) / 2)
           of Align.End:
-            target = top + height - viewport64
+            target = max(sectionHeaderTop, top + height - viewport64)
           else:
-            target = top
+            target = max(sectionHeaderTop, top - sectionHeaderHeight)
         else:
           discard
       of listRequestToEnd:
@@ -767,11 +884,12 @@ proc beginList(state: ListState; count: int): ListPlan =
     state.scrollState.maxY)
 
   if state.rowCount <= 0:
-    result = ListPlan(first: 0, pastLast: 0)
+    result = ListPlan(first: 0, pastLast: 0, pinnedHeader: -1)
     return
 
   let offset = float64(state.scrollState.offset().y)
   let firstVisible = state.heights.listRowAt(offset, state.gap)
+  let pinnedHeader = state.listHeaderAbove(firstVisible)
   let viewEnd = offset + viewport64
   var visiblePast = firstVisible
   var rowTop = state.heights.listHeightTop(firstVisible, state.gap)
@@ -786,6 +904,7 @@ proc beginList(state: ListState; count: int): ListPlan =
     float64(state.gap)
   let after = state.heights.listHeightTop(pastLast, state.gap)
   result = ListPlan(first: first, pastLast: pastLast,
+    pinnedHeader: pinnedHeader,
     top: listHeightFloat32(top),
     bottom: listHeightFloat32(totalHeight - after))
 
