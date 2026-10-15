@@ -317,6 +317,43 @@ proc paintText(s: scene.Scene; node: ElementNode; textColor: Color;
     s.ops.add(scene.Op(kind: scene.opGlyphs, first: int32(start),
       last: int32(s.glyphs.len), opacity: opacity))
 
+proc paintTextSelection(s: scene.Scene; node: ElementNode; rect, root: Rect;
+                        scale, opacity: float32) =
+  if not node.focused or not (node.textClient of TextFieldClient) or
+      node.shapedText == nil:
+    return
+  let client = TextFieldClient(node.textClient)
+  let range = client.fieldRange()
+  let originX = rect.x + node.pad[3] + node.border[3]
+  let originY = rect.y + node.pad[0] + node.border[0]
+  if range.start != range.`end`:
+    let first = runeIndexAtUtf16(client.text, range.start)
+    let pastLast = runeIndexAtUtf16(client.text, range.`end`)
+    for selected in node.shapedText.appendSelection(@[], first, pastLast, false):
+      let selectedRect = Rect(x: originX + selected.x,
+        y: originY + selected.y, w: selected.w, h: selected.h)
+      let color = node.textSelectionColor
+      s.ops.add(scene.Op(kind: scene.opFill,
+        rect: selectedRect.sceneRect(root, scale),
+        color: sceneColor(color), paint: scene.paintSolid, opacity: opacity))
+      s.ops[^1].wide = s.addWide(wideColors(color, transparent, transparent))
+
+proc paintTextCaret(s: scene.Scene; node: ElementNode; rect, root: Rect;
+                    scale, opacity: float32) =
+  if not node.focused or not (node.textClient of TextFieldClient):
+    return
+  let client = TextFieldClient(node.textClient)
+  let (caret, _, _) = client.boundsForRange(platform.TextRange(
+    start: client.caret, `end`: client.caret))
+  let caretRect = Rect(x: rect.x + float32(caret.x),
+    y: rect.y + float32(caret.y), w: max(float32(caret.w), 1'f32),
+    h: max(float32(caret.h), 1'f32))
+  let color = node.textColor
+  s.ops.add(scene.Op(kind: scene.opFill,
+    rect: caretRect.sceneRect(root, scale), color: sceneColor(color),
+    paint: scene.paintSolid, opacity: opacity))
+  s.ops[^1].wide = s.addWide(wideColors(color, transparent, transparent))
+
 proc fitImage(box, source: Rect; fit: Fit):
     tuple[rect: Rect, src: scene.Rect] =
   if source.w <= 0 or source.h <= 0 or box.w <= 0 or box.h <= 0:
@@ -739,8 +776,18 @@ proc paintScene*(layout: LayoutResult; scale = 1'f32;
           if shadow.inset:
             result.paintShadow(node, layout.rects[slot], layout.root,
                                scale, opacity, shadow)
+        let clipFieldText = node.textClient of TextFieldClient and
+          (node.clipX or node.clipY)
+        if clipFieldText:
+          result.ops.add(layout.clipOp(slot, scale))
+        result.paintTextSelection(node, layout.rects[slot], layout.root,
+                                  scale, opacity)
         result.paintText(node, layout.owner.nodes.effectiveTextColor(slot),
           layout.rects[slot], layout.root, scale, opacity, system)
+        result.paintTextCaret(node, layout.rects[slot], layout.root,
+                              scale, opacity)
+        if clipFieldText:
+          result.ops.add(scene.Op(kind: scene.opPopClip))
         result.paintBitmap(node, layout.rects[slot], layout.root, scale,
                            opacity)
         result.paintSvg(node, layout.rects[slot], layout.root, scale, opacity)

@@ -27,6 +27,7 @@ include mynim/ui/context
 include mynim/ui/list_state
 include mynim/ui/menu
 include mynim/ui/layout
+include mynim/ui/text_input
 include mynim/ui/direction
 include mynim/ui/list
 include mynim/ui/paint

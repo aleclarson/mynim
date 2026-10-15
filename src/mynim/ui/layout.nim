@@ -81,7 +81,7 @@ proc shapeText(nodes: var seq[ElementNode]) =
         textStack.Start
     node.shapedText = system.layout(textStack.Params(text: node.textValue,
       style: node.textStyle, align: alignment, rtl: node.rightToLeft,
-      keepSpaces: true))
+      keepSpaces: true, noWrap: node.textNoWrap))
 
 proc shapeTextToBounds(nodes: var seq[ElementNode]; rects: seq[Rect]): bool =
   let system = textStack.shared()
@@ -2831,8 +2831,8 @@ proc submitted*(e: Element): bool =
   n != nil and n[].submitted
 
 proc onChange*(e: Element; action: proc() {.closure.}): Element =
-  ## Runs when input changes this element. Bound control changes run during
-  ## the current build; native text input changes run before the next build.
+  ## Runs when input changes this element. Bound controls report synchronous
+  ## edits during the build; text-field edits report after syncing on next build.
   result = e
   let n = e.node
   if n != nil and action != nil:

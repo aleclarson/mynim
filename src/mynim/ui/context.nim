@@ -58,6 +58,9 @@ type
     actions: seq[UiAction]
     pendingNotices: Table[uint64, uint8]
     pendingSliderValues: Table[uint64, float64]
+    pendingTextCallbacks: Table[uint64, seq[proc() {.closure.}]]
+    pendingTextSubmitCallbacks: Table[uint64, seq[proc() {.closure.}]]
+    textInputClients: Table[uint64, platform.TextInputClient]
     committedRects: seq[Rect]
     focusIdentity: uint64
     focusActive: bool
@@ -148,7 +151,7 @@ type
     clipX, clipY, hasFollowScroll: bool
     followScrollSlot: int32
     gridCol, gridRow, gridColSpan, gridRowSpan: int
-    hasText, textColorSet, listRowSelected, listRowFocusVisible,
+    hasText, textNoWrap, textColorSet, listRowSelected, listRowFocusVisible,
       listRowHeader, listRowPinnedHeader: bool
     listRowAction: bool
     slider, sliderVertical: bool
@@ -159,7 +162,7 @@ type
     label: string
     textValue: string
     textStyle: textStack.Style
-    textColor: Color
+    textColor, textSelectionColor: Color
     shapedText: textStack.Layout
     textClient: platform.TextInputClient
     clickHandler: proc(mods: platform.Modifiers) {.closure.}
@@ -238,6 +241,7 @@ const
   identityKindSvg = 5'u8
   identityKindText = 6'u8
   identityKindGrid = 7'u8
+  identityKindTextInput = 8'u8
   logPadStart = 1'u8 shl 0
   logPadEnd = 1'u8 shl 1
   logMarginStart = 1'u8 shl 2
@@ -318,6 +322,12 @@ proc newContext*(): Context =
   result.owner.keyedSeen = initHashSet[string]()
   result.owner.pendingNotices = initTable[uint64, uint8]()
   result.owner.pendingSliderValues = initTable[uint64, float64]()
+  result.owner.pendingTextCallbacks =
+    initTable[uint64, seq[proc() {.closure.}]]()
+  result.owner.pendingTextSubmitCallbacks =
+    initTable[uint64, seq[proc() {.closure.}]]()
+  result.owner.textInputClients =
+    initTable[uint64, platform.TextInputClient]()
   result.theme = lightTheme()
 
 proc multiplyWrap(a, b: uint64): uint64 {.inline.} =
@@ -392,6 +402,40 @@ proc notifyAction(owner: ElementOwner; identity: uint64; generation: uint32;
       break
     callback()
   true
+
+proc deferTextInputChange(owner: ElementOwner; identity: uint64;
+                          generation: uint32) =
+  if owner == nil or owner.closed or owner.generation != generation or
+      owner.idSlots.getOrDefault(identity, -1) < 0:
+    return
+  let notices = owner.pendingNotices.getOrDefault(identity)
+  if (notices and noticeChanged) != 0:
+    return
+  owner.pendingNotices[identity] = notices or noticeChanged
+  var callbacks: seq[proc() {.closure.}]
+  for action in owner.actions:
+    if action.kind == actionChange and action.identity == identity and
+        action.generation == generation and action.action != nil:
+      callbacks.add(action.action)
+  if callbacks.len > 0:
+    owner.pendingTextCallbacks[identity] = callbacks
+
+proc deferTextInputSubmit(owner: ElementOwner; identity: uint64;
+                          generation: uint32) =
+  if owner == nil or owner.closed or owner.generation != generation or
+      owner.idSlots.getOrDefault(identity, -1) < 0:
+    return
+  let notices = owner.pendingNotices.getOrDefault(identity)
+  if (notices and noticeSubmitted) != 0:
+    return
+  owner.pendingNotices[identity] = notices or noticeSubmitted
+  var callbacks: seq[proc() {.closure.}]
+  for action in owner.actions:
+    if action.kind == actionSubmit and action.identity == identity and
+        action.generation == generation and action.action != nil:
+      callbacks.add(action.action)
+  if callbacks.len > 0:
+    owner.pendingTextSubmitCallbacks[identity] = callbacks
 
 proc assignKey(owner: ElementOwner; node: var ElementNode; parent: uint64;
                token: string) =
@@ -606,6 +650,9 @@ proc retire(owner: ElementOwner) =
   owner.actions = @[]
   owner.pendingNotices.clear()
   owner.pendingSliderValues.clear()
+  owner.pendingTextCallbacks.clear()
+  owner.pendingTextSubmitCallbacks.clear()
+  owner.textInputClients.clear()
   owner.committedRects = @[]
   owner.focusIdentity = 0
   owner.focusActive = false
@@ -741,6 +788,7 @@ proc newElement(c: Context; row: bool;
                          activateEnter: true,
                          focusVisible: index in c.owner.focusVisibleSlots,
                          focusRingColor: c.theme.focus,
+                         textSelectionColor: c.theme.selection,
                          scrollbarColor: c.theme.scrollbar,
                          scrollbarWidth: c.theme.scrollbarWidth,
                          shrink: 1, justify: Align.Start,
@@ -896,6 +944,12 @@ proc build*(c: Context; view: proc(c: Context) {.closure.}) =
     c.owner.keyedSeen = initHashSet[string]()
     c.owner.pendingNotices = initTable[uint64, uint8]()
     c.owner.pendingSliderValues = initTable[uint64, float64]()
+    c.owner.pendingTextCallbacks =
+      initTable[uint64, seq[proc() {.closure.}]]()
+    c.owner.pendingTextSubmitCallbacks =
+      initTable[uint64, seq[proc() {.closure.}]]()
+    c.owner.textInputClients =
+      initTable[uint64, platform.TextInputClient]()
   inc c.owner.generation
   c.owner.actions.setLen(0)
   c.owner.nodes.setLen(0)
@@ -944,6 +998,8 @@ proc build*(c: Context; view: proc(c: Context) {.closure.}) =
     if not built:
       c.owner.actions.setLen(0)
     c.owner.pendingNotices.clear()
+    c.owner.pendingTextCallbacks.clear()
+    c.owner.pendingTextSubmitCallbacks.clear()
     if built:
       c.owner.pendingSliderValues.clear()
     c.hasPendingKey = false

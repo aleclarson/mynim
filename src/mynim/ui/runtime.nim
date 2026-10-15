@@ -453,6 +453,9 @@ proc accessibilityTree(layout: LayoutResult;
       let (value, _) = node.textClient.textForRange(platform.TextRange(
         start: 0, `end`: high(int)))
       accessible.value = value
+      if node.textClient of TextFieldClient and
+          TextFieldClient(node.textClient).readOnly:
+        accessible.states = accessible.states or platform.accessReadOnly
     if node.focusable or node.clickHandler != nil or node.textClient != nil:
       accessible.states = accessible.states or platform.accessFocusable
       accessible.actions = accessible.actions or platform.actionFocus
@@ -469,7 +472,9 @@ proc accessibilityTree(layout: LayoutResult;
       accessible.states = accessible.states or platform.accessMultiselectable
     if layout.hasScrollAncestor(slot):
       accessible.actions = accessible.actions or platform.actionScrollIntoView
-    if node.textClient != nil:
+    if node.textClient != nil and
+        not (node.textClient of TextFieldClient and
+          TextFieldClient(node.textClient).readOnly):
       accessible.actions = accessible.actions or platform.actionSetValue
     if node.clickHandler != nil or role == platform.roleButton or
         (listItem and node.listState.selectionEnabled and
@@ -596,9 +601,12 @@ proc submitFocusedText(rt: Runtime; mods: platform.Modifiers): bool =
     if action.kind != actionSubmit or action.identity != identity or
         action.generation != owner.generation:
       continue
-    let notices = owner.pendingNotices.getOrDefault(identity)
-    if (notices and noticeSubmitted) == 0:
-      discard owner.notifyAction(identity, owner.generation, actionSubmit)
+    if node.textClient of TextFieldClient:
+      owner.deferTextInputSubmit(identity, owner.generation)
+    else:
+      let notices = owner.pendingNotices.getOrDefault(identity)
+      if (notices and noticeSubmitted) == 0:
+        discard owner.notifyAction(identity, owner.generation, actionSubmit)
     rt.requestFrame()
     return true
   false
@@ -630,7 +638,10 @@ proc inputChanged(rt: Runtime; slot: int; before: string) =
       slot < owner.nodes.len and owner.nodes[slot].textClient != nil:
     let identity = owner.nodes[slot].identity
     if platform.clientTextContext(owner.nodes[slot].textClient).text != before:
-      discard owner.notifyAction(identity, owner.generation, actionChange)
+      if owner.nodes[slot].textClient of TextFieldClient:
+        owner.deferTextInputChange(identity, owner.generation)
+      else:
+        discard owner.notifyAction(identity, owner.generation, actionChange)
   rt.requestFrame()
   rt.updateTextInput()
 
@@ -760,6 +771,15 @@ proc updateTextInput(rt: Runtime) =
     rt.textInputAdapter = TextInputAdapter(runtime: rt, slot: focusedSlot,
                                             client: focusedClient)
 
+  if focusedClient of TextFieldClient:
+    let node = rt.frameLayout.owner.nodes[focusedSlot]
+    let field = TextFieldClient(focusedClient)
+    field.insetX = node.pad[3] + node.border[3]
+    field.insetY = node.pad[0] + node.border[0]
+    field.style = node.textStyle
+    field.rightToLeft = node.rightToLeft
+    field.rebuildFieldLayout()
+
   var state: platform.TextInputState
   if rt.textInputAdapter != nil:
     let adapter = rt.textInputAdapter
@@ -789,13 +809,64 @@ proc updateTextInput(rt: Runtime) =
   rt.lastTextInput = state
   rt.hasTextInputState = true
 
+proc textFieldKey(rt: Runtime; key: platform.Key;
+                  mods: platform.Modifiers): bool =
+  let owner = rt.frameLayout.owner
+  if owner == nil or rt.focusSlot <= 0 or rt.focusSlot >= owner.nodes.len:
+    return false
+  let rawClient = owner.nodes[rt.focusSlot].textClient
+  if not (rawClient of TextFieldClient):
+    return false
+  let client = TextFieldClient(rawClient)
+  if client.hasMark:
+    return true
+
+  if key == platform.keyA and
+      mods in {platform.modCtrl, platform.modSuper}:
+    client.anchor = 0
+    client.caret = platform.utf16Len(client.text)
+    rt.keyboardFocusVisible = true
+    rt.updateTextInput()
+    rt.requestFrame()
+    return true
+
+  let extend = mods == platform.modShift
+  if (mods == 0 or extend) and
+      key in {platform.keyLeft, platform.keyRight, platform.keyHome,
+              platform.keyEnd}:
+    discard client.fieldMove(key, extend)
+    rt.keyboardFocusVisible = true
+    rt.updateTextInput()
+    rt.requestFrame()
+    return true
+
+  if (mods == 0 or extend) and
+      key in {platform.keyBackspace, platform.keyDelete}:
+    if client.readOnly:
+      return true
+    let (range, ok) = client.fieldDeleteRange(key)
+    if not ok:
+      return true
+    if rt.textInputAdapter == nil:
+      return false
+    let replacement = new platform.TextRange
+    replacement[] = range
+    rt.keyboardFocusVisible = true
+    rt.inputComposition.reset()
+    rt.textInputAdapter.replaceText(replacement, "")
+    return true
+  false
+
 proc updatePointerCursor(rt: Runtime) =
   var cursor = platform.cursorDefault
   if rt.hasPointer:
     let target = rt.frameLayout.targetAt(rt.pointerX, rt.pointerY)
-    if target.owner != nil and
-        rt.frameLayout.owner.nodes[int(target.slot)].tableResizeHandle:
-      cursor = platform.cursorResizeEW
+    if target.owner != nil:
+      let node = rt.frameLayout.owner.nodes[int(target.slot)]
+      if node.tableResizeHandle:
+        cursor = platform.cursorResizeEW
+      elif node.textClient != nil:
+        cursor = platform.cursorText
   if not rt.hasPointerCursor or rt.pointerCursor != cursor:
     rt.conn.surface.setCursor(cursor)
     rt.pointerCursor = cursor
@@ -1245,6 +1316,8 @@ proc event(rt: Runtime; ev: platform.SurfaceEvent): bool =
       return false
     if rt.sliderKey(ev.key, ev.mods):
       return true
+    if rt.textFieldKey(ev.key, ev.mods):
+      return true
     var nextFocusSlot = rt.focusSlot
     if rt.frameLayout.handleListKey(rt.focusSlot, ev.key, ev.mods,
         nextFocusSlot):
@@ -1372,6 +1445,19 @@ proc event(rt: Runtime; ev: platform.SurfaceEvent): bool =
     rt.pointerY = float32(ev.y)
     rt.hasPointer = true
     rt.refreshPointer()
+    if rt.pressTarget.owner == rt.frameLayout.owner:
+      let slot = int(rt.pressTarget.slot)
+      let node = rt.frameLayout.owner.nodes[slot]
+      if node.textClient of TextFieldClient:
+        let rect = rt.frameLayout.rects[slot]
+        let client = TextFieldClient(node.textClient)
+        client.insetX = node.pad[3] + node.border[3]
+        client.insetY = node.pad[0] + node.border[0]
+        if client.fieldPointerSelection(
+            float64(rt.pointerX - rect.x), float64(rt.pointerY - rect.y),
+            extend = true):
+          rt.updateTextInput()
+          rt.requestFrame()
     if rt.listReorder != nil and
         rt.listReorder.updateListReorder(rt.pointerX, rt.pointerY):
       rt.listReorderTarget(rt.listReorder)
@@ -1443,6 +1529,15 @@ proc event(rt: Runtime; ev: platform.SurfaceEvent): bool =
       if rt.frameLayout.focusableSlot(slot):
         rt.focusSlot = slot
         rt.keyboardFocusVisible = false
+        if targetNode.textClient of TextFieldClient:
+          let rect = rt.frameLayout.rects[slot]
+          let client = TextFieldClient(targetNode.textClient)
+          client.insetX = targetNode.pad[3] + targetNode.border[3]
+          client.insetY = targetNode.pad[0] + targetNode.border[0]
+          if client.fieldPointerSelection(
+              float64(rt.pointerX - rect.x), float64(rt.pointerY - rect.y),
+              (ev.mods and platform.modShift) != 0):
+            rt.updateTextInput()
     rt.refreshPointer()
     if rt.hoverSlots != previousHover or rt.pressedSlots != previousPressed:
       rt.requestFrame()
@@ -1648,6 +1743,8 @@ proc event(rt: Runtime; ev: platform.SurfaceEvent): bool =
       if owner != nil and slot > 0 and slot < owner.nodes.len and
           owner.nodes[slot].textClient != nil:
         let client = owner.nodes[slot].textClient
+        if client of TextFieldClient and TextFieldClient(client).readOnly:
+          return false
         let before = platform.clientTextContext(client).text
         let (_, actual) = client.textForRange(platform.TextRange(
           start: 0, `end`: high(int)))
