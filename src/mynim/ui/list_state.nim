@@ -795,7 +795,8 @@ proc selectListKey(state: ListState; key: platform.Key;
   true
 
 proc handleListKey(layout: LayoutResult; focusSlot: int;
-                    key: platform.Key; mods: platform.Modifiers): bool =
+                    key: platform.Key; mods: platform.Modifiers;
+                    nextFocusSlot: var int): bool =
   let owner = layout.owner
   if owner == nil or owner.closed or owner.inBuild or
       layout.generation != owner.generation or focusSlot <= 0 or
@@ -804,6 +805,9 @@ proc handleListKey(layout: LayoutResult; focusSlot: int;
   var slot = focusSlot
   while slot > 0:
     let node = owner.nodes[slot]
+    if node.keyHandler != nil and
+        node.keyHandler(key, mods, nextFocusSlot):
+      return true
     if node.listState != nil and node.listRowIndex == -1:
       if node.listState.keyHandler != nil and
           node.listState.keyHandler(key, mods):

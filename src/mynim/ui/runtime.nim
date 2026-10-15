@@ -687,7 +687,12 @@ proc event(rt: Runtime; ev: platform.SurfaceEvent): bool =
         rt.requestFrame()
         return true
       return false
-    if rt.frameLayout.handleListKey(rt.focusSlot, ev.key, ev.mods):
+    var nextFocusSlot = rt.focusSlot
+    if rt.frameLayout.handleListKey(rt.focusSlot, ev.key, ev.mods,
+        nextFocusSlot):
+      if nextFocusSlot != rt.focusSlot:
+        rt.focusSlot = nextFocusSlot
+        discard rt.frameLayout.revealSlot(nextFocusSlot)
       rt.keyboardFocusVisible = true
       rt.requestFrame()
       return true
@@ -958,6 +963,8 @@ proc event(rt: Runtime; ev: platform.SurfaceEvent): bool =
           int(targetNode.listState.frameSlot)
         else:
           clickedSlot
+        if targetNode.treeAccessFocus != nil:
+          targetNode.treeAccessFocus()
         rt.keyboardFocusVisible = false
         rt.cancelKeyPress()
         rt.requestFrame()
@@ -970,6 +977,11 @@ proc event(rt: Runtime; ev: platform.SurfaceEvent): bool =
         rt.cancelKeyPress()
         let scrolled = rt.frameLayout.revealSlot(slot)
         if changed or scrolled:
+          rt.requestFrame()
+        let owner = rt.frameLayout.owner
+        if owner != nil and slot > 0 and slot < owner.nodes.len and
+            owner.nodes[slot].treeAccessFocus != nil:
+          owner.nodes[slot].treeAccessFocus()
           rt.requestFrame()
         result = true
     elif ev.action == platform.accessScrollIntoView and ev.id > 0:

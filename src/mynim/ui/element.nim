@@ -116,6 +116,28 @@ type
       action: platform.AccessActionKind): bool {.closure.}
   ListKeyHandler = proc(key: platform.Key;
       mods: platform.Modifiers): bool {.closure.}
+  UiKeyHandler = proc(key: platform.Key;
+      mods: platform.Modifiers; focusSlot: var int): bool {.closure.}
+  TreeAccessAction = proc(action: platform.AccessActionKind): bool {.closure.}
+  TreeAccessFocus = proc() {.closure.}
+
+  TreeItemState* = ref object
+    ## Persistent identity and expansion state for one declarative tree item.
+    key*: string ## Stable and unique within its Tree.
+    open*: bool ## Shows children when true.
+
+  TreeRow = object
+    item: TreeItemState
+    depth, parent, slot, arrowSlot: int
+    branch: bool
+
+  TreeState* = ref object
+    ## Active item and current visible rows for a declarative tree.
+    activeKey*: string
+    rows: seq[TreeRow]
+    parents: seq[int]
+    depth: int
+    rightToLeft: bool
 
   SortOrder* = object ## One column and direction in a table sort.
     column*: string ## Column ID, or its title when ID is empty.

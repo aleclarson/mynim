@@ -1987,6 +1987,8 @@ proc dispatchAccessTreeAction(layout: LayoutResult; id: uint64;
     if uint64(slot + 1) != id:
       continue
     let node = layout.owner.nodes[slot]
+    if node.treeAccessAction != nil:
+      return node.treeAccessAction(action)
     if node.listState == nil or node.listRowIndex < 0 or
         node.listState.rowAccessAction == nil:
       return false

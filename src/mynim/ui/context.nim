@@ -6,6 +6,7 @@ type
   ContextObj = object
     owner: ElementOwner
     theme: Theme
+    treeState: TreeState
     rightToLeft: bool
     themeEnabled, themeBackground: bool
 
@@ -109,6 +110,9 @@ type
     accessExtraActions: platform.AccessActions
     accessLevel: int
     accessRoleSet: bool
+    keyHandler: UiKeyHandler
+    treeAccessAction: TreeAccessAction
+    treeAccessFocus: TreeAccessFocus
     bitmap: Bitmap
     imageRegion: Rect
     flipX, flipY: bool
