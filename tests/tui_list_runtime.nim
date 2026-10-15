@@ -11,7 +11,7 @@ fake.init(AppHandlerImpl(), platform.AppOptions(name: "ui list test"))
 app.initialized = true
 app.handleReady()
 
-let listState = ui.newListState(20)
+let listState = ui.newListState(20, selectable = true)
 var builtRows: seq[int]
 let listContent = ui.newContent(proc(ctx: ui.Context) =
   builtRows.setLen(0)
@@ -29,9 +29,39 @@ doAssert listSurface.frame()
 doAssert builtRows.len < 100
 doAssert listState.maxOffset().y == 1960
 
+doAssert listSurface.send(platform.SurfaceEvent(kind: platform.pointerDown,
+  x: 5, y: 5))
+doAssert listSurface.send(platform.SurfaceEvent(kind: platform.pointerUp,
+  x: 5, y: 5))
+doAssert listSurface.frame()
+doAssert listState.selected() == 0,
+  "click should select row 0, got " & $listState.selected()
+
+doAssert listSurface.send(platform.SurfaceEvent(kind: platform.keyPressed,
+  key: platform.keyDown))
+doAssert listSurface.frame()
+doAssert listState.selected() == 1
+
+doAssert listSurface.send(platform.SurfaceEvent(kind: platform.keyPressed,
+  key: platform.keyHome))
+doAssert listSurface.frame()
+doAssert listState.selected() == 0
+
 discard listSurface.send(platform.SurfaceEvent(kind: platform.pointerScroll,
   x: 5, y: 5, dy: 100))
 doAssert listState.offset().y == 100
 doAssert listSurface.frame()
 doAssert 5 in builtRows
 doAssert listSurface.pixel(5, 5) == [0'u8, 255, 0, 255]
+
+doAssert listSurface.send(platform.SurfaceEvent(kind: platform.pointerDown,
+  x: 5, y: 5))
+doAssert listSurface.send(platform.SurfaceEvent(kind: platform.pointerUp,
+  x: 5, y: 5))
+doAssert listSurface.frame()
+doAssert listState.selected() == 5
+
+doAssert listSurface.send(platform.SurfaceEvent(kind: platform.keyPressed,
+  key: platform.keyEnd))
+doAssert listSurface.frame()
+doAssert listState.selected() == 99

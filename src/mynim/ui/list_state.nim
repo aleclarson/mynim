@@ -23,10 +23,10 @@ proc listHeightFloat32(value: float64): float32 =
     return high(float32)
   float32(value)
 
-proc findListKey(state: ListState; key: string): int =
+proc findListKey(state: ListState; key: string; nearRow: int): int =
   if state.rowKey == nil or state.rowCount <= 0:
     return -1
-  let near = max(0, min(state.anchor, state.rowCount - 1))
+  let near = max(0, min(nearRow, state.rowCount - 1))
   for distance in 0..listKeySearch:
     let before = near - distance
     if before >= 0 and state.rowKey(before) == key:
@@ -56,7 +56,7 @@ proc syncListAnchor(state: ListState) =
   if not oldAnchorChanged:
     return
 
-  let newAnchor = state.findListKey(state.anchorKey)
+  let newAnchor = state.findListKey(state.anchorKey, state.anchor)
   state.heights.resetListMeasurements()
   if newAnchor >= 0 and not state.keepOffset and
       state.request == listNoRequest:
@@ -64,6 +64,45 @@ proc syncListAnchor(state: ListState) =
     let top = state.heights.listHeightTop(newAnchor, state.gap)
     state.scrollState.scrollTo(0,
       listHeightFloat32(max(top + state.anchorInset + inputMovement, 0.0)))
+
+proc clearListSelection(state: ListState) =
+  let previous = state.selectedRow
+  state.selectedRow = -1
+  state.selectedKey = ""
+  state.selectedKeyValid = false
+  if state.request == listRequestIntoView and state.requestRow == previous:
+    state.request = listNoRequest
+
+proc syncListSelection(state: ListState) =
+  if state.selectedRow < 0:
+    return
+  if state.selectedRow >= state.rowCount:
+    if not state.selectedKeyValid:
+      state.clearListSelection()
+      return
+  if state.rowKey == nil:
+    state.selectedKeyValid = false
+    if state.selectedRow >= state.rowCount:
+      state.clearListSelection()
+    return
+  if state.selectedKeyValid:
+    if state.selectedRow < state.rowCount and
+        state.rowKey(state.selectedRow) == state.selectedKey:
+      return
+    let moved = state.findListKey(state.selectedKey, state.selectedRow)
+    if moved >= 0:
+      if state.request == listRequestIntoView and
+          state.requestRow == state.selectedRow:
+        state.requestRow = moved
+      state.selectedRow = moved
+      return
+    state.clearListSelection()
+    return
+  if state.selectedRow < state.rowCount:
+    state.selectedKey = state.rowKey(state.selectedRow)
+    state.selectedKeyValid = true
+  else:
+    state.clearListSelection()
 
 proc blockPosition(heights: ListHeights; id: int): tuple[index: int, found: bool] =
   var low = 0
@@ -210,12 +249,14 @@ proc resizeListHeights(heights: var ListHeights; count: int) =
   heights.dirty = true
 
 proc newListState*(estimatedRowHeight = 28'f32; rowGap = 0'f32;
-                   rowKey: ListRowKey = nil; keepOffset = false): ListState =
+                   rowKey: ListRowKey = nil; keepOffset = false;
+                   selectable = false): ListState =
   ## Creates persistent state for a virtualized list.
   ##
   ## rowKey should return a stable, unique key for each logical row. When a
   ## keyed row moves, the list follows it unless keepOffset is true. The moved
-  ## key is searched within 1000 rows of its previous index.
+  ## key is searched within 1000 rows of its previous index. Set selectable
+  ## to enable row clicks and keyboard selection; select also enables it.
   if not estimatedRowHeight.finiteMotion or estimatedRowHeight <= 0 or
       not rowGap.finiteMotion or rowGap < 0:
     raise newException(ValueError,
@@ -227,7 +268,88 @@ proc newListState*(estimatedRowHeight = 28'f32; rowGap = 0'f32;
   result.gap = rowGap
   result.rowKey = rowKey
   result.keepOffset = keepOffset
+  result.selectionEnabled = selectable
+  result.selectedRow = -1
   result.last = -1
+
+func selected*(state: ListState): int =
+  ## Returns the chosen row index, or -1 when no row is chosen.
+  if state == nil: -1 else: state.selectedRow
+
+proc select*(state: ListState; row: int) =
+  ## Chooses row, or clears the choice with -1, and scrolls it into view.
+  if state == nil:
+    raise newException(ValueError, "ui: list state cannot be nil")
+  if row < -1:
+    raise newException(ValueError, "ui: selected row must be -1 or greater")
+  state.selectionEnabled = true
+  if row < 0:
+    state.clearListSelection()
+    return
+  state.selectedRow = row
+  state.selectedKey = ""
+  state.selectedKeyValid = state.rowKey != nil and row < state.rowCount
+  if state.selectedKeyValid:
+    state.selectedKey = state.rowKey(row)
+  state.request = listRequestIntoView
+  state.requestRow = row
+
+proc enableSelection*(state: ListState): ListState =
+  ## Enables click and keyboard selection for this list.
+  if state == nil:
+    raise newException(ValueError, "ui: list state cannot be nil")
+  state.selectionEnabled = true
+  state
+
+proc selectListKey(state: ListState; key: platform.Key;
+                   mods: platform.Modifiers): bool =
+  if state == nil or not state.selectionEnabled or mods != 0 or
+      state.rowCount <= 0:
+    return false
+  let current = state.selectedRow
+  var target = -1
+  case key
+  of platform.keyDown:
+    target = if current < 0: 0 else: min(current + 1, state.rowCount - 1)
+  of platform.keyUp:
+    target = if current < 0: 0 else: max(current - 1, 0)
+  of platform.keyHome:
+    target = 0
+  of platform.keyEnd:
+    target = state.rowCount - 1
+  of platform.keyPageDown, platform.keyPageUp:
+    when defined(macosx):
+      return false
+    else:
+      let direction = if key == platform.keyPageDown: 1.0 else: -1.0
+      let start = if current >= 0:
+          current
+        else:
+          state.heights.listRowAt(float64(state.scrollState.offsetY), state.gap)
+      let top = state.heights.listHeightTop(start, state.gap)
+      let pageY = max(0.0, top + direction * float64(state.viewportHeight))
+      target = state.heights.listRowAt(pageY, state.gap)
+      if target == start:
+        let step = if direction > 0: 1 else: -1
+        target = max(0, min(state.rowCount - 1, start + step))
+  else:
+    return false
+  state.select(target)
+  true
+
+proc handleListKey(layout: LayoutResult; focusSlot: int;
+                    key: platform.Key; mods: platform.Modifiers): bool =
+  let owner = layout.owner
+  if owner == nil or owner.closed or owner.inBuild or
+      layout.generation != owner.generation or focusSlot <= 0 or
+      focusSlot >= owner.nodes.len:
+    return false
+  var slot = focusSlot
+  while slot > 0:
+    let node = owner.nodes[slot]
+    if node.listState != nil and node.listRowIndex == -1:
+      return node.listState.selectListKey(key, mods)
+    slot = int(node.parent)
 
 proc offset*(state: ListState): tuple[x, y: float32] =
   ## Returns the current scroll offsets of the list.
@@ -279,6 +401,7 @@ proc atEnd*(state: ListState): bool =
 proc beginList(state: ListState; count: int): ListPlan =
   state.rowCount = max(count, 0)
   state.heights.resizeListHeights(state.rowCount)
+  state.syncListSelection()
   state.syncListAnchor()
   let viewport = if state.viewportHeight > 0:
       state.viewportHeight

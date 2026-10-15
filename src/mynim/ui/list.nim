@@ -1,10 +1,14 @@
 ## Virtualized list elements and their frame-local row nodes.
 
+proc rowSelectionHandler(state: ListState; row: int): proc() {.closure.} =
+  result = proc() = state.select(row)
+
 proc list*(c: Context; state: ListState; count: Natural;
            buildRow: proc(row: int) {.closure.}): Element =
   ## Builds only the rows visible in the viewport and a small overscan.
   ## Heights are measured as rows appear; unseen rows use the mean measured
   ## height, or the estimate passed to newListState before any are measured.
+  ## When selection is enabled, selected() reports the chosen row index.
   if state == nil:
     raise newException(ValueError, "ui: list state cannot be nil")
   if c == nil or c.owner == nil or not c.owner.inBuild:
@@ -15,6 +19,8 @@ proc list*(c: Context; state: ListState; count: Natural;
 
   let plan = state.beginList(int(count))
   result = c.column().scrollY(state.scrollState)
+  if state.selectionEnabled:
+    discard result.focusable()
   let container = result.node
   if container == nil:
     return
@@ -33,6 +39,8 @@ proc list*(c: Context; state: ListState; count: Natural;
       if rowNode != nil:
         rowNode.listState = state
         rowNode.listRowIndex = rowIndex
+      if state.selectionEnabled:
+        discard row.focusable().onClick(rowSelectionHandler(state, rowIndex))
       discard row.children(proc() =
         if buildRow != nil:
           buildRow(rowIndex)

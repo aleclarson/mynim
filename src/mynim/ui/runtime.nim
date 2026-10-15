@@ -563,6 +563,10 @@ proc event(rt: Runtime; ev: platform.SurfaceEvent): bool =
         rt.requestFrame()
         return true
       return false
+    if rt.frameLayout.handleListKey(rt.focusSlot, ev.key, ev.mods):
+      rt.keyboardFocusVisible = true
+      rt.requestFrame()
+      return true
     if ev.key in {platform.keyEnter, platform.keySpace} and
         ev.mods == 0 and rt.focusSlot > 0 and
         rt.frameLayout.clickableSlot(rt.focusSlot):
@@ -695,7 +699,10 @@ proc event(rt: Runtime; ev: platform.SurfaceEvent): bool =
     rt.pressTarget = rt.frameLayout.targetAt(rt.pointerX, rt.pointerY)
     rt.pressHoverSlots = rt.frameLayout.slotsAt(rt.pointerX, rt.pointerY)
     if rt.pressTarget.owner != nil:
-      let slot = int(rt.pressTarget.slot)
+      var slot = int(rt.pressTarget.slot)
+      let targetNode = rt.frameLayout.owner.nodes[slot]
+      if targetNode.listState != nil and targetNode.listRowIndex >= 0:
+        slot = int(targetNode.listState.frameSlot)
       if rt.frameLayout.focusableSlot(slot):
         rt.focusSlot = slot
         rt.keyboardFocusVisible = false
@@ -768,9 +775,13 @@ proc event(rt: Runtime; ev: platform.SurfaceEvent): bool =
     if ev.action == platform.accessPress:
       result = rt.frameLayout.dispatchAccessPress(ev.id)
       if result:
-        let slot = int(ev.id - 1)
-        rt.clickedSlots = @[slot]
-        rt.focusSlot = slot
+        let clickedSlot = int(ev.id - 1)
+        var focusSlot = clickedSlot
+        let targetNode = rt.frameLayout.owner.nodes[clickedSlot]
+        if targetNode.listState != nil and targetNode.listRowIndex >= 0:
+          focusSlot = int(targetNode.listState.frameSlot)
+        rt.clickedSlots = @[clickedSlot]
+        rt.focusSlot = focusSlot
         rt.keyboardFocusVisible = false
         rt.cancelKeyPress()
         rt.requestFrame()

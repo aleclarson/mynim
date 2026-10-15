@@ -108,12 +108,14 @@ type
     rowCount: int
     viewportHeight: float32
     first, last: int
+    selectedRow: int
+    selectedKey: string
     anchor: int
     anchorKey: string
     anchorInset: float64
     anchorScrollY: float32
     laidOut, visibleRead, atEnd: bool
-    anchorValid: bool
+    anchorValid, selectedKeyValid, selectionEnabled: bool
     request: ListRequestKind
     requestRow: int
     requestAlign: Align
