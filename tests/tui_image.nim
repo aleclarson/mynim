@@ -24,8 +24,9 @@ app.handleReady()
 var fit = ui.Fit.FillBox
 var imageWidth, imageHeight = 40'f32
 var grayscale = false
+var tint = ui.transparent
 let content = ui.newContent(proc(ctx: ui.Context) =
-  let image = ctx.image(bitmap).size(imageWidth, imageHeight).fit(fit)
+  let image = ctx.image(bitmap).size(imageWidth, imageHeight).fit(fit).tint(tint)
   if grayscale:
     discard image.grayscale()
 )
@@ -74,6 +75,18 @@ doAssert native.pixel(5, 5) == [54'u8, 54, 54, 255]
 doAssert native.pixel(35, 5) == [182'u8, 182, 182, 255]
 
 grayscale = false
+tint = ui.rgb(255, 0, 0)
+discard native.send(platform.SurfaceEvent(kind: platform.surfaceResize))
+doAssert native.frame()
+doAssert native.pixel(35, 35) == [0'u8, 0, 255, 255]
+doAssert native.pixel(35, 5) == [0'u8, 0, 0, 255]
+
+tint = ui.rgba(255, 0, 0, 0.5)
+discard native.send(platform.SurfaceEvent(kind: platform.surfaceResize))
+doAssert native.frame()
+doAssert native.pixel(35, 35) == [0'u8, 0, 128, 128]
+
+tint = ui.transparent
 let updatedPixels = sourceImage.newRgba(sourceImage.rect(0, 0, 2, 2))
 for y in 0..<2:
   for x in 0..<2:

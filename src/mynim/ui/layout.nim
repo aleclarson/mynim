@@ -1865,6 +1865,14 @@ proc grayscale*(e: Element): Element =
   if n != nil and (n.bitmap != nil or n.vector != nil):
     n.grayscale = true
 
+proc tint*(e: Element; value: Color): Element =
+  ## Multiplies bitmap or SVG pixels by a straight color and alpha.
+  ## Color() removes the tint.
+  result = e
+  let n = e.node
+  if n != nil and (n.bitmap != nil or n.vector != nil):
+    n.imageTint = value
+
 proc svgColor*(e: Element; value: Color): Element =
   ## Sets the color SVG shapes use for `currentColor`.
   result = e

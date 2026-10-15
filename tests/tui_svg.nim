@@ -32,9 +32,10 @@ app.handleReady()
 var color = ui.rgb(20, 80, 160)
 var fit = ui.Fit.Contain
 var grayscale = false
+var tint = ui.transparent
 var vector = parsed.svg
 let content = ui.newContent(proc(ctx: ui.Context) =
-  let image = ctx.svg(vector).size(40, 40).fit(fit).svgColor(color)
+  let image = ctx.svg(vector).size(40, 40).fit(fit).svgColor(color).tint(tint)
   if grayscale:
     discard image.grayscale()
 )
@@ -63,6 +64,13 @@ doAssert native.frame()
 doAssert native.pixel(5, 20) == [0'u8, 0, 255, 255]
 doAssert native.pixel(35, 20) == [255'u8, 0, 0, 255]
 
+tint = ui.rgb(255, 0, 0)
+discard native.send(platform.SurfaceEvent(kind: platform.surfaceResize))
+doAssert native.frame()
+doAssert native.pixel(5, 20) == [0'u8, 0, 255, 255]
+doAssert native.pixel(35, 20) == [0'u8, 0, 0, 255]
+
+tint = ui.transparent
 grayscale = true
 discard native.send(platform.SurfaceEvent(kind: platform.surfaceResize))
 doAssert native.frame()

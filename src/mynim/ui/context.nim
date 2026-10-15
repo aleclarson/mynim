@@ -90,6 +90,7 @@ type
     bitmap: Bitmap
     vector: Svg
     vectorColor: Color
+    imageTint: Color
     grayscale: bool
     fit: Fit
     width, height, minW, minH, maxW, maxH, basis: UiLength
