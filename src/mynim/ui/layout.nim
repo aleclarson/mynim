@@ -2674,6 +2674,73 @@ proc markBoundValueChanged(e: Element) =
     if e.owner.invalidate != nil:
       e.owner.invalidate()
 
+proc sliderDecimals(value: float64): int =
+  let parts = formatFloat(abs(value), ffScientific, -1).split('e')
+  if parts.len != 2:
+    return 15
+  let exponent = parseInt(parts[1])
+  let point = parts[0].find('.')
+  let digits = if point < 0: 0 else: parts[0].len - point - 1
+  max(digits - exponent, 0)
+
+proc snapSliderValue(value, low, high, step: float64): float64 =
+  if high <= low:
+    return low
+  result = min(max(value, low), high)
+  if step <= 0:
+    return
+  result = low + round((result - low) / step) * step
+  if result > high:
+    result -= step
+  let precision = max(sliderDecimals(step), sliderDecimals(low))
+  if precision < 15:
+    try:
+      result = parseFloat(formatFloat(result, ffDecimal, precision))
+    except ValueError:
+      discard
+
+proc step*(e: Element; value: float64): Element =
+  ## Sets the slider's keyboard and accessibility increment, and pointer snap.
+  result = e
+  let n = e.node
+  if n != nil and n[].slider and classify(value) notin
+      {fcNan, fcInf, fcNegInf} and value > 0:
+    n[].sliderStep = value
+
+proc vertical*(e: Element): Element =
+  ## Makes a SliderBase run from low at the bottom to high at the top.
+  result = e
+  let n = e.node
+  if n != nil and n[].slider:
+    n[].sliderVertical = true
+
+proc sliderBase*(c: Context; value: var float64; low, high: float64): Element =
+  ## Creates a slider without a look. Drag it or use arrows, Page Up/Down,
+  ## Home, and End to change the value; step sets the increment and snap.
+  ## Call changed() or register onChange() to observe edits in this build.
+  if classify(low) in {fcNan, fcInf, fcNegInf} or
+      classify(high) in {fcNan, fcInf, fcNegInf} or low > high or
+      classify(high - low) in {fcNan, fcInf, fcNegInf} or
+      classify(value) in {fcNan, fcInf, fcNegInf}:
+    raise newException(ValueError, "ui: slider values and range must be finite")
+  result = c.box().focusable()
+  let n = result.node
+  if n == nil:
+    return
+  n[].slider = true
+  n[].sliderLow = low
+  n[].sliderHigh = high
+  n[].sliderStep = (high - low) / 100
+  n[].accessRole = platform.roleSlider
+  n[].accessRoleSet = true
+  if result.owner.pendingSliderValues.hasKey(n[].identity):
+    let pending = result.owner.pendingSliderValues[n[].identity]
+    let next = min(max(pending, low), high)
+    if next != value:
+      value = next
+      result.markBoundValueChanged()
+  n[].sliderValue = value
+
 proc checkboxBase*(c: Context; checked: var bool): Element =
   ## Creates a check box without a look. Style its contents and set a label;
   ## pointer, Space, or accessibility activation toggles checked and reports

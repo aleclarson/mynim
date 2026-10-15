@@ -39,6 +39,50 @@ proc primaryButton*(c: Context; label: string): Element =
   ## Creates an accent-colored button for the primary action.
   c.themedButton(label, primary = true)
 
+proc slider*(c: Context; value: var float64; low, high: float64;
+             stepSize = 0'f64): Element =
+  ## Creates a themed horizontal slider. Set its label and observe edits with
+  ## changed() or onChange(); stepSize snaps pointer and keyboard input.
+  let theme = c.theme
+  let diameter = theme.space(5)
+  let height = theme.space(5)
+  let trackHeight = theme.space(1.5)
+  result = c.sliderBase(value, low, high).height(height)
+    .minWidth(theme.space(20)).paddingX(diameter / 2)
+  if stepSize > 0:
+    result = result.step(stepSize)
+  let amount = if high > low:
+      min(max((value - low) / (high - low), 0'f64), 1'f64).float32
+    else:
+      0'f32
+  let rtl = c.direction() == Direction.RightToLeft
+  let position = if rtl: 1'f32 - amount else: amount
+  let hovered = result.hovered()
+  let pressed = result.pressed()
+  let knobColor = if pressed: theme.accentPressed
+    elif hovered: theme.accentHover else: theme.accent
+  discard result.children(proc() =
+    let area = c.box().fill().shrink(0)
+    discard area.children(proc() =
+      discard c.box().absolute().left(0).right(0)
+        .topPercent(50).height(trackHeight)
+        .margin(-trackHeight / 2, 0, 0, 0)
+        .radius(trackHeight / 2).background(theme.border)
+      discard c.box().absolute()
+        .leftPercent((if rtl: position else: 0'f32) * 100)
+        .topPercent(50).widthPercent(amount * 100).height(trackHeight)
+        .margin(-trackHeight / 2, 0, 0, 0)
+        .radius(trackHeight / 2)
+        .background(theme.accent)
+      discard c.box().absolute().leftPercent(position * 100)
+        .topPercent(50).size(diameter, diameter)
+        .margin(-diameter / 2, 0, 0, -diameter / 2)
+        .radius(diameter / 2)
+        .background(knobColor).border(2, theme.background)
+        .shadow(0, 1, 2, 0, rgba(0, 0, 0, 0.18'f32))
+    )
+  )
+
 proc checkboxIndicator(c: Context; theme: Theme; checked, mixed,
                        hovered: bool): Element =
   let size = theme.space(4)

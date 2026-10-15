@@ -440,6 +440,15 @@ proc accessibilityTree(layout: LayoutResult;
     accessible.states = accessible.states or node.accessExtraStates
     accessible.actions = accessible.actions or node.accessExtraActions
     accessible.level = node.accessLevel
+    if node.slider:
+      accessible.min = node.sliderLow
+      accessible.max = node.sliderHigh
+      accessible.now = node.sliderValue
+      accessible.step = node.sliderStep
+      accessible.actions = accessible.actions or platform.actionIncrement or
+        platform.actionDecrement
+      if node.sliderVertical:
+        accessible.states = accessible.states or platform.accessVertical
     if node.textClient != nil:
       let (value, _) = node.textClient.textForRange(platform.TextRange(
         start: 0, `end`: high(int)))
@@ -812,6 +821,108 @@ proc refreshPointer(rt: Runtime) =
     rt.pressedSlots.add(rt.keyPressSlot)
   rt.updatePointerCursor()
 
+proc sliderAncestor(layout: LayoutResult; slot: int): int =
+  let owner = layout.owner
+  if owner == nil or owner.closed or layout.generation != owner.generation:
+    return -1
+  var current = slot
+  while current > 0 and current < owner.nodes.len:
+    let node = owner.nodes[current]
+    if node.slider:
+      return current
+    current = int(node.parent)
+  -1
+
+proc queueSliderValue(rt: Runtime; slot: int; value: float64): bool =
+  let layout = rt.frameLayout
+  let owner = layout.owner
+  if owner == nil or owner.closed or layout.generation != owner.generation or
+      slot <= 0 or slot >= owner.nodes.len:
+    return false
+  let node = owner.nodes[slot]
+  if not node.slider or classify(value) in {fcNan, fcInf, fcNegInf}:
+    return false
+  let identity = node.identity
+  let current = owner.pendingSliderValues.getOrDefault(identity,
+    node.sliderValue)
+  let next = value.snapSliderValue(node.sliderLow, node.sliderHigh,
+    node.sliderStep)
+  if next == current:
+    return false
+  owner.pendingSliderValues[identity] = next
+  rt.requestFrame()
+  true
+
+proc queueSliderPointer(rt: Runtime; slot: int): bool =
+  let layout = rt.frameLayout
+  let owner = layout.owner
+  if owner == nil or owner.closed or layout.generation != owner.generation or
+      slot <= 0 or slot >= owner.nodes.len or
+      slot >= layout.rects.len or
+      classify(rt.pointerX) in {fcNan, fcInf, fcNegInf} or
+      classify(rt.pointerY) in {fcNan, fcInf, fcNegInf}:
+    return false
+  let node = owner.nodes[slot]
+  let bounds = layout.rects[slot]
+  var fraction: float32
+  if node.sliderVertical:
+    let top = bounds.y + node.border[0] + node.pad[0]
+    let height = bounds.h - node.contentInsetY
+    if height <= 0:
+      return false
+    fraction = 1 - (rt.pointerY - top) / height
+  else:
+    let left = bounds.x + node.border[3] + node.pad[3]
+    let width = bounds.w - node.contentInsetX
+    if width <= 0:
+      return false
+    fraction = (rt.pointerX - left) / width
+    if node.rightToLeft:
+      fraction = 1 - fraction
+  fraction = max(0'f32, min(1'f32, fraction))
+  let value = node.sliderLow + fraction.float64 *
+    (node.sliderHigh - node.sliderLow)
+  rt.queueSliderValue(slot, value)
+
+proc sliderKey(rt: Runtime; key: platform.Key;
+               mods: platform.Modifiers): bool =
+  if mods != 0 or not rt.frameLayout.focusableSlot(rt.focusSlot):
+    return false
+  let owner = rt.frameLayout.owner
+  if owner == nil or rt.focusSlot <= 0 or rt.focusSlot >= owner.nodes.len:
+    return false
+  let node = owner.nodes[rt.focusSlot]
+  if not node.slider:
+    return false
+  let identity = node.identity
+  let current = owner.pendingSliderValues.getOrDefault(identity,
+    node.sliderValue)
+  let range = node.sliderHigh - node.sliderLow
+  let step = if node.sliderStep > 0: node.sliderStep else: range / 100
+  let pageStep = max(step, range / 10)
+  var value = current
+  case key
+  of platform.keyLeft:
+    value += (if node.rightToLeft and not node.sliderVertical: step else: -step)
+  of platform.keyRight:
+    value += (if node.rightToLeft and not node.sliderVertical: -step else: step)
+  of platform.keyDown:
+    value -= step
+  of platform.keyUp:
+    value += step
+  of platform.keyPageDown:
+    value -= pageStep
+  of platform.keyPageUp:
+    value += pageStep
+  of platform.keyHome:
+    value = node.sliderLow
+  of platform.keyEnd:
+    value = node.sliderHigh
+  else:
+    return false
+  discard rt.queueSliderValue(rt.focusSlot, value)
+  true
+
 proc autoScrollListReorder(rt: Runtime; state: ListState): bool
 
 proc renderFrame(rt: Runtime; presentFrame = true) =
@@ -1132,6 +1243,8 @@ proc event(rt: Runtime; ev: platform.SurfaceEvent): bool =
         rt.requestFrame()
         return true
       return false
+    if rt.sliderKey(ev.key, ev.mods):
+      return true
     var nextFocusSlot = rt.focusSlot
     if rt.frameLayout.handleListKey(rt.focusSlot, ev.key, ev.mods,
         nextFocusSlot):
@@ -1270,6 +1383,11 @@ proc event(rt: Runtime; ev: platform.SurfaceEvent): bool =
           rt.frameLayout.rects, rt.pointerX):
         rt.requestFrame()
       return false
+    if rt.pressTarget.owner == rt.frameLayout.owner:
+      let sliderSlot = rt.frameLayout.sliderAncestor(
+        int(rt.pressTarget.slot))
+      if sliderSlot >= 0:
+        discard rt.queueSliderPointer(sliderSlot)
     if rt.hoverSlots != previousHover or rt.pressedSlots != previousPressed:
       rt.requestFrame()
     false
@@ -1314,6 +1432,10 @@ proc event(rt: Runtime; ev: platform.SurfaceEvent): bool =
       rt.beginTableReorder(rt.pressTarget)
     if rt.pressTarget.owner != nil:
       var slot = int(rt.pressTarget.slot)
+      let sliderSlot = rt.frameLayout.sliderAncestor(slot)
+      if sliderSlot >= 0:
+        slot = sliderSlot
+        discard rt.queueSliderPointer(sliderSlot)
       let targetNode = rt.frameLayout.owner.nodes[slot]
       if targetNode.listState != nil and targetNode.listRowIndex >= 0 and
           not targetNode.listRowHeader:
@@ -1387,11 +1509,18 @@ proc event(rt: Runtime; ev: platform.SurfaceEvent): bool =
           rt.refreshPointer()
           rt.requestFrame()
           return true
+    let sliderSlot = if rt.pressTarget.owner == rt.frameLayout.owner:
+        rt.frameLayout.sliderAncestor(int(rt.pressTarget.slot))
+      else:
+        -1
+    if sliderSlot >= 0:
+      discard rt.queueSliderPointer(sliderSlot)
     var clickedSlot = -1
-    result = rt.frameLayout.dispatchClick(rt.pressTarget,
+    let clicked = rt.frameLayout.dispatchClick(rt.pressTarget,
       rt.pointerX, rt.pointerY, rt.pressMods, clickedSlot)
+    result = clicked or sliderSlot >= 0
     rt.clickedSlots.setLen(0)
-    if result:
+    if clicked:
       rt.clickedSlots.add(clickedSlot)
     rt.pressTarget = Element()
     rt.pressMods = 0
@@ -1454,6 +1583,28 @@ proc event(rt: Runtime; ev: platform.SurfaceEvent): bool =
         rt.keyboardFocusVisible = false
         rt.cancelKeyPress()
         rt.requestFrame()
+    elif ev.action in {platform.accessIncrement, platform.accessDecrement} and
+        ev.id > 0:
+      let slot = int(ev.id - 1)
+      let owner = rt.frameLayout.owner
+      if owner != nil and slot > 0 and slot < owner.nodes.len and
+          owner.nodes[slot].slider:
+        let node = owner.nodes[slot]
+        let identity = node.identity
+        let current = owner.pendingSliderValues.getOrDefault(identity,
+          node.sliderValue)
+        let delta = if ev.action == platform.accessIncrement:
+            node.sliderStep
+          else:
+            -node.sliderStep
+        let focusChanged = rt.focusSlot != slot or rt.keyboardFocusVisible
+        rt.focusSlot = slot
+        rt.keyboardFocusVisible = false
+        rt.cancelKeyPress()
+        discard rt.queueSliderValue(slot, current + delta)
+        if focusChanged:
+          rt.requestFrame()
+        result = true
     elif ev.action in {platform.accessExpand, platform.accessCollapse}:
       result = rt.frameLayout.dispatchAccessTreeAction(ev.id, ev.action)
       if result:

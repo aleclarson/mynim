@@ -57,6 +57,7 @@ type
     focusRequests: seq[HandleFocusRequest]
     actions: seq[UiAction]
     pendingNotices: Table[uint64, uint8]
+    pendingSliderValues: Table[uint64, float64]
     committedRects: seq[Rect]
     focusIdentity: uint64
     focusActive: bool
@@ -150,6 +151,8 @@ type
     hasText, textColorSet, listRowSelected, listRowFocusVisible,
       listRowHeader, listRowPinnedHeader: bool
     listRowAction: bool
+    slider, sliderVertical: bool
+    sliderLow, sliderHigh, sliderValue, sliderStep: float64
     textAlign: Align
     hovered, pressed, clicked, changed, submitted,
       valueChangedInBuild: bool
@@ -314,6 +317,7 @@ proc newContext*(): Context =
   result.owner.previousInteraction = initTable[uint64, uint8]()
   result.owner.keyedSeen = initHashSet[string]()
   result.owner.pendingNotices = initTable[uint64, uint8]()
+  result.owner.pendingSliderValues = initTable[uint64, float64]()
   result.theme = lightTheme()
 
 proc multiplyWrap(a, b: uint64): uint64 {.inline.} =
@@ -601,6 +605,7 @@ proc retire(owner: ElementOwner) =
   owner.focusRequests = @[]
   owner.actions = @[]
   owner.pendingNotices.clear()
+  owner.pendingSliderValues.clear()
   owner.committedRects = @[]
   owner.focusIdentity = 0
   owner.focusActive = false
@@ -890,6 +895,7 @@ proc build*(c: Context; view: proc(c: Context) {.closure.}) =
     c.owner.previousInteraction = initTable[uint64, uint8]()
     c.owner.keyedSeen = initHashSet[string]()
     c.owner.pendingNotices = initTable[uint64, uint8]()
+    c.owner.pendingSliderValues = initTable[uint64, float64]()
   inc c.owner.generation
   c.owner.actions.setLen(0)
   c.owner.nodes.setLen(0)
@@ -938,6 +944,8 @@ proc build*(c: Context; view: proc(c: Context) {.closure.}) =
     if not built:
       c.owner.actions.setLen(0)
     c.owner.pendingNotices.clear()
+    if built:
+      c.owner.pendingSliderValues.clear()
     c.hasPendingKey = false
     c.pendingKey.setLen(0)
     c.owner.previousInteraction.clear()
