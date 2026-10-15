@@ -378,21 +378,27 @@ proc applyHandleFocusRequests(rt: Runtime; layout: LayoutResult): bool =
   rt.requestFrame()
   true
 
-proc runHandleShortcut(rt: Runtime; mods: platform.Modifiers;
-                       key: platform.Key): bool =
+proc runShortcutAction(rt: Runtime; mods: platform.Modifiers;
+                      key: platform.Key): bool =
   let owner = rt.context.owner
-  if owner == nil or owner.closed or not owner.focusActive or
-      rt.focusSlot <= 0 or rt.focusSlot >= owner.nodes.len:
+  if owner == nil or owner.closed or not owner.focusActive:
     return false
-  let focusedIdentity = owner.nodes[rt.focusSlot].identity
+  let focusedIdentity = if rt.focusSlot > 0 and rt.focusSlot < owner.nodes.len:
+      owner.nodes[rt.focusSlot].identity
+    else:
+      0'u64
   var winner = -1
   var bestDistance = high(int)
-  for index, shortcut in rt.context.shortcutActions:
+  for index, shortcut in owner.shortcutActions:
     if shortcut.modifiers != mods or shortcut.key != key or
         shortcut.identity == 0 or shortcut.generation != owner.generation:
       continue
-    let slot = owner.idSlots.getOrDefault(shortcut.identity, -1)
-    if slot <= 0:
+    if owner.idSlots.getOrDefault(shortcut.identity, -1) < 0:
+      continue
+    if focusedIdentity == 0:
+      if shortcut.identity == rootIdentity and bestDistance > 0:
+        winner = index
+        bestDistance = 0
       continue
     var identity = focusedIdentity
     var distance = 0
@@ -408,7 +414,7 @@ proc runHandleShortcut(rt: Runtime; mods: platform.Modifiers;
       dec remaining
   if winner < 0:
     return false
-  let action = rt.context.shortcutActions[winner].action
+  let action = owner.shortcutActions[winner].action
   if action == nil:
     return false
   action()
@@ -954,7 +960,7 @@ proc event(rt: Runtime; ev: platform.SurfaceEvent): bool =
         rt.refreshPointer()
         rt.requestFrame()
       return true
-    if rt.runHandleShortcut(ev.mods, ev.key):
+    if rt.runShortcutAction(ev.mods, ev.key):
       return true
     var dx, dy, page: float32
     if ev.mods == 0:

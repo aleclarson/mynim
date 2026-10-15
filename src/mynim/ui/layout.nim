@@ -2636,6 +2636,16 @@ proc onClick*(e: Element;
     if handler != nil:
       n.focusable = true
 
+proc onShortcut*(e: Element; mods: platform.Modifiers; key: platform.Key;
+                 action: proc() {.closure.}): Element =
+  ## Runs action when this element or one of its descendants has focus.
+  result = e
+  let n = e.node
+  if n != nil and action != nil:
+    e.owner.shortcutActions.add(HandleShortcut(
+      identity: n[].identity, generation: e.generation,
+      modifiers: mods, key: key, action: action))
+
 proc label*(e: Element; value: string): Element =
   ## Gives an element an accessible name.
   result = e

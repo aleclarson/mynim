@@ -5,7 +5,6 @@ type
 
   ContextObj = object
     owner: ElementOwner
-    shortcutActions: seq[HandleShortcut]
     theme: Theme
     treeState: TreeState
     pendingKey: string
@@ -47,6 +46,7 @@ type
     previousInteraction: Table[uint64, uint8]
     keyedSeen: HashSet[string]
     focusRequests: seq[HandleFocusRequest]
+    shortcutActions: seq[HandleShortcut]
     committedRects: seq[Rect]
     focusIdentity: uint64
     focusActive: bool
@@ -554,6 +554,7 @@ proc retire(owner: ElementOwner) =
   owner.previousInteraction.clear()
   owner.keyedSeen.clear()
   owner.focusRequests = @[]
+  owner.shortcutActions = @[]
   owner.committedRects = @[]
   owner.focusIdentity = 0
   owner.focusActive = false
@@ -622,8 +623,22 @@ proc onShortcut*(handle: var Handle; c: Context; mods: platform.Modifiers;
   if c == nil or c.owner == nil or c.owner.closed or not c.owner.inBuild or
       action == nil:
     return
-  c.shortcutActions.add(HandleShortcut(handle: handle.initState(),
+  c.owner.shortcutActions.add(HandleShortcut(handle: handle.initState(),
     modifiers: mods, key: key, action: action))
+
+proc onShortcut*(c: Context; mods: platform.Modifiers; key: platform.Key;
+                 action: proc() {.closure.}) =
+  ## Registers a shortcut for the current parent, or the whole window at root.
+  if c == nil or c.owner == nil or c.owner.closed or not c.owner.inBuild or
+      action == nil:
+    return
+  let slot = int(c.owner.parent)
+  if slot < 0 or slot >= c.owner.nodes.len:
+    return
+  c.owner.shortcutActions.add(HandleShortcut(
+    identity: c.owner.nodes[slot].identity,
+    generation: c.owner.generation, modifiers: mods, key: key,
+    action: action))
 
 proc key*(e: Element; value: string): Element =
   ## Keys a container before its children; use Context.key for stateful controls.
@@ -827,7 +842,7 @@ proc build*(c: Context; view: proc(c: Context) {.closure.}) =
     c.owner.previousInteraction = initTable[uint64, uint8]()
     c.owner.keyedSeen = initHashSet[string]()
   inc c.owner.generation
-  c.shortcutActions.setLen(0)
+  c.owner.shortcutActions.setLen(0)
   c.owner.nodes.setLen(0)
   c.owner.idSlots.clear()
   c.owner.committedRects.setLen(0)
@@ -850,13 +865,14 @@ proc build*(c: Context; view: proc(c: Context) {.closure.}) =
   try:
     if view != nil:
       view(c)
-    for index in 0..<c.shortcutActions.len:
-      let binding = c.shortcutActions[index].handle.handleBinding(
-        c.owner, false)
-      if binding != nil and binding.generation == c.owner.generation:
-        c.shortcutActions[index].identity = binding.identity
-        c.shortcutActions[index].generation = binding.generation
-      c.shortcutActions[index].handle = nil
+    for index in 0..<c.owner.shortcutActions.len:
+      if c.owner.shortcutActions[index].handle != nil:
+        let binding = c.owner.shortcutActions[index].handle.handleBinding(
+          c.owner, false)
+        if binding != nil and binding.generation == c.owner.generation:
+          c.owner.shortcutActions[index].identity = binding.identity
+          c.owner.shortcutActions[index].generation = binding.generation
+        c.owner.shortcutActions[index].handle = nil
     for slot, node in c.owner.nodes:
       c.owner.idSlots[node.identity] = slot
     c.owner.identityParents.clear()
@@ -870,7 +886,7 @@ proc build*(c: Context; view: proc(c: Context) {.closure.}) =
     c.owner.parent = -1
     c.owner.hasFrame = built
     if not built:
-      c.shortcutActions.setLen(0)
+      c.owner.shortcutActions.setLen(0)
     c.hasPendingKey = false
     c.pendingKey.setLen(0)
     c.owner.previousInteraction.clear()
@@ -884,5 +900,5 @@ proc close*(c: Context) =
   ## Detaches saved handles and releases frame storage when the context closes.
   if c == nil or c.owner.closed:
     return
-  c.shortcutActions.setLen(0)
+  c.owner.shortcutActions.setLen(0)
   c.owner.retire()
