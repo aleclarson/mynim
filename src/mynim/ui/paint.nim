@@ -15,6 +15,21 @@ proc background*(e: Element; color: Color): Element =
   let n = e.node
   if n != nil:
     n.background = color
+    n.hasGradient = false
+
+proc gradient*(e: Element; value: LinearGradient): Element =
+  ## Fills the element with a two-color linear gradient.
+  result = e
+  let n = e.node
+  if n != nil:
+    n.gradient = value
+    n.hasGradient = true
+
+proc gradient*(e: Element; fromColor, toColor: Color;
+               angle: float32): Element =
+  ## Fills the element with a gradient at an angle clockwise from upward.
+  e.gradient(LinearGradient(fromColor: fromColor, toColor: toColor,
+                            angle: angle))
 
 proc radius*(e: Element; all: float32): Element =
   ## Rounds all four corners by the same radius in DIPs.
@@ -89,9 +104,11 @@ proc wideRgba(color: Color; value: var array[4, float32]): bool =
   value = [r, g, b, color.a.float32 / 255]
   true
 
-proc wideColors(fill, border: Color): scene.WideColors =
+proc wideColors(fill, fill2, border: Color): scene.WideColors =
   if fill.wideRgba(result.color):
     result.`set` = result.`set` or scene.wideColor
+  if fill2.wideRgba(result.color2):
+    result.`set` = result.`set` or scene.wideColor2
   if border.wideRgba(result.border):
     result.`set` = result.`set` or scene.wideBorder
 
@@ -141,6 +158,39 @@ proc sceneRect(rect, root: Rect; scale: float32): scene.Rect =
     raise newException(ValueError, "ui: painted size exceeds the float range")
   scene.Rect(x: x0, y: y0, w: float32(width), h: float32(height))
 
+proc sceneGradient(rect: scene.Rect; value: LinearGradient):
+    tuple[paint: scene.Paint, points: array[4, float32]] =
+  if not value.angle.finite or not value.start.finite or not value.stop.finite:
+    raise newException(ValueError, "ui: gradient values must be finite")
+  let
+    angle = float64(value.angle) * PI / 180
+    dx = float32(sin(angle))
+    dy = float32(-cos(angle))
+    half = (abs(rect.w * dx) + abs(rect.h * dy)) / 2
+    cx = rect.x + rect.w / 2
+    cy = rect.y + rect.h / 2
+    x0 = cx - dx * half
+    y0 = cy - dy * half
+    x1 = cx + dx * half
+    y1 = cy + dy * half
+  var stop = value.stop
+  if value.start == 0 and stop == 0:
+    stop = 1
+  let
+    sx = x0 + (x1 - x0) * value.start
+    sy = y0 + (y1 - y0) * value.start
+  var
+    ex = x0 + (x1 - x0) * stop
+    ey = y0 + (y1 - y0) * stop
+  if stop - value.start < 0.5 / max(2 * half, 1'f32):
+    ex = sx + dx * 0.5
+    ey = sy + dy * 0.5
+  for point in [sx, sy, ex, ey]:
+    if not point.finite:
+      raise newException(ValueError, "ui: gradient exceeds the float range")
+  result.paint = if value.oklab: scene.paintOklab else: scene.paintLinear
+  result.points = [sx, sy, ex, ey]
+
 proc paintText(s: scene.Scene; node: ElementNode; rect, root: Rect;
                scale: float32; system: textStack.System) =
   if not node.hasText or node.shapedText == nil or node.textColor.a == 0:
@@ -148,7 +198,7 @@ proc paintText(s: scene.Scene; node: ElementNode; rect, root: Rect;
   let originX = rect.x - root.x + node.pad[3] + node.border[3]
   let originY = rect.y - root.y + node.pad[0] + node.border[0]
   let color = sceneColor(node.textColor)
-  let wide = wideColors(node.textColor, transparent)
+  let wide = wideColors(node.textColor, transparent, transparent)
   let wideIndex = s.addWide(wide)
   let start = s.glyphs.len
   let shade = textStack.shadeOf(node.textColor.r, node.textColor.g,
@@ -388,7 +438,12 @@ proc paintScene*(layout: LayoutResult; scale = 1'f32;
 
       for slot in layout.owner.paintSlots:
         let node = layout.owner.nodes[slot]
-        let fillVisible = node.background.a > 0
+        let fill = if node.hasGradient: node.gradient.fromColor else: node.background
+        let fill2 = if node.hasGradient: node.gradient.toColor else: transparent
+        let fillVisible = if node.hasGradient:
+            fill.a > 0 or fill2.a > 0
+          else:
+            fill.a > 0
         let borderVisible = node.borderColor.a > 0 and scene.hasBorder(node.border)
         if not fillVisible and not borderVisible and not node.hasText and
             node.bitmap == nil and node.vector == nil:
@@ -399,19 +454,26 @@ proc paintScene*(layout: LayoutResult; scale = 1'f32;
           continue
         if fillVisible or borderVisible:
           var op = scene.Op(kind: scene.opFill, rect: rect,
-            color: sceneColor(node.background), paint: scene.paintSolid,
+            color: sceneColor(fill), color2: sceneColor(fill2),
+            paint: scene.paintSolid,
             radii: node.radius.scaledEdges(scale),
             border: node.border.scaledEdges(scale),
             continuous: continuousCorners,
             borderColor: sceneColor(node.borderColor),
             dashed: node.borderStyle == BorderStyle.Dashed)
-          var wide = node.background.wideColors(node.borderColor)
+          if node.hasGradient:
+            let gradient = sceneGradient(rect, node.gradient)
+            op.paint = gradient.paint
+            op.gradient = gradient.points
+          var wide = fill.wideColors(fill2, node.borderColor)
           if not borderVisible:
             wide.border = [0'f32, 0, 0, 0]
             wide.`set` = wide.`set` and not scene.wideBorder
           if not fillVisible:
             wide.color = [0'f32, 0, 0, 0]
-            wide.`set` = wide.`set` and not scene.wideColor
+            wide.color2 = [0'f32, 0, 0, 0]
+            wide.`set` = wide.`set` and not scene.wideColor and
+              not scene.wideColor2
           op.wide = result.addWide(wide)
           result.ops.add(op)
         result.paintText(node, layout.rects[slot], layout.root, scale, system)

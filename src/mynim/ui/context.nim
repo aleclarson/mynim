@@ -105,6 +105,8 @@ type
       justifySelf: Align
     cols, rows: seq[Track]
     background, borderColor: Color
+    hasGradient: bool
+    gradient: LinearGradient
     radius, border: array[4, float32]
     borderStyle: BorderStyle
 

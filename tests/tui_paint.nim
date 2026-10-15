@@ -39,6 +39,51 @@ block solid_background_border_and_pixel_snap:
   doAssert childOp.color == scene.Color(r: 10, g: 20, b: 30, a: 128)
   doAssert not childOp.dashed
 
+block linear_gradient_scene:
+  let c = newContext()
+  var element: Element
+  let fromColor = oklch(0.8, 0.3, 145)
+  let toColor = oklch(0.55, 0.3, 145)
+  c.build(proc(ctx: Context) =
+    element = ctx.box().size(100, 20).gradient(LinearGradient(
+      fromColor: fromColor, toColor: toColor, angle: 90,
+      start: 0.25, stop: 0.75, oklab: true))
+      .border(1, rgb(20, 30, 40))
+  )
+  let frame = c.layout(100, 20).paintScene()
+  doAssert frame.ops.len == 1
+  let op = frame.ops[0]
+  doAssert op.paint == scene.paintOklab
+  doAssert op.color == scene.Color(r: fromColor.r, g: fromColor.g,
+                                   b: fromColor.b, a: fromColor.a)
+  doAssert op.color2 == scene.Color(r: toColor.r, g: toColor.g,
+                                    b: toColor.b, a: toColor.a)
+  doAssert abs(op.gradient[0] - 25) < 0.001
+  doAssert abs(op.gradient[1] - 10) < 0.001
+  doAssert abs(op.gradient[2] - 75) < 0.001
+  doAssert abs(op.gradient[3] - 10) < 0.001
+  doAssert op.border == [1'f32, 1, 1, 1]
+  doAssert frame.wide.len == 1
+  doAssert frame.wide[0].`set` == (scene.wideColor or scene.wideColor2)
+  doAssert op.wide == 1
+
+  c.build(proc(ctx: Context) =
+    element = ctx.box().size(100, 20)
+      .gradient(rgb(0, 0, 0), rgb(255, 255, 255), 90)
+      .background(rgb(12, 34, 56))
+  )
+  let solid = c.layout(100, 20).paintScene().ops[0]
+  doAssert solid.paint == scene.paintSolid
+  doAssert solid.color == scene.Color(r: 12, g: 34, b: 56, a: 255)
+  doAssert solid.color2.a == 0
+
+  c.build(proc(ctx: Context) =
+    discard ctx.box().size(100, 20).gradient(LinearGradient(
+      fromColor: rgb(0, 0, 0), toColor: rgb(255, 255, 255), angle: NaN))
+  )
+  doAssertRaises ValueError:
+    discard c.layout(100, 20).paintScene()
+
 block absolute_children_paint_above_flow:
   let c = newContext()
   c.build(proc(ctx: Context) =
