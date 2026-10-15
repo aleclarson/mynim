@@ -1287,7 +1287,8 @@ proc scrollExtent(nodes: seq[ElementNode]; rects: seq[Rect]; root: int;
   if not result.finiteUi:
     result = 0
 
-proc updateScrollRanges(nodes: seq[ElementNode]; rects: seq[Rect]) =
+proc updateScrollRanges(nodes: seq[ElementNode]; rects: seq[Rect];
+                        now: MonoTime; reduceMotion: bool): bool =
   for slot in 1..<nodes.len:
     let node = nodes[slot]
     let state = node.scrollState
@@ -1303,6 +1304,8 @@ proc updateScrollRanges(nodes: seq[ElementNode]; rects: seq[Rect]) =
         0'f32
     state.offsetX = min(max(state.offsetX, 0'f32), state.maxX)
     state.offsetY = min(max(state.offsetY, 0'f32), state.maxY)
+    if state.animate(now, reduceMotion):
+      result = true
 
 proc nearestScrollOffset(offset, pos, size, visibleStart,
                          visibleEnd, maximum: float32): float32 =
@@ -1357,7 +1360,8 @@ proc shiftScrolledRects(nodes: seq[ElementNode]; rects: var seq[Rect]) =
           rects[slot].y -= state.offsetY
       parent = int(ancestor.parent)
 
-proc layout*(c: Context; bounds: Rect): LayoutResult =
+proc layoutAt(c: Context; bounds: Rect; now: MonoTime;
+              reduceMotion: bool): LayoutResult =
   ## Lays out the latest completed build inside bounds.
   if c == nil or c.owner.closed or not c.owner.hasFrame:
     raise newException(ValueError, "ui: layout requires a completed build")
@@ -1407,9 +1411,14 @@ proc layout*(c: Context; bounds: Rect): LayoutResult =
         c.owner.flexLines, c.owner.gridScratch, 0, result.root)
     for slot in 0..<result.rects.len:
       result.rects[slot] = c.owner.rectScratch[slot]
-    updateScrollRanges(c.owner.nodes, c.owner.rectScratch)
+    result.animating = updateScrollRanges(c.owner.nodes, c.owner.rectScratch,
+      now, reduceMotion)
     revealInScrollContainers(c.owner.nodes, c.owner.rectScratch)
     shiftScrolledRects(c.owner.nodes, result.rects)
+
+proc layout*(c: Context; bounds: Rect): LayoutResult =
+  ## Lays out the latest completed build inside bounds.
+  c.layoutAt(bounds, getMonoTime(), false)
 
 proc layout*(c: Context; width, height: float32): LayoutResult =
   ## Lays out the latest completed build at the window origin.
@@ -1587,6 +1596,7 @@ proc scrollbarPress(layout: LayoutResult; x, y: float32;
     if state != nil:
       let geometry = layout.scrollbars(slot)
       if geometry.vertical and geometry.verticalTrack.contains(x, y):
+        state.stopScrollMotion()
         if geometry.verticalThumb.contains(x, y):
           drag = ScrollbarDrag(state: state, pointerStart: y,
             offsetStart: state.offsetY, rangeStart: state.maxY,
@@ -1601,6 +1611,7 @@ proc scrollbarPress(layout: LayoutResult; x, y: float32;
             layout.rects[slot].h * 0.9'f32)
         return true
       if geometry.horizontal and geometry.horizontalTrack.contains(x, y):
+        state.stopScrollMotion()
         if geometry.horizontalThumb.contains(x, y):
           drag = ScrollbarDrag(state: state, horizontal: true,
             pointerStart: x, offsetStart: state.offsetX,
@@ -1622,6 +1633,7 @@ proc dragScrollbar(drag: ScrollbarDrag; x, y: float32): bool =
   let state = drag.state
   if state == nil or drag.travel <= 0 or drag.rangeStart <= 0:
     return false
+  state.stopScrollMotion()
   let maxOffset = if drag.horizontal: state.maxX else: state.maxY
   let coordinate = if drag.horizontal: x else: y
   let offset = min(max(drag.offsetStart / drag.rangeStart +
@@ -1655,6 +1667,8 @@ proc scrollAt(layout: LayoutResult; x, y, dx, dy: float32): bool =
     if state != nil:
       let oldX = state.offsetX
       let oldY = state.offsetY
+      if dx != 0 or dy != 0:
+        state.stopScrollMotion()
       if node.scrollX:
         state.offsetX = min(max(oldX + dx, 0'f32), state.maxX)
       if node.scrollY:
@@ -1698,6 +1712,8 @@ proc scrollKey(layout: LayoutResult; focusSlot: int;
     if state != nil:
       let oldX = state.offsetX
       let oldY = state.offsetY
+      if dx != 0 or dy != 0 or page != 0:
+        state.stopScrollMotion()
       let stepY = if page == 0:
           dy
         else:

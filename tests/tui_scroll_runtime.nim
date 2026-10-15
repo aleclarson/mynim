@@ -4,6 +4,11 @@ include "../src/mynim.nim"
 import mynim/internal/fake as fakeBackend
 import mynim/ui as ui
 
+let ease = ui.cubicBezier(0.25, 0.1, 0.25, 1)
+doAssert ease(0) == 0
+doAssert ease(1) == 1
+doAssert ease(0.5) > 0.5
+
 let fake = fakeBackend.newFakeBackend()
 theBackend = platform.Backend(fake)
 backendMade = true
@@ -206,8 +211,65 @@ discard barsSurface.send(platform.SurfaceEvent(kind: platform.pointerUp,
   x: 93, y: 45, button: 0))
 doAssert barsSurface.frame()
 
+let animatedState = ui.newScrollState()
+let animatedContent = ui.newContent(proc(ctx: ui.Context) =
+  let viewport = ctx.scroll(animatedState).size(20, 20)
+  discard viewport.children(proc() =
+    for i in 0..<3:
+      discard ctx.box().size(20, 20).shrink(0)
+  )
+)
+let animatedWindow = newWindow(WindowOptions(width: 20, height: 20,
+  hidden: true, content: animatedContent))
+let animatedSurface = fake.windows[^1].surface
+doAssert animatedSurface.frame()
+doAssert animatedState.maxOffset().y == 40
+
+animatedState.scrollTo(0, 40, ui.Smooth)
+discard animatedSurface.send(platform.SurfaceEvent(kind: platform.surfaceResize))
+doAssert animatedSurface.frame()
+doAssert animatedState.scrolling
+os.sleep(25)
+doAssert animatedSurface.frame()
+let springOffset = animatedState.offset().y
+doAssert springOffset > 0 and springOffset < 40
+
+discard animatedSurface.send(platform.SurfaceEvent(kind: platform.pointerScroll,
+  x: 5, y: 5, dy: 3))
+doAssert not animatedState.scrolling
+doAssert animatedState.offset().y > springOffset
+doAssert animatedSurface.frame()
+
+animatedState.scrollTo(0, 40, ui.Animation(
+  duration: initDuration(milliseconds = 80), ease: ui.linear))
+discard animatedSurface.send(platform.SurfaceEvent(kind: platform.surfaceResize))
+doAssert animatedSurface.frame()
+doAssert animatedState.scrolling
+os.sleep(100)
+doAssert animatedSurface.frame()
+doAssert animatedState.offset().y == 40
+doAssert not animatedState.scrolling
+
+animatedState.scrollTo(0, 0, ui.Smooth)
+discard animatedSurface.send(platform.SurfaceEvent(kind: platform.surfaceResize))
+doAssert animatedSurface.frame()
+os.sleep(25)
+doAssert animatedSurface.frame()
+doAssert animatedState.scrolling
+fake.setPreferences(platform.Preferences(reduceMotion: true))
+doAssert animatedSurface.frame()
+doAssert animatedState.offset().y == 0
+doAssert not animatedState.scrolling
+animatedState.scrollTo(0, 40, ui.Smooth)
+discard animatedSurface.send(platform.SurfaceEvent(kind: platform.surfaceResize))
+doAssert animatedSurface.frame()
+doAssert animatedState.offset().y == 40
+doAssert not animatedState.scrolling
+fake.setPreferences(platform.Preferences())
+
 win.destroy()
 focusWindow.destroy()
 nestedWindow.destroy()
 barsWindow.destroy()
+animatedWindow.destroy()
 loop.shutdown()

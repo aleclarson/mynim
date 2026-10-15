@@ -126,6 +126,7 @@ type
     owner: ElementOwner
     generation: uint32
     rects: seq[Rect]
+    animating: bool
 
 proc finiteRegion(value: float32): bool =
   classify(value) notin {fcNan, fcInf, fcNegInf}

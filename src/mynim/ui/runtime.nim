@@ -489,7 +489,15 @@ proc renderFrame(rt: Runtime; presentFrame = true) =
       rt.context.owner.focusVisibleSlots.add(rt.focusSlot)
   rt.clickedSlots.setLen(0)
   rt.context.build(rt.view)
-  let layout = rt.context.layout(width, height)
+  var reduceMotion = false
+  if rt.conn.preferences != nil:
+    for slot in 1..<rt.context.owner.nodes.len:
+      let state = rt.context.owner.nodes[slot].scrollState
+      if state != nil and state.motion != nil:
+        reduceMotion = rt.conn.preferences().reduceMotion
+        break
+  let layout = rt.context.layoutAt(Rect(w: width, h: height),
+    getMonoTime(), reduceMotion)
   if rt.focusSlot >= 0 and not layout.focusableSlot(rt.focusSlot):
     rt.focusSlot = -1
     rt.keyboardFocusVisible = false
@@ -507,6 +515,9 @@ proc renderFrame(rt: Runtime; presentFrame = true) =
   rt.updateAccessibility()
   if presentFrame:
     rt.present(rt.frameScene)
+
+  if presentFrame and layout.animating:
+    rt.requestFrame()
 
   if presentFrame and not rt.ready and rt.conn.ready != nil and
       rt.conn.post != nil:
