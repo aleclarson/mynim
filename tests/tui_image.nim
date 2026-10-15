@@ -14,6 +14,26 @@ let bitmap = ui.newBitmap(pixels)
 let dimensions = bitmap.size()
 doAssert dimensions.width == 2 and dimensions.height == 2
 
+let measureContext = ui.newContext()
+var measuredImage: ui.Element
+measureContext.build(proc(ctx: ui.Context) =
+  measuredImage = ctx.imageRegion(bitmap,
+    ui.Rect(x: 0, y: 1, w: 2, h: 1)).alignSelf(ui.Align.Start)
+)
+let measuredLayout = measureContext.layout(64, 64)
+let measuredBounds = measuredLayout.bounds(measuredImage)
+doAssert measuredBounds.w == 2 and measuredBounds.h == 1
+
+var clippedImage: ui.Element
+measureContext.build(proc(ctx: ui.Context) =
+  clippedImage = ctx.imageRegion(bitmap,
+    ui.Rect(x: 1, y: 1, w: 8, h: 8)).alignSelf(ui.Align.Start)
+)
+let clippedLayout = measureContext.layout(64, 64)
+let clippedBounds = clippedLayout.bounds(clippedImage)
+doAssert clippedBounds.w == 1 and clippedBounds.h == 1
+measureContext.close()
+
 let fake = fakeBackend.newFakeBackend()
 theBackend = platform.Backend(fake)
 backendMade = true
@@ -25,8 +45,10 @@ var fit = ui.Fit.FillBox
 var imageWidth, imageHeight = 40'f32
 var grayscale = false
 var tint = ui.transparent
+var sourceRegion = ui.Rect()
 let content = ui.newContent(proc(ctx: ui.Context) =
-  let image = ctx.image(bitmap).size(imageWidth, imageHeight).fit(fit).tint(tint)
+  let image = ctx.imageRegion(bitmap, sourceRegion).size(imageWidth, imageHeight)
+    .fit(fit).tint(tint)
   if grayscale:
     discard image.grayscale()
 )
@@ -87,6 +109,19 @@ doAssert native.frame()
 doAssert native.pixel(35, 35) == [0'u8, 0, 128, 128]
 
 tint = ui.transparent
+sourceRegion = ui.Rect(x: 0, y: 1, w: 2, h: 1)
+discard native.send(platform.SurfaceEvent(kind: platform.surfaceResize))
+doAssert native.frame()
+doAssert native.pixel(5, 5) == [255'u8, 0, 0, 255]
+doAssert native.pixel(35, 5) == [255'u8, 255, 255, 255]
+
+sourceRegion = ui.Rect(x: 1, y: 1, w: 8, h: 8)
+discard native.send(platform.SurfaceEvent(kind: platform.surfaceResize))
+doAssert native.frame()
+doAssert native.pixel(5, 5) == [255'u8, 255, 255, 255]
+doAssert native.pixel(35, 35) == [255'u8, 255, 255, 255]
+
+sourceRegion = ui.Rect()
 let updatedPixels = sourceImage.newRgba(sourceImage.rect(0, 0, 2, 2))
 for y in 0..<2:
   for x in 0..<2:

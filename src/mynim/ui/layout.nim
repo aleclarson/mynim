@@ -533,8 +533,9 @@ proc measureTree(nodes: seq[ElementNode]; natural: var seq[NaturalSize];
       contentW = node.shapedText.width
       contentH = node.shapedText.height
     if node.bitmap != nil and node.bitmap.image != nil:
-      contentW = max(contentW, float32(node.bitmap.image.w))
-      contentH = max(contentH, float32(node.bitmap.image.h))
+      let source = node.bitmapSource
+      contentW = max(contentW, source.w)
+      contentH = max(contentH, source.h)
     if node.vector != nil:
       contentW = max(contentW, node.vector.width)
       contentH = max(contentH, node.vector.height)

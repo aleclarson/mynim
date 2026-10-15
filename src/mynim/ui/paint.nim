@@ -171,14 +171,13 @@ proc paintText(s: scene.Scene; node: ElementNode; rect, root: Rect;
     s.ops.add(scene.Op(kind: scene.opGlyphs, first: int32(start),
                        last: int32(s.glyphs.len)))
 
-proc fitImage(box: Rect; bitmap: Bitmap; fit: Fit):
+proc fitImage(box, source: Rect; fit: Fit):
     tuple[rect: Rect, src: scene.Rect] =
-  if bitmap == nil or bitmap.image == nil or bitmap.image.w <= 0 or
-      bitmap.image.h <= 0 or box.w <= 0 or box.h <= 0:
+  if source.w <= 0 or source.h <= 0 or box.w <= 0 or box.h <= 0:
     return
-  let imageW = float32(bitmap.image.w)
-  let imageH = float32(bitmap.image.h)
-  result.src = scene.Rect(w: imageW, h: imageH)
+  let imageW = source.w
+  let imageH = source.h
+  result.src = scene.Rect(x: source.x, y: source.y, w: imageW, h: imageH)
   case fit
   of Fit.FillBox:
     result.rect = box
@@ -195,8 +194,8 @@ proc fitImage(box: Rect; bitmap: Bitmap; fit: Fit):
     let scale = max(box.w / imageW, box.h / imageH)
     let width = box.w / scale
     let height = box.h / scale
-    result.src = scene.Rect(x: (imageW - width) / 2,
-      y: (imageH - height) / 2, w: width, h: height)
+    result.src = scene.Rect(x: source.x + (imageW - width) / 2,
+      y: source.y + (imageH - height) / 2, w: width, h: height)
     result.rect = box
   of Fit.NaturalSize:
     let width = min(imageW, box.w)
@@ -205,8 +204,8 @@ proc fitImage(box: Rect; bitmap: Bitmap; fit: Fit):
     let y = box.y + (box.h - imageH) / 2
     result.rect = Rect(x: max(x, box.x), y: max(y, box.y),
       w: width, h: height)
-    result.src = scene.Rect(x: result.rect.x - x, y: result.rect.y - y,
-                            w: width, h: height)
+    result.src = scene.Rect(x: source.x + result.rect.x - x,
+      y: source.y + result.rect.y - y, w: width, h: height)
 
 proc fitVector(box: Rect; imageW, imageH: float32; fit: Fit):
     tuple[raw, shown: Rect, src: scene.Rect, stretch: bool] =
@@ -319,7 +318,7 @@ proc paintBitmap(s: scene.Scene; node: ElementNode; rect, root: Rect;
     y: rect.y + node.pad[0] + node.border[0],
     w: max(rect.w - node.contentInsetX, 0'f32),
     h: max(rect.h - node.contentInsetY, 0'f32))
-  let fitted = fitImage(box, node.bitmap, node.fit)
+  let fitted = fitImage(box, node.bitmapSource, node.fit)
   if fitted.rect.w <= 0 or fitted.rect.h <= 0:
     return
   let pixelRect = fitted.rect.sceneRect(root, scale)

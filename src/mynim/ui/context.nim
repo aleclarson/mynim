@@ -88,6 +88,7 @@ type
     textClient: platform.TextInputClient
     clickHandler: proc() {.closure.}
     bitmap: Bitmap
+    imageRegion: Rect
     vector: Svg
     vectorColor: Color
     imageTint: Color
@@ -112,6 +113,33 @@ type
     owner: ElementOwner
     generation: uint32
     rects: seq[Rect]
+
+proc finiteRegion(value: float32): bool =
+  classify(value) notin {fcNan, fcInf, fcNegInf}
+
+proc bitmapSource(node: ElementNode): Rect =
+  if node.bitmap == nil or node.bitmap.image == nil or
+      node.bitmap.image.w <= 0 or node.bitmap.image.h <= 0:
+    return
+  let width = float32(node.bitmap.image.w)
+  let height = float32(node.bitmap.image.h)
+  let source = node.imageRegion
+  if source.w <= 0 or source.h <= 0:
+    return Rect(w: width, h: height)
+  if not source.x.finiteRegion or not source.y.finiteRegion or
+      not source.w.finiteRegion or not source.h.finiteRegion:
+    return
+  let requestedRight = source.x + source.w
+  let requestedBottom = source.y + source.h
+  if not requestedRight.finiteRegion or not requestedBottom.finiteRegion:
+    return
+  let left = max(source.x, 0'f32)
+  let top = max(source.y, 0'f32)
+  let right = min(requestedRight, width)
+  let bottom = min(requestedBottom, height)
+  if right <= left or bottom <= top:
+    return
+  Rect(x: left, y: top, w: right - left, h: bottom - top)
 
 proc newContext*(): Context =
   ## Creates a stable context. Call close when its owner shuts down.
@@ -250,6 +278,15 @@ proc image*(c: Context; bitmap: Bitmap): Element =
   if n != nil:
     n.bitmap = bitmap
     n.fit = Fit.Contain
+
+proc imageRegion*(c: Context; bitmap: Bitmap; source: Rect): Element =
+  ## Adds an image element showing source pixels from a bitmap. An empty
+  ## source rectangle shows the whole bitmap; an out-of-bounds rectangle
+  ## is clipped to the bitmap.
+  result = c.image(bitmap)
+  let n = result.node
+  if n != nil:
+    n.imageRegion = source
 
 proc svg*(c: Context; vector: Svg): Element =
   ## Adds an SVG element with its intrinsic size in DIPs.
