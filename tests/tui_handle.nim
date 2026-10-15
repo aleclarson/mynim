@@ -72,6 +72,7 @@ controlHandle.focus(handleContext)
 doAssert native.frame()
 discard native.send(platform.SurfaceEvent(kind: platform.surfaceBlur))
 doAssert not controlHandle.focused(handleContext)
+doAssert panelHandle.focusWithin(handleContext)
 doAssert not native.send(platform.SurfaceEvent(kind: platform.keyPressed,
   key: platform.keyK, mods: platform.modSuper))
 doAssert controlShortcuts == 1 and panelShortcuts == 1

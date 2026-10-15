@@ -495,7 +495,7 @@ proc focused*(handle: Handle; c: Context): bool =
 
 proc focusWithin*(handle: Handle; c: Context): bool =
   ## Reports whether the bound element or a descendant owns keyboard focus.
-  if c == nil or c.owner == nil or c.owner.closed or not c.owner.focusActive:
+  if c == nil or c.owner == nil or c.owner.closed:
     return false
   let binding = handle.existingBinding(c.owner)
   if binding == nil or binding.identity == 0:
