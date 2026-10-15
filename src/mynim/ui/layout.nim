@@ -30,8 +30,10 @@ proc marginX(node: ElementNode): float32 =
 proc marginY(node: ElementNode): float32 =
   marginValue(node.margin[0]) + marginValue(node.margin[2])
 
-proc paddingX(node: ElementNode): float32 = node.pad[1] + node.pad[3]
-proc paddingY(node: ElementNode): float32 = node.pad[0] + node.pad[2]
+proc contentInsetX(node: ElementNode): float32 =
+  node.pad[1] + node.pad[3] + node.border[1] + node.border[3]
+proc contentInsetY(node: ElementNode): float32 =
+  node.pad[0] + node.pad[2] + node.border[0] + node.border[2]
 
 proc clampSize(value: float32; minimum, maximum: UiLength;
                base: float32): float32 =
@@ -90,8 +92,8 @@ proc measureTree(nodes: seq[ElementNode]; natural: var seq[NaturalSize]) =
 
     let width = node.width.resolve(-1)
     let height = node.height.resolve(-1)
-    let rawW = if width.ok: width.value else: contentW + node.paddingX
-    let rawH = if height.ok: height.value else: contentH + node.paddingY
+    let rawW = if width.ok: width.value else: contentW + node.contentInsetX
+    let rawH = if height.ok: height.value else: contentH + node.contentInsetY
     natural[slot] = NaturalSize(
       w: node.clampWidth(rawW, -1),
       h: node.clampHeight(rawH, -1))
@@ -193,10 +195,10 @@ proc placeNode(nodes: seq[ElementNode]; natural: seq[NaturalSize];
     return
 
   let row = node.row
-  let innerX = bounds.x + node.pad[3]
-  let innerY = bounds.y + node.pad[0]
-  let innerW = max(bounds.w - node.paddingX, 0'f32)
-  let innerH = max(bounds.h - node.paddingY, 0'f32)
+  let innerX = bounds.x + node.pad[3] + node.border[3]
+  let innerY = bounds.y + node.pad[0] + node.border[0]
+  let innerW = max(bounds.w - node.contentInsetX, 0'f32)
+  let innerH = max(bounds.h - node.contentInsetY, 0'f32)
   let mainSize = if row: innerW else: innerH
   let crossSize = if row: innerH else: innerW
   let gap = if row: node.gapX else: node.gapY

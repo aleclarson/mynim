@@ -1,0 +1,105 @@
+import std/assertions
+
+import mynim/internal/scene as scene
+import mynim/ui
+
+block solid_background_border_and_pixel_snap:
+  let c = newContext()
+  var root, child: Element
+  c.build(proc(ctx: Context) =
+    root = ctx.column().size(20, 20).background(rgb(12, 34, 56))
+      .radius(1, 2, 3, 4).borderWidth(1, 2, 3, 4)
+      .borderColor(rgb(200, 201, 202)).borderStyle(BorderStyle.Dashed)
+    discard root.children(proc() =
+      child = ctx.box().size(5.25, 6.25).alignSelf(Align.Start)
+        .background(rgba(10, 20, 30, 0.5))
+    )
+  )
+
+  let layout = c.layout(ui.Rect(x: 10.25, y: 20.5, w: 20, h: 20))
+  let frame = layout.paintScene(2, rgb(3, 4, 5))
+  doAssert frame.width == 40
+  doAssert frame.height == 40
+  doAssert frame.scale == 2
+  doAssert frame.clear == scene.Color(r: 3, g: 4, b: 5, a: 255)
+  doAssert frame.ops.len == 2
+
+  let rootOp = frame.ops[0]
+  doAssert rootOp.kind == scene.opFill
+  doAssert rootOp.rect == scene.Rect(x: 0, y: 0, w: 40, h: 40)
+  doAssert rootOp.radii == [2'f32, 4, 6, 8]
+  doAssert rootOp.border == [2'f32, 4, 6, 8]
+  doAssert rootOp.continuous == defined(macosx)
+  doAssert rootOp.borderColor == scene.Color(r: 200, g: 201, b: 202, a: 255)
+  doAssert rootOp.dashed
+  doAssert rootOp.color == scene.Color(r: 12, g: 34, b: 56, a: 255)
+
+  let childOp = frame.ops[1]
+  doAssert childOp.rect == scene.Rect(x: 8, y: 2, w: 11, h: 13)
+  doAssert childOp.color == scene.Color(r: 10, g: 20, b: 30, a: 128)
+  doAssert not childOp.dashed
+
+block wide_color_reaches_scene_and_deduplicates:
+  let c = newContext()
+  let green = oklch(0.85, 0.3, 145).alpha(0.5)
+  var root, child: Element
+  c.build(proc(ctx: Context) =
+    root = ctx.box().size(20, 20).background(green)
+    discard root.children(proc() = child = ctx.box().fill().background(green))
+  )
+  let frame = c.layout(20, 20).paintScene()
+  doAssert frame.ops.len == 2
+  doAssert frame.wide.len == 1
+  doAssert frame.ops[0].wide == 1
+  doAssert frame.ops[1].wide == 1
+  doAssert frame.wide[0].`set` == scene.wideColor
+  doAssert frame.wide[0].color[3] > 0.49 and frame.wide[0].color[3] < 0.51
+  doAssert frame.wide[0].color[1] > 1 or frame.wide[0].color[0] < 0
+
+block wide_border_uses_its_own_scene_channel:
+  let c = newContext()
+  let green = oklch(0.85, 0.3, 145)
+  c.build(proc(ctx: Context) =
+    discard ctx.box().size(20, 20).border(2, green)
+  )
+  let frame = c.layout(20, 20).paintScene()
+  doAssert frame.ops.len == 1
+  doAssert frame.ops[0].wide == 1
+  doAssert frame.wide[0].`set` == scene.wideBorder
+  doAssert frame.wide[0].border[1] > 1 or frame.wide[0].border[0] < 0
+
+block border_widths_inset_layout_children:
+  let c = newContext()
+  var root, child: Element
+  c.build(proc(ctx: Context) =
+    root = ctx.row().size(100, 30).borderWidth(2, 3, 4, 5)
+    discard root.children(proc() = child = ctx.box().size(10, 10))
+  )
+  let layout = c.layout(100, 30)
+  doAssert layout.bounds(child) == ui.Rect(x: 5, y: 9, w: 10, h: 10)
+
+block stale_layout_and_invalid_scale:
+  let c = newContext()
+  var element: Element
+  c.build(proc(ctx: Context) = element = ctx.box().size(10, 10)
+    .background(rgb(1, 2, 3)))
+  let previous = c.layout(10, 10)
+  doAssert previous.paintScene().ops.len == 1
+
+  c.build(proc(ctx: Context) = element = ctx.box().size(10, 10))
+  doAssertRaises ValueError:
+    discard previous.paintScene()
+  doAssertRaises ValueError:
+    discard c.layout(10, 10).paintScene(0)
+  doAssertRaises ValueError:
+    discard c.layout(10, 10).paintScene(NaN.float32)
+
+  c.close()
+  doAssertRaises ValueError:
+    discard previous.paintScene()
+
+block excessive_device_size:
+  let c = newContext()
+  c.build(proc(ctx: Context) = discard ctx.box())
+  doAssertRaises ValueError:
+    discard c.layout(high(int).float32, 10).paintScene(2)

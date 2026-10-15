@@ -41,6 +41,9 @@ type
     pad, margin: array[4, float32]
     gapX, gapY: float32
     justify, align, selfAlign: Align
+    background, borderColor: Color
+    radius, border: array[4, float32]
+    borderStyle: BorderStyle
 
   LayoutResult* = object
     ## Snapshot bounds calculated from a completed build.
