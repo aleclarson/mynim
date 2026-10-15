@@ -2636,6 +2636,12 @@ proc onClick*(e: Element;
     if handler != nil:
       n.focusable = true
 
+proc buttonBase*(c: Context): Element =
+  ## Creates a button without a look. Use clicked() or onClick() to respond;
+  ## the button activates with pointer, Enter, Space, and accessibility input.
+  result = c.row().center().focusable().shrink(0)
+    .onClick(proc() = discard)
+
 proc focusGroup*(e: Element; orientation: FocusOrientation;
                  selects = false): Element =
   ## Makes focusable descendants one Tab stop. Arrow keys move within the

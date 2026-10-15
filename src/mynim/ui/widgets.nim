@@ -1,5 +1,44 @@
 ## Theme-styled controls built on the stateful bases.
 
+proc themedButton(c: Context; label: string; primary: bool): Element =
+  let theme = c.theme
+  result = c.buttonBase()
+  let wasPressed = result.pressed()
+  let wasHovered = result.hovered()
+  let grouped = c.segmentedToggles and not primary
+  var foreground = theme.text
+  if primary:
+    foreground = theme.accentText
+    result = result.padding(theme.space(1.5), theme.space(3.5))
+      .radius(theme.radius)
+      .background(if wasPressed: theme.accentPressed
+        elif wasHovered: theme.accentHover else: theme.accent)
+  elif grouped:
+    result = result.gap(theme.space(1.5))
+      .padding(theme.space(1), theme.space(3))
+      .radius(max(theme.radius - theme.space(0.5), 0'f32))
+      .background(if wasPressed: theme.surfacePressed
+        elif wasHovered: theme.surfaceHover else: rgba(0, 0, 0, 0))
+  else:
+    result = result.gap(theme.space(1.5))
+      .padding(theme.space(1.5), theme.space(3.5))
+      .radius(theme.radius)
+      .background(if wasPressed: theme.surfacePressed
+        elif wasHovered: theme.surfaceHover else: theme.surface)
+      .border(1, theme.border)
+  if label.len > 0:
+    result = result.label(label).children(proc() =
+      discard c.text(label).textColor(foreground)
+    )
+
+proc button*(c: Context; label: string): Element =
+  ## Creates a themed button. Respond to activation with clicked() or onClick().
+  c.themedButton(label, primary = false)
+
+proc primaryButton*(c: Context; label: string): Element =
+  ## Creates an accent-colored button for the primary action.
+  c.themedButton(label, primary = true)
+
 proc checkboxIndicator(c: Context; theme: Theme; checked, mixed,
                        hovered: bool): Element =
   let size = theme.space(4)
