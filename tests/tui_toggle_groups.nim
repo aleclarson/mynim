@@ -13,7 +13,10 @@ app.handleReady()
 
 var bold, italic, underline: bool
 var view = 1
-var boldChanged, italicChanged, underlineChanged, viewChanged: int
+var customView = 0
+var boldChanged, italicChanged, underlineChanged, viewChanged,
+  customChanged: int
+var customTrackChanged: bool
 let toggleContent = ui.newContent(proc(ctx: ui.Context) =
   discard ctx.column().size(240, 180).children(proc() =
     discard ctx.toggle(bold, "Bold")
@@ -26,6 +29,16 @@ let toggleContent = ui.newContent(proc(ctx: ui.Context) =
     ).label("Format")
     discard ctx.segmented(view, ["List", "Grid", "Columns"])
       .label("View").onChange(proc() = inc viewChanged)
+    let customTrack = ctx.segmentedBase(customView, 2,
+        proc(choice: var int) =
+      discard ctx.segment(choice, 0).label("Browse").children(proc() =
+        discard ctx.text("B")
+      )
+      discard ctx.segment(choice, 1).label("Search").children(proc() =
+        discard ctx.text("S")
+      )
+    ).label("Custom view").onChange(proc() = inc customChanged)
+    customTrackChanged = customTrack.changed()
   )
 )
 let win = newWindow(WindowOptions(width: 260, height: 200, hidden: true,
@@ -38,6 +51,7 @@ var tree = native.accessibility()[0]
 doAssert tree != nil
 var boldFound, groupFound, italicFound, underlineFound: bool
 var radioGroupFound, selectedGridFound: bool
+var customGroupFound, browseSegmentFound: bool
 for node in tree.nodes:
   if node.role == platform.roleToggleButton and node.label == "Bold":
     boldFound = true
@@ -52,8 +66,14 @@ for node in tree.nodes:
   elif node.role == platform.roleRadio and node.label == "Grid" and
       (node.states and platform.accessChecked) != platform.AccessStates(0):
     selectedGridFound = true
+  elif node.role == platform.roleRadioGroup and node.label == "Custom view":
+    customGroupFound = true
+  elif node.role == platform.roleRadio and node.label == "Browse" and
+      (node.states and platform.accessSegment) != platform.AccessStates(0):
+    browseSegmentFound = true
 doAssert boldFound and groupFound and italicFound and underlineFound
 doAssert radioGroupFound and selectedGridFound
+doAssert customGroupFound and browseSegmentFound
 
 doAssert native.send(platform.SurfaceEvent(kind: platform.keyPressed,
   key: platform.keyTab))
@@ -94,6 +114,14 @@ doAssert native.send(platform.SurfaceEvent(kind: platform.keyPressed,
   key: platform.keyRight))
 doAssert native.frame()
 doAssert view == 2 and viewChanged == 1
+
+doAssert native.send(platform.SurfaceEvent(kind: platform.keyPressed,
+  key: platform.keyTab))
+doAssert native.frame()
+doAssert native.send(platform.SurfaceEvent(kind: platform.keyPressed,
+  key: platform.keyRight))
+doAssert native.frame()
+doAssert customView == 1 and customChanged == 1 and customTrackChanged
 
 win.destroy()
 loop.shutdown()

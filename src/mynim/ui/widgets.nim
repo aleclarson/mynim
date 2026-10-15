@@ -134,6 +134,43 @@ proc toggleGroup*(c: Context; build: proc() {.closure.}): Element =
   finally:
     c.segmentedToggles = previous
 
+proc segment*(c: Context; selected: var int; index: int): Element =
+  ## Creates one custom-content radio segment for segmentedBase.
+  result = c.radioBase(selected, index).center()
+  let node = result.node
+  if node != nil:
+    node.accessExtraStates = node.accessExtraStates or platform.accessSegment
+
+proc segmentedBase*(c: Context; selected: var int; count: int;
+                    build: proc(selected: var int) {.closure.}): Element =
+  ## Creates a radio-style segmented group whose segments can have custom
+  ## content. Build options with segment() inside build; set the group's
+  ## accessible name with label().
+  var frameSelection = selected
+  if count > 0:
+    frameSelection = max(0, min(frameSelection, count - 1))
+    selected = frameSelection
+  result = c.row().shrink(0).alignItems(Align.Stretch)
+    .focusGroup(FocusOrientation.Both, selects = true)
+  let track = result
+  let node = track.node
+  if node != nil:
+    node.accessRole = platform.roleRadioGroup
+    node.accessRoleSet = true
+  let firstChildSlot = c.owner.nodes.len
+  if build != nil:
+    discard track.children(proc() = build(frameSelection))
+  var selectionChanged = false
+  for slot in firstChildSlot..<c.owner.nodes.len:
+    let child = c.owner.nodes[slot]
+    if (child.accessExtraStates and platform.accessSegment) !=
+        platform.AccessStates(0) and child.valueChangedInBuild:
+      selectionChanged = true
+      break
+  if selectionChanged:
+    selected = frameSelection
+    track.markBoundValueChanged()
+
 proc segmented*(c: Context; selected: var int;
                 labels: openArray[string]): Element =
   ## Creates a radio-style segmented control whose selected index changes on
@@ -157,14 +194,10 @@ proc segmented*(c: Context; selected: var int;
   var selectionChanged = false
   result = result.children(proc() =
     for index, label in segmentLabels:
-      var segment = c.radioBase(frameSelection, index)
+      var segment = c.segment(frameSelection, index)
         .gap(theme.space(1.5)).padding(theme.space(1), theme.space(3))
         .radius(max(theme.radius - theme.space(0.5), 0'f32))
         .center().focusRing(false)
-      let segmentNode = segment.node
-      if segmentNode != nil:
-        segmentNode.accessExtraStates =
-          segmentNode.accessExtraStates or platform.accessSegment
       if segment.changed():
         selectionChanged = true
       let isSelected = frameSelection == index
