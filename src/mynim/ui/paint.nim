@@ -526,6 +526,7 @@ proc paintScrollbar(sceneFrame: scene.Scene; layout: LayoutResult;
                     slot: int; rect: Rect; scale, opacity: float32) =
   if rect.w <= 0 or rect.h <= 0:
     return
+  let color = layout.owner.nodes[slot].scrollbarColor
   var clips = 0
   var parent = int(layout.owner.nodes[slot].parent)
   while parent >= 0:
@@ -536,9 +537,11 @@ proc paintScrollbar(sceneFrame: scene.Scene; layout: LayoutResult;
   let radius = min(rect.w, rect.h) / 2 * scale
   sceneFrame.ops.add(scene.Op(kind: scene.opFill,
     rect: rect.sceneRect(layout.root, scale),
-    color: sceneColor(rgba(0, 0, 0, 0.32)), paint: scene.paintSolid,
+    color: sceneColor(color), paint: scene.paintSolid,
     radii: [radius, radius, radius, radius],
     continuous: continuousCorners, opacity: opacity))
+  sceneFrame.ops[^1].wide = sceneFrame.addWide(
+    wideColors(color, transparent, transparent))
   for _ in 0..<clips:
     sceneFrame.ops.add(scene.Op(kind: scene.opPopClip))
 

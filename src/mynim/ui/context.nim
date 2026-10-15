@@ -120,6 +120,9 @@ type
     opacity: float32
     opacitySet: bool
     scrollState: ScrollState
+    scrollbarColor: Color
+    scrollbarWidth: float32
+    scrollbarInsets: array[4, float32]
     listState: ListState
     listRowIndex: int
     hasGradient: bool
@@ -238,6 +241,8 @@ proc newElement(c: Context; row: bool): Element =
                          focused: index in c.owner.focusedSlots,
                          focusVisible: index in c.owner.focusVisibleSlots,
                          focusRingColor: c.theme.focus,
+                         scrollbarColor: c.theme.scrollbar,
+                         scrollbarWidth: c.theme.scrollbarWidth,
                          shrink: 1, justify: Align.Start,
                          align: if row: Align.Center else: Align.Auto,
                          selfAlign: Align.Auto,

@@ -1637,11 +1637,18 @@ proc scrollbars(layout: LayoutResult; slot: int): ScrollbarGeometry =
   if state == nil:
     return
   let box = layout.rects[slot]
-  let width = 6'f32
+  let width = if node.scrollbarWidth.finiteUi and node.scrollbarWidth > 0:
+      node.scrollbarWidth
+    else:
+      6'f32
   let top = node.border[0]
   let right = node.border[1]
   let bottom = node.border[2]
   let left = node.border[3]
+  let barTop = top + node.scrollbarInsets[0]
+  let barRight = right + node.scrollbarInsets[1]
+  let barBottom = bottom + node.scrollbarInsets[2]
+  let barLeft = left + node.scrollbarInsets[3]
   let viewWidth = max(box.w - left - right, 0'f32)
   let viewHeight = max(box.h - top - bottom, 0'f32)
   let contentWidth = viewWidth + state.maxX
@@ -1653,25 +1660,25 @@ proc scrollbars(layout: LayoutResult; slot: int): ScrollbarGeometry =
     else:
       0'f32
   if result.vertical:
-    let trackHeight = max(box.h - top - bottom - corner, 0'f32)
-    let trackX = box.x + box.w - right - width - 6
-    let trackY = box.y + top
+    let trackHeight = max(box.h - barTop - barBottom - corner, 0'f32)
+    let trackX = box.x + box.w - barRight - width - 6
+    let trackY = box.y + barTop
     result.verticalTrack = Rect(x: trackX, y: trackY,
       w: width + 6, h: trackHeight)
     let thumb = scrollbarThumb(trackY, trackHeight, viewHeight,
       contentHeight, state.offsetY)
-    result.verticalThumb = Rect(x: box.x + box.w - right - width - 3,
+    result.verticalThumb = Rect(x: box.x + box.w - barRight - width - 3,
       y: thumb.position, w: width, h: thumb.length)
   if result.horizontal:
-    let trackWidth = max(box.w - left - right - corner, 0'f32)
-    let trackX = box.x + left
-    let trackY = box.y + box.h - bottom - width - 6
+    let trackWidth = max(box.w - barLeft - barRight - corner, 0'f32)
+    let trackX = box.x + barLeft
+    let trackY = box.y + box.h - barBottom - width - 6
     result.horizontalTrack = Rect(x: trackX, y: trackY,
       w: trackWidth, h: width + 6)
     let thumb = scrollbarThumb(trackX, trackWidth, viewWidth,
       contentWidth, state.offsetX)
     result.horizontalThumb = Rect(x: thumb.position,
-      y: box.y + box.h - bottom - width - 3,
+      y: box.y + box.h - barBottom - width - 3,
       w: thumb.length, h: width)
 
 proc scrollbarPress(layout: LayoutResult; x, y: float32;
@@ -1948,6 +1955,28 @@ proc scrollHorizontal*(c: Context; state: ScrollState): Element =
 proc scrollBoth*(c: Context; state: ScrollState): Element =
   ## Creates a two-axis scrolling box with persistent state.
   c.box().scroll(state)
+
+proc setScrollbarInsets(e: Element; values: array[4, float32]): Element =
+  result = e
+  let n = e.node
+  if n != nil:
+    n.scrollbarInsets = values
+
+proc scrollbarInsets*(e: Element; all: float32): Element =
+  ## Moves scroll bars in from all four edges by the same number of DIPs.
+  e.setScrollbarInsets([all, all, all, all])
+
+proc scrollbarInsets*(e: Element; vertical, horizontal: float32): Element =
+  ## Moves scroll bars in by vertical and horizontal edge insets.
+  e.setScrollbarInsets([vertical, horizontal, vertical, horizontal])
+
+proc scrollbarInsets*(e: Element; top, horizontal, bottom: float32): Element =
+  ## Sets top, horizontal, and bottom scroll bar insets.
+  e.setScrollbarInsets([top, horizontal, bottom, horizontal])
+
+proc scrollbarInsets*(e: Element; top, right, bottom, left: float32): Element =
+  ## Sets scroll bar insets in top, right, bottom, left order.
+  e.setScrollbarInsets([top, right, bottom, left])
 
 proc clip*(e: Element): Element =
   ## Clips the element's children to its inner rounded rectangle.

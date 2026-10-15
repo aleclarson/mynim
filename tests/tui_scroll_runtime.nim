@@ -199,6 +199,43 @@ doAssert barsSurface.send(platform.SurfaceEvent(kind: platform.pointerUp,
   x: 68, y: 94, button: 0))
 doAssert barsSurface.frame()
 
+let styledBarsState = ui.newScrollState()
+var styledBarsTheme = ui.lightTheme()
+styledBarsTheme.scrollbar = ui.rgb(255, 0, 255)
+styledBarsTheme.scrollbarWidth = 10
+let styledBarsContent = ui.newContent(proc(ctx: ui.Context) =
+  ctx.setTheme(styledBarsTheme)
+  let viewport = ctx.scrollBoth(styledBarsState).size(100, 100)
+    .scrollbarInsets(10, 4, 8).background(ui.rgb(0, 0, 255))
+    .onClick(proc() = discard)
+  discard viewport.children(proc() =
+    discard ctx.box().size(300, 300).shrink(0)
+  )
+)
+let styledBarsWindow = newWindow(WindowOptions(width: 100, height: 100,
+  hidden: true, content: styledBarsContent))
+let styledBarsSurface = fake.windows[^1].surface
+doAssert styledBarsSurface.frame()
+doAssert styledBarsState.maxOffset() == (x: 200'f32, y: 200'f32)
+doAssert styledBarsSurface.send(platform.SurfaceEvent(kind: platform.pointerDown,
+  x: 88, y: 20))
+doAssert styledBarsSurface.frame()
+doAssert styledBarsSurface.pixel(84, 20) == [255'u8, 0, 255, 255]
+doAssert styledBarsSurface.pixel(82, 20) == [255'u8, 0, 0, 255]
+doAssert styledBarsSurface.pixel(88, 5) == [255'u8, 0, 0, 255]
+discard styledBarsSurface.send(platform.SurfaceEvent(kind: platform.pointerUp,
+  x: 88, y: 20, button: 0))
+discard styledBarsSurface.frame()
+
+# The top inset leaves the upper track outside scrollbar hit testing.
+discard styledBarsSurface.send(platform.SurfaceEvent(kind: platform.pointerDown,
+  x: 88, y: 5, button: 0))
+discard styledBarsSurface.send(platform.SurfaceEvent(kind: platform.pointerMove,
+  x: 88, y: 55))
+discard styledBarsSurface.send(platform.SurfaceEvent(kind: platform.pointerUp,
+  x: 88, y: 55, button: 0))
+doAssert styledBarsState.offset().y == 0
+
 barsState.scrollTo(0, 0)
 discard barsSurface.send(platform.SurfaceEvent(kind: platform.surfaceResize))
 doAssert barsSurface.frame()
