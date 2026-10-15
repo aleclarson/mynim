@@ -97,14 +97,23 @@ type
     prefixCounts: seq[int]
     dirty: bool
 
+  ListRowKey* = proc(row: int): string {.closure.} ## Returns a stable, unique row key.
+
   ListState* = ref object
     ## Persistent scroll and measured-height state for a virtualized list.
     scrollState: ScrollState
     heights: ListHeights
+    rowKey: ListRowKey
+    keepOffset: bool
     rowCount: int
     viewportHeight: float32
     first, last: int
+    anchor: int
+    anchorKey: string
+    anchorInset: float64
+    anchorScrollY: float32
     laidOut, visibleRead, atEnd: bool
+    anchorValid: bool
     request: ListRequestKind
     requestRow: int
     requestAlign: Align

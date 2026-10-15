@@ -4,6 +4,7 @@ const
   listHeightBlockSize = 64
   listOverscan = 2
   listMaxRowsPerFrame = 4096
+  listKeySearch = 1000
   defaultListViewport = 480'f32
 
 type
@@ -11,12 +12,58 @@ type
     first, pastLast: int
     top, bottom: float32
 
+proc estimatedHeight(heights: var ListHeights): float64
+proc listHeightTop(heights: var ListHeights; row: int;
+                   gap: float32): float64
+
 proc listHeightFloat32(value: float64): float32 =
   if value <= 0:
     return 0
   if value >= float64(high(float32)):
     return high(float32)
   float32(value)
+
+proc findListKey(state: ListState; key: string): int =
+  if state.rowKey == nil or state.rowCount <= 0:
+    return -1
+  let near = max(0, min(state.anchor, state.rowCount - 1))
+  for distance in 0..listKeySearch:
+    let before = near - distance
+    if before >= 0 and state.rowKey(before) == key:
+      return before
+    let after64 = int64(near) + int64(distance)
+    if distance > 0 and after64 < int64(state.rowCount) and
+        state.rowKey(int(after64)) == key:
+      return int(after64)
+  -1
+
+proc resetListMeasurements(heights: var ListHeights) =
+  let estimate = heights.estimatedHeight()
+  heights.blockIds.setLen(0)
+  heights.blocks.setLen(0)
+  heights.prefixHeights.setLen(0)
+  heights.prefixCounts.setLen(0)
+  heights.defaultHeight = estimate
+  heights.dirty = true
+
+proc syncListAnchor(state: ListState) =
+  if state.rowKey == nil or not state.anchorValid or state.rowCount <= 0:
+    return
+  var oldAnchorChanged = state.anchor < 0 or
+    state.anchor >= state.rowCount
+  if not oldAnchorChanged:
+    oldAnchorChanged = state.rowKey(state.anchor) != state.anchorKey
+  if not oldAnchorChanged:
+    return
+
+  let newAnchor = state.findListKey(state.anchorKey)
+  state.heights.resetListMeasurements()
+  if newAnchor >= 0 and not state.keepOffset and
+      state.request == listNoRequest:
+    let inputMovement = float64(state.scrollState.offsetY - state.anchorScrollY)
+    let top = state.heights.listHeightTop(newAnchor, state.gap)
+    state.scrollState.scrollTo(0,
+      listHeightFloat32(max(top + state.anchorInset + inputMovement, 0.0)))
 
 proc blockPosition(heights: ListHeights; id: int): tuple[index: int, found: bool] =
   var low = 0
@@ -162,9 +209,13 @@ proc resizeListHeights(heights: var ListHeights; count: int) =
   heights.count = newCount
   heights.dirty = true
 
-proc newListState*(estimatedRowHeight = 28'f32;
-                   rowGap = 0'f32): ListState =
+proc newListState*(estimatedRowHeight = 28'f32; rowGap = 0'f32;
+                   rowKey: ListRowKey = nil; keepOffset = false): ListState =
   ## Creates persistent state for a virtualized list.
+  ##
+  ## rowKey should return a stable, unique key for each logical row. When a
+  ## keyed row moves, the list follows it unless keepOffset is true. The moved
+  ## key is searched within 1000 rows of its previous index.
   if not estimatedRowHeight.finiteMotion or estimatedRowHeight <= 0 or
       not rowGap.finiteMotion or rowGap < 0:
     raise newException(ValueError,
@@ -174,6 +225,8 @@ proc newListState*(estimatedRowHeight = 28'f32;
   result.heights.defaultHeight = float64(estimatedRowHeight)
   result.heights.dirty = true
   result.gap = rowGap
+  result.rowKey = rowKey
+  result.keepOffset = keepOffset
   result.last = -1
 
 proc offset*(state: ListState): tuple[x, y: float32] =
@@ -226,6 +279,7 @@ proc atEnd*(state: ListState): bool =
 proc beginList(state: ListState; count: int): ListPlan =
   state.rowCount = max(count, 0)
   state.heights.resizeListHeights(state.rowCount)
+  state.syncListAnchor()
   let viewport = if state.viewportHeight > 0:
       state.viewportHeight
     else:
@@ -320,5 +374,14 @@ proc finishList(state: ListState; first, last: int): bool =
   state.last = last
   state.atEnd = state.rowCount == 0 or
     state.scrollState.offset().y >= state.scrollState.maxOffset().y - 0.5'f32
+  state.anchorValid = state.rowKey != nil and state.rowCount > 0
+  if state.anchorValid:
+    state.anchor = max(0, min(first, state.rowCount - 1))
+    state.anchorKey = state.rowKey(state.anchor)
+    state.anchorScrollY = state.scrollState.offset().y
+    state.anchorInset = float64(state.anchorScrollY) -
+      state.heights.listHeightTop(state.anchor, state.gap)
+  else:
+    state.anchorKey = ""
   state.laidOut = true
   state.visibleRead = false
