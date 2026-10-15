@@ -53,13 +53,14 @@ proc channelClose(c: ref ChannelObj; by: int)
 proc handleCall(w: Window; ctx: CancelCtx; raw: string; trusted: bool)
 proc goAsync(fn: proc() {.closure.})
 
-## document.nim / document_menu.nim / content.nim — used by menu.nim
-## pending: document_menu.go — stubs until it is ported.
+## document.nim / document_menu.nim / content.nim — used by menu.nim.
+## Document-controller stubs remain until that subsystem is ported.
 proc hasDocuments(): bool = false
 proc documentRole(role: MenuRole; win: Window) =
   discard role
   discard win
-proc recentMenuItems(): seq[MenuItem] = @[]
+proc recentMenuItems(): seq[MenuItem]
+proc updateRecentMenus()
 proc contentCommand(w: Window; cmd: string)
 
 ## app.nim / protocol.nim / modules.nim / menu.nim used by window.nim
