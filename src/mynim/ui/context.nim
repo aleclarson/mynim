@@ -36,6 +36,11 @@ type
   ElementNode = object
     parent, firstChild, lastChild, nextSibling: int32
     row: bool
+    hasText: bool
+    textValue: string
+    textStyle: textStack.Style
+    textColor: Color
+    shapedText: textStack.Layout
     width, height, minW, minH, maxW, maxH, basis: UiLength
     grow, shrink: float32
     pad, margin: array[4, float32]
@@ -114,6 +119,15 @@ proc row*(c: Context): Element =
 proc column*(c: Context): Element =
   ## Adds a column container to the current parent.
   c.newElement(false)
+
+proc text*(c: Context; value: string): Element =
+  ## Adds a text element using the system UI font at its natural size.
+  result = c.newElement(false)
+  let n = result.node
+  if n != nil:
+    n.hasText = true
+    n.textValue = value
+    n.textColor = rgb(0, 0, 0)
 
 proc children*(e: Element; build: proc() {.closure.}): Element =
   ## Builds children with e as their parent for the duration of build.

@@ -141,6 +141,36 @@ proc sceneRect(rect, root: Rect; scale: float32): scene.Rect =
     raise newException(ValueError, "ui: painted size exceeds the float range")
   scene.Rect(x: x0, y: y0, w: float32(width), h: float32(height))
 
+proc paintText(s: scene.Scene; node: ElementNode; rect, root: Rect;
+               scale: float32; system: textStack.System) =
+  if not node.hasText or node.shapedText == nil or node.textColor.a == 0:
+    return
+  let originX = rect.x - root.x + node.pad[3] + node.border[3]
+  let originY = rect.y - root.y + node.pad[0] + node.border[0]
+  let color = sceneColor(node.textColor)
+  let wide = wideColors(node.textColor, transparent)
+  let wideIndex = s.addWide(wide)
+  let start = s.glyphs.len
+  let shade = textStack.shadeOf(node.textColor.r, node.textColor.g,
+                                node.textColor.b)
+  for line in node.shapedText.lines:
+    let baseline = system.baseline((originY + line.baseline) * scale)
+    for glyph in line.glyphs:
+      if glyph.`object` or glyph.font.isNil:
+        continue
+      let pen = (originX + glyph.x) * scale
+      let image = system.glyph(glyph.font, glyph.id, scale, pen, shade, false)
+      if not image.ok:
+        continue
+      s.glyphs.add(scene.Glyph(x: floor(pen) + image.left,
+        y: baseline + image.top, w: float32(image.w), h: float32(image.h),
+        u: image.x, v: image.y, uw: image.w, vh: image.h,
+        color: color, wide: wideIndex, colored: image.colored,
+        subpixel: image.subpixel, thin: image.thin))
+  if s.glyphs.len > start:
+    s.ops.add(scene.Op(kind: scene.opGlyphs, first: int32(start),
+                       last: int32(s.glyphs.len)))
+
 proc paintScene*(layout: LayoutResult; scale = 1'f32;
                  clear = transparent): scene.Scene =
   ## Converts a current layout into a device-pixel scene for Mygo's renderers.
@@ -159,32 +189,47 @@ proc paintScene*(layout: LayoutResult; scale = 1'f32;
   if height > 0 and width > maxPixels div height:
     raise newException(ValueError, "ui: scene pixel storage exceeds the platform limit")
 
-  result = scene.Scene(width: 0, height: 0, scale: scale)
-  result.reset(width, height, sceneColor(clear.srgb))
-  result.scale = scale
+  let system = textStack.shared()
+  system.beginFrame()
+  try:
+    for attempt in 0..2:
+      result = scene.Scene(width: 0, height: 0, scale: scale)
+      result.reset(width, height, sceneColor(clear.srgb))
+      result.scale = scale
+      result.text = system.textParams()
+      result.maskAtlas = system.maskAtlas
+      result.colorAtlas = system.colorAtlas
 
-  for slot, node in layout.owner.nodes:
-    let fillVisible = node.background.a > 0
-    let borderVisible = node.borderColor.a > 0 and scene.hasBorder(node.border)
-    if not fillVisible and not borderVisible:
-      continue
+      for slot, node in layout.owner.nodes:
+        let fillVisible = node.background.a > 0
+        let borderVisible = node.borderColor.a > 0 and scene.hasBorder(node.border)
+        if not fillVisible and not borderVisible and not node.hasText:
+          continue
 
-    let rect = layout.rects[slot].sceneRect(layout.root, scale)
-    if rect.empty:
-      continue
-    var op = scene.Op(kind: scene.opFill, rect: rect,
-      color: sceneColor(node.background), paint: scene.paintSolid,
-      radii: node.radius.scaledEdges(scale),
-      border: node.border.scaledEdges(scale),
-      continuous: continuousCorners,
-      borderColor: sceneColor(node.borderColor),
-      dashed: node.borderStyle == BorderStyle.Dashed)
-    var wide = node.background.wideColors(node.borderColor)
-    if not borderVisible:
-      wide.border = [0'f32, 0, 0, 0]
-      wide.`set` = wide.`set` and not scene.wideBorder
-    if not fillVisible:
-      wide.color = [0'f32, 0, 0, 0]
-      wide.`set` = wide.`set` and not scene.wideColor
-    op.wide = result.addWide(wide)
-    result.ops.add(op)
+        let rect = layout.rects[slot].sceneRect(layout.root, scale)
+        if rect.empty:
+          continue
+        if fillVisible or borderVisible:
+          var op = scene.Op(kind: scene.opFill, rect: rect,
+            color: sceneColor(node.background), paint: scene.paintSolid,
+            radii: node.radius.scaledEdges(scale),
+            border: node.border.scaledEdges(scale),
+            continuous: continuousCorners,
+            borderColor: sceneColor(node.borderColor),
+            dashed: node.borderStyle == BorderStyle.Dashed)
+          var wide = node.background.wideColors(node.borderColor)
+          if not borderVisible:
+            wide.border = [0'f32, 0, 0, 0]
+            wide.`set` = wide.`set` and not scene.wideBorder
+          if not fillVisible:
+            wide.color = [0'f32, 0, 0, 0]
+            wide.`set` = wide.`set` and not scene.wideColor
+          op.wide = result.addWide(wide)
+          result.ops.add(op)
+        result.paintText(node, layout.rects[slot], layout.root, scale, system)
+
+      if not system.full() or attempt == 2:
+        break
+      system.makeRoom()
+  finally:
+    system.endFrame()

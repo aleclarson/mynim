@@ -52,6 +52,26 @@ proc clampWidth(node: ElementNode; width, base: float32): float32 =
 proc clampHeight(node: ElementNode; height, base: float32): float32 =
   clampSize(height, node.minH, node.maxH, base)
 
+proc shapeText(nodes: var seq[ElementNode]) =
+  let system = textStack.shared()
+  for node in nodes.mitems:
+    if not node.hasText:
+      continue
+    node.shapedText = system.layout(textStack.Params(text: node.textValue,
+      style: node.textStyle, keepSpaces: true))
+
+proc shapeTextToBounds(nodes: var seq[ElementNode]; rects: seq[Rect]): bool =
+  let system = textStack.shared()
+  for slot, node in nodes.mpairs:
+    if not node.hasText:
+      continue
+    let width = max(rects[slot].w - node.contentInsetX, 0'f32)
+    if width > 0 and node.shapedText.params.width != width:
+      var params = node.shapedText.params
+      params.width = width
+      node.shapedText = system.layout(params)
+      result = true
+
 proc measureTree(nodes: seq[ElementNode]; natural: var seq[NaturalSize]) =
   natural.setLen(nodes.len)
   if nodes.len == 0:
@@ -60,6 +80,9 @@ proc measureTree(nodes: seq[ElementNode]; natural: var seq[NaturalSize]) =
   for slot in countdown(nodes.high, 0):
     let node = nodes[slot]
     var contentW, contentH: float32
+    if node.hasText and node.shapedText != nil:
+      contentW = node.shapedText.width
+      contentH = node.shapedText.height
     var childCount = 0
     var child = int(node.firstChild)
     while child >= 0:
@@ -368,11 +391,22 @@ proc layout*(c: Context; bounds: Rect): LayoutResult =
   c.owner.flexMin.setLen(c.owner.nodes.len)
   c.owner.flexMax.setLen(c.owner.nodes.len)
   c.owner.flexFactors.setLen(c.owner.nodes.len)
+  shapeText(c.owner.nodes)
   measureTree(c.owner.nodes, c.owner.natural)
   if c.owner.nodes.len > 0:
-    placeNode(c.owner.nodes, c.owner.natural, c.owner.rectScratch,
-      c.owner.flexSizes, c.owner.flexBases, c.owner.flexMin,
-      c.owner.flexMax, c.owner.flexFactors, 0, result.root)
+    var stable = false
+    for attempt in 0..1:
+      placeNode(c.owner.nodes, c.owner.natural, c.owner.rectScratch,
+        c.owner.flexSizes, c.owner.flexBases, c.owner.flexMin,
+        c.owner.flexMax, c.owner.flexFactors, 0, result.root)
+      if not shapeTextToBounds(c.owner.nodes, c.owner.rectScratch):
+        stable = true
+        break
+      measureTree(c.owner.nodes, c.owner.natural)
+    if not stable:
+      placeNode(c.owner.nodes, c.owner.natural, c.owner.rectScratch,
+        c.owner.flexSizes, c.owner.flexBases, c.owner.flexMin,
+        c.owner.flexMax, c.owner.flexFactors, 0, result.root)
     for slot in 0..<result.rects.len:
       result.rects[slot] = c.owner.rectScratch[slot]
 
@@ -562,6 +596,44 @@ proc margin*(e: Element; vertical, horizontal: float32): Element =
 
 proc margin*(e: Element; top, right, bottom, left: float32): Element =
   e.setMargin([top, right, bottom, left])
+
+proc textSize*(e: Element; value: float32): Element =
+  ## Sets the text font size in DIPs; zero selects the system default.
+  result = e
+  let n = e.node
+  if n != nil and n.hasText:
+    n.textStyle.size = if classify(value) notin {fcNan, fcInf, fcNegInf}:
+        max(value, 0'f32)
+      else:
+        0'f32
+
+proc textColor*(e: Element; value: Color): Element =
+  ## Sets the text color.
+  result = e
+  let n = e.node
+  if n != nil and n.hasText:
+    n.textColor = value
+
+proc textFamily*(e: Element; value: string): Element =
+  ## Selects a font family for the text.
+  result = e
+  let n = e.node
+  if n != nil and n.hasText:
+    n.textStyle.family = value
+
+proc textWeight*(e: Element; value: int): Element =
+  ## Sets the text font weight from 100 to 900; zero selects the default.
+  result = e
+  let n = e.node
+  if n != nil and n.hasText:
+    n.textStyle.weight = if value <= 0: 0 else: max(100, min(value, 900))
+
+proc textItalic*(e: Element; value = true): Element =
+  ## Toggles italic text.
+  result = e
+  let n = e.node
+  if n != nil and n.hasText:
+    n.textStyle.italic = value
 
 proc marginX*(e: Element; value: float32): Element =
   result = e

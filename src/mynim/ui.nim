@@ -6,6 +6,7 @@ import mynim/internal/scene as scene
 import mynim/internal/platform
 import mynim/internal/surface
 import mynim/internal/raster as raster
+import mynim/internal/text as textStack
 when defined(macosx):
   import mynim/internal/gpu/metal as metalGpu
 elif (defined(linux) and (defined(amd64) or defined(arm64))) or
