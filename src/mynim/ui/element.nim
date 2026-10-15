@@ -106,6 +106,16 @@ type
   ListRowHeader* = proc(row: int): bool {.closure.} ## Marks section header rows.
   ListRowReorder* = proc(rows: seq[int]; beforeRow: int) {.closure.}
     ## Receives ordered row indices and the insertion index; rowCount means end.
+  ListRowAccess = object
+    role: platform.AccessRole
+    level: int
+    states: platform.AccessStates
+    actions: platform.AccessActions
+  ListRowAccessProvider = proc(row: int): ListRowAccess {.closure.}
+  ListRowAccessAction = proc(row: int;
+      action: platform.AccessActionKind): bool {.closure.}
+  ListKeyHandler = proc(key: platform.Key;
+      mods: platform.Modifiers): bool {.closure.}
 
   SortOrder* = object ## One column and direction in a table sort.
     column*: string ## Column ID, or its title when ID is empty.
@@ -142,6 +152,10 @@ type
     sortBy*: seq[SortOrder] ## Optional ordered, multi-column sort.
     multiSort*: bool ## Keeps multi-sort enabled when sortBy is empty.
     tableRowsRole: bool
+    outlineMode: bool
+    rowAccess: ListRowAccessProvider
+    rowAccessAction: ListRowAccessAction
+    keyHandler: ListKeyHandler
     headerCacheRow, headerCacheFrom, headerCacheStop: int
     headerCacheValid: bool
     keepOffset: bool

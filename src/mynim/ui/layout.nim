@@ -1969,13 +1969,29 @@ proc dispatchClick(layout: LayoutResult; pressed: Element;
   clickedSlot = int(target.slot)
   let node = layout.owner.nodes[clickedSlot]
   if node.listState != nil and node.listRowIndex >= 0 and
-      not node.listRowHeader:
+      not node.listRowHeader and not node.listRowAction:
     node.listState.clickListRow(node.listRowIndex, mods)
   else:
     let handler = node.clickHandler
     if handler != nil:
       handler(mods)
   true
+
+proc dispatchAccessTreeAction(layout: LayoutResult; id: uint64;
+                              action: platform.AccessActionKind): bool =
+  if layout.owner == nil or layout.owner.closed or layout.owner.inBuild or
+      not layout.owner.hasFrame or
+      layout.generation != layout.owner.generation:
+    return false
+  for slot in 1..<layout.owner.nodes.len:
+    if uint64(slot + 1) != id:
+      continue
+    let node = layout.owner.nodes[slot]
+    if node.listState == nil or node.listRowIndex < 0 or
+        node.listState.rowAccessAction == nil:
+      return false
+    return node.listState.rowAccessAction(node.listRowIndex, action)
+  false
 
 proc dispatchAccessPress(layout: LayoutResult; id: uint64): bool =
   if layout.owner == nil or layout.owner.closed or layout.owner.inBuild or

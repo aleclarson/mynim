@@ -16,7 +16,14 @@ proc buildListRow(c: Context; state: ListState; rowIndex: int;
     rowNode.listRowIndex = rowIndex
     rowNode.listRowHeader = isHeader
     rowNode.listRowPinnedHeader = pinnedHeader
-    if state.tableRowsRole:
+    if state.rowAccess != nil:
+      let access = state.rowAccess(rowIndex)
+      rowNode.accessRole = access.role
+      rowNode.accessRoleSet = true
+      rowNode.accessLevel = access.level
+      rowNode.accessExtraStates = access.states
+      rowNode.accessExtraActions = access.actions
+    elif state.tableRowsRole:
       rowNode.accessRole = platform.roleRow
       rowNode.accessRoleSet = true
     let selected = if state.multiSelectionEnabled:

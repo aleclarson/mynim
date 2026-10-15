@@ -243,7 +243,8 @@ proc accessibilityTree(layout: LayoutResult;
     let node = owner.nodes[slot]
     let image = node.bitmap != nil or node.vector != nil
     let listContainer = node.listState != nil and node.listRowIndex == -1
-    let listItem = node.listState != nil and node.listRowIndex >= 0
+    let listItem = node.listState != nil and node.listRowIndex >= 0 and
+      not node.listRowAction
     if image and node.label.len == 0 and node.clickHandler == nil and
         not node.focusable and node.textClient == nil and not listItem and
         not node.accessRoleSet:
@@ -280,6 +281,9 @@ proc accessibilityTree(layout: LayoutResult;
       bounds: platform.RectF(x: rect.x.float64, y: rect.y.float64,
         w: rect.w.float64, h: rect.h.float64))
     accessible.states = accessible.states or node.accessSort
+    accessible.states = accessible.states or node.accessExtraStates
+    accessible.actions = accessible.actions or node.accessExtraActions
+    accessible.level = node.accessLevel
     if node.textClient != nil:
       let (value, _) = node.textClient.textForRange(platform.TextRange(
         start: 0, `end`: high(int)))
@@ -941,6 +945,19 @@ proc event(rt: Runtime; ev: platform.SurfaceEvent): bool =
           focusSlot = int(targetNode.listState.frameSlot)
         rt.clickedSlots = @[clickedSlot]
         rt.focusSlot = focusSlot
+        rt.keyboardFocusVisible = false
+        rt.cancelKeyPress()
+        rt.requestFrame()
+    elif ev.action in {platform.accessExpand, platform.accessCollapse}:
+      result = rt.frameLayout.dispatchAccessTreeAction(ev.id, ev.action)
+      if result:
+        let clickedSlot = int(ev.id - 1)
+        let targetNode = rt.frameLayout.owner.nodes[clickedSlot]
+        rt.focusSlot = if targetNode.listState != nil and
+            targetNode.listRowIndex >= 0:
+          int(targetNode.listState.frameSlot)
+        else:
+          clickedSlot
         rt.keyboardFocusVisible = false
         rt.cancelKeyPress()
         rt.requestFrame()

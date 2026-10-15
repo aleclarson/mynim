@@ -805,6 +805,9 @@ proc handleListKey(layout: LayoutResult; focusSlot: int;
   while slot > 0:
     let node = owner.nodes[slot]
     if node.listState != nil and node.listRowIndex == -1:
+      if node.listState.keyHandler != nil and
+          node.listState.keyHandler(key, mods):
+        return true
       return node.listState.selectListKey(key, mods)
     slot = int(node.parent)
 

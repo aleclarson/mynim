@@ -173,7 +173,10 @@ proc table*(c: Context; state: ListState; columns: openArray[TableColumn];
 
   result = c.column().clip().focusable().focusRing(false)
   if result.node != nil:
-    result.node.accessRole = platform.roleTable
+    result.node.accessRole = if state.outlineMode:
+        platform.roleTree
+      else:
+        platform.roleTable
     result.node.accessRoleSet = true
     result.node.listState = state
     result.node.listRowIndex = -1

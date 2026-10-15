@@ -93,6 +93,7 @@ type
     gridCol, gridRow, gridColSpan, gridRowSpan: int
     hasText, textColorSet, listRowSelected, listRowFocusVisible,
       listRowHeader, listRowPinnedHeader: bool
+    listRowAction: bool
     textAlign: Align
     hovered, pressed, clicked: bool
     label: string
@@ -104,6 +105,9 @@ type
     clickHandler: proc(mods: platform.Modifiers) {.closure.}
     accessRole: platform.AccessRole
     accessSort: platform.AccessStates
+    accessExtraStates: platform.AccessStates
+    accessExtraActions: platform.AccessActions
+    accessLevel: int
     accessRoleSet: bool
     bitmap: Bitmap
     imageRegion: Rect
