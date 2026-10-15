@@ -156,6 +156,11 @@ type
     order*: seq[string] ## Movable column IDs, followed by unspecified columns.
     widths*: Table[string, float32] ## User widths keyed by column ID.
 
+  TableDrag = ref object
+    column: string
+    startX, lastX, offsetX: float32
+    moving: bool
+
   ListSelectedRow = object
     row, nearRow: int
     key: string
@@ -178,6 +183,7 @@ type
     rowAccess: ListRowAccessProvider
     rowAccessAction: ListRowAccessAction
     keyHandler: ListKeyHandler
+    tableDrag: TableDrag
     headerCacheRow, headerCacheFrom, headerCacheStop: int
     headerCacheValid: bool
     keepOffset: bool

@@ -49,6 +49,77 @@ proc setWidth*(layout: var TableLayout; column: TableColumn; width: float32) =
     layout.widths = initTable[string, float32]()
   layout.widths[column.columnId] = column.clampWidth(width)
 
+proc beginTableColumnDrag(state: ListState; column: string;
+                          x: float32): bool =
+  if state == nil or column.len == 0:
+    return false
+  state.tableDrag = TableDrag(column: column, startX: x, lastX: x)
+  true
+
+proc updateTableColumnDrag(state: ListState; nodes: openArray[ElementNode];
+                           rects: openArray[Rect]; x: float32): bool =
+  if state == nil or state.tableDrag == nil:
+    return false
+  let drag = state.tableDrag
+  drag.offsetX += x - drag.lastX
+  drag.lastX = x
+  if not drag.moving and abs(x - drag.startX) >= 4'f32:
+    drag.moving = true
+  if not drag.moving:
+    return false
+
+  var headers: seq[int]
+  for slot in 1..<nodes.len:
+    if nodes[slot].tableState == state and
+        nodes[slot].tableColumnId.len > 0:
+      headers.add(slot)
+  var at = -1
+  for index, slot in headers:
+    if nodes[slot].tableColumnId == drag.column:
+      at = index
+      break
+  if at < 0:
+    return true
+
+  let sign = if nodes[headers[at]].rightToLeft: -1'f32 else: 1'f32
+  let distance = drag.offsetX * sign
+  var to = at
+  if distance > 0 and at + 1 < headers.len:
+    let next = headers[at + 1]
+    if not nodes[next].tableColumnFixed and rects[next].w > 0 and
+        distance > rects[next].w / 2:
+      to = at + 1
+  elif distance < 0 and at > 0:
+    let previous = headers[at - 1]
+    if not nodes[previous].tableColumnFixed and rects[previous].w > 0 and
+        -distance > rects[previous].w / 2:
+      to = at - 1
+  if to != at:
+    var order = newSeq[string](headers.len)
+    for index, slot in headers:
+      order[index] = nodes[slot].tableColumnId
+    swap(order[at], order[to])
+    state.columns.order.setLen(0)
+    for index, slot in headers:
+      if not nodes[slot].tableColumnFixed:
+        state.columns.order.add(order[index])
+    let neighborWidth = rects[headers[to]].w
+    if to > at:
+      drag.offsetX -= sign * neighborWidth
+    else:
+      drag.offsetX += sign * neighborWidth
+  true
+
+proc finishTableColumnDrag(state: ListState): bool =
+  if state == nil or state.tableDrag == nil:
+    return false
+  result = state.tableDrag.moving
+  state.tableDrag = nil
+
+proc cancelTableColumnDrag(state: ListState) =
+  if state != nil:
+    state.tableDrag = nil
+
 proc usesMultiSort(state: ListState): bool =
   state.multiSort or state.sortBy.len > 0
 
@@ -191,6 +262,10 @@ proc table*(c: Context; state: ListState; columns: openArray[TableColumn];
       c.tableCells(columnList, order, state.columns, flexMin,
         platform.roleColumnHeader, proc(index: int; box: Element) =
           let column = columnList[index]
+          if box.node != nil:
+            box.node.tableState = state
+            box.node.tableColumnId = column.columnId
+            box.node.tableColumnFixed = column.fixed
           let title = c.text(column.title).textWeight(600)
             .textColor(theme.textMuted).shrink(1)
           discard title

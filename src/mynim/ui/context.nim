@@ -113,6 +113,9 @@ type
     keyHandler: UiKeyHandler
     treeAccessAction: TreeAccessAction
     treeAccessFocus: TreeAccessFocus
+    tableState: ListState
+    tableColumnId: string
+    tableColumnFixed: bool
     bitmap: Bitmap
     imageRegion: Rect
     flipX, flipY: bool

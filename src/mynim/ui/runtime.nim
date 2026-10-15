@@ -19,7 +19,7 @@ type
     scrollbarDrag: ScrollbarDrag
     focusSlot, keyPressSlot: int
     keyPressKey: platform.Key
-    listReorder: ListState
+    listReorder, tableReorder: ListState
     textInputAdapter: TextInputAdapter
     lastTextInput: platform.TextInputState
     inputComposition: platform.InputComposition
@@ -590,6 +590,11 @@ proc cancelListReorder(rt: Runtime) =
     rt.listReorder.cancelListReorder()
     rt.listReorder = nil
 
+proc cancelTableReorder(rt: Runtime) =
+  if rt.tableReorder != nil:
+    rt.tableReorder.cancelTableColumnDrag()
+    rt.tableReorder = nil
+
 proc beginListReorder(rt: Runtime; target: Element) =
   rt.cancelListReorder()
   if target.owner == nil or target.owner != rt.frameLayout.owner:
@@ -601,6 +606,21 @@ proc beginListReorder(rt: Runtime; target: Element) =
         node.listState.beginListReorder(node.listRowIndex,
           rt.pointerX, rt.pointerY):
       rt.listReorder = node.listState
+      return
+    slot = int(node.parent)
+
+proc beginTableReorder(rt: Runtime; target: Element) =
+  rt.cancelTableReorder()
+  if target.owner == nil or target.owner != rt.frameLayout.owner:
+    return
+  var slot = int(target.slot)
+  while slot > 0 and slot < target.owner.nodes.len:
+    let node = target.owner.nodes[slot]
+    if node.tableState != nil and node.tableColumnId.len > 0 and
+        not node.tableColumnFixed and
+        node.tableState.beginTableColumnDrag(node.tableColumnId,
+          rt.pointerX):
+      rt.tableReorder = node.tableState
       return
     slot = int(node.parent)
 
@@ -814,6 +834,11 @@ proc event(rt: Runtime; ev: platform.SurfaceEvent): bool =
       discard rt.autoScrollListReorder(rt.listReorder)
       rt.requestFrame()
       return false
+    if rt.tableReorder != nil:
+      if rt.tableReorder.updateTableColumnDrag(rt.frameLayout.owner.nodes,
+          rt.frameLayout.rects, rt.pointerX):
+        rt.requestFrame()
+      return false
     if rt.hoverSlots != previousHover or rt.pressedSlots != previousPressed:
       rt.requestFrame()
     false
@@ -839,6 +864,7 @@ proc event(rt: Runtime; ev: platform.SurfaceEvent): bool =
     rt.pressMods = ev.mods
     rt.pressHoverSlots = rt.frameLayout.slotsAt(rt.pointerX, rt.pointerY)
     rt.beginListReorder(rt.pressTarget)
+    rt.beginTableReorder(rt.pressTarget)
     if rt.pressTarget.owner != nil:
       var slot = int(rt.pressTarget.slot)
       let targetNode = rt.frameLayout.owner.nodes[slot]
@@ -890,6 +916,19 @@ proc event(rt: Runtime; ev: platform.SurfaceEvent): bool =
         return true
       discard state.finishListReorder(commit = false)
       rt.listReorder = nil
+    if rt.tableReorder != nil:
+      let state = rt.tableReorder
+      discard state.updateTableColumnDrag(rt.frameLayout.owner.nodes,
+        rt.frameLayout.rects, rt.pointerX)
+      let moved = state.finishTableColumnDrag()
+      rt.tableReorder = nil
+      if moved:
+        rt.pressTarget = Element()
+        rt.pressMods = 0
+        rt.pressHoverSlots.setLen(0)
+        rt.refreshPointer()
+        rt.requestFrame()
+        return true
     var clickedSlot = -1
     result = rt.frameLayout.dispatchClick(rt.pressTarget,
       rt.pointerX, rt.pointerY, rt.pressMods, clickedSlot)
@@ -910,10 +949,12 @@ proc event(rt: Runtime; ev: platform.SurfaceEvent): bool =
     let hadTextInput = rt.hasTextInputState and rt.lastTextInput.active
     let hadScrollbarDrag = rt.scrollbarDrag.state != nil
     let hadListReorder = rt.listReorder != nil
+    let hadTableReorder = rt.tableReorder != nil
     if hadScrollbarDrag:
       rt.scrollbarDrag.state.scrollbarDragging = false
       rt.scrollbarDrag = ScrollbarDrag()
     rt.cancelListReorder()
+    rt.cancelTableReorder()
     rt.cancelKeyPress()
     rt.keyboardFocusVisible = false
     rt.surfaceFocused = false
@@ -923,7 +964,8 @@ proc event(rt: Runtime; ev: platform.SurfaceEvent): bool =
     rt.refreshPointer()
     rt.updateTextInput()
     if rt.pressedSlots != previousPressed or previousFocusVisible or
-        hadTextInput or hadScrollbarDrag or hadListReorder:
+        hadTextInput or hadScrollbarDrag or hadListReorder or
+        hadTableReorder:
       rt.requestFrame()
     false
   of platform.pointerLeave:
@@ -1041,6 +1083,7 @@ proc close(rt: Runtime) =
     rt.conn.surface.setTextInput(platform.TextInputState())
     rt.hasTextInputState = false
   rt.cancelListReorder()
+  rt.cancelTableReorder()
   rt.closed = true
   rt.context.close()
   rt.releaseGpu()
