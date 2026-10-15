@@ -11,6 +11,8 @@ type
     natural: seq[NaturalSize]
     rectScratch: seq[Rect]
     paintSlots: seq[int]
+    flexSlots: seq[int]
+    flexLines: seq[FlexLine]
     flexSizes, flexBases, flexMin, flexMax, flexFactors: seq[float32]
     hoveredSlots, pressedSlots, clickedSlots: seq[int]
     generation: uint32
@@ -28,6 +30,10 @@ type
 
   NaturalSize = object
     w, h: float32
+
+  FlexLine = object
+    first, pastLast: int
+    main, cross: float32
 
   Element* = object
     ## A checked 16-byte handle on 64-bit targets; it expires after its build callback.
@@ -54,7 +60,7 @@ type
 
   ElementNode = object
     parent, firstChild, lastChild, nextSibling: int32
-    row, reverse, absolute: bool
+    row, reverse, wrap, wrapReverse, absolute: bool
     hasText: bool
     hovered, pressed, clicked: bool
     label: string
@@ -74,7 +80,7 @@ type
     pad, margin: array[4, float32]
     inset: array[4, UiLength]
     gapX, gapY: float32
-    justify, align, selfAlign: Align
+    justify, align, selfAlign, alignContent: Align
     background, borderColor: Color
     radius, border: array[4, float32]
     borderStyle: BorderStyle
@@ -100,6 +106,8 @@ proc retire(owner: ElementOwner) =
   owner.natural = @[]
   owner.rectScratch = @[]
   owner.paintSlots = @[]
+  owner.flexSlots = @[]
+  owner.flexLines = @[]
   owner.flexSizes = @[]
   owner.flexBases = @[]
   owner.flexMin = @[]
@@ -134,7 +142,8 @@ proc newElement(c: Context; row: bool): Element =
                          clicked: index in c.owner.clickedSlots,
                          shrink: 1, justify: Align.Start,
                          align: if row: Align.Center else: Align.Auto,
-                         selfAlign: Align.Auto)
+                         selfAlign: Align.Auto,
+                         alignContent: Align.Auto)
   c.owner.nodes.add(node)
   let p = int(c.owner.parent)
   if c.owner.nodes[p].lastChild >= 0:

@@ -126,6 +126,98 @@ block reverse_direction:
   doAssert layout.bounds(endFirst) == Rect(x: 20, y: 125, w: 20, h: 10)
   doAssert layout.bounds(endSecond) == Rect(x: 0, y: 125, w: 20, h: 10)
 
+block flex_wrap:
+  let c = newContext()
+  var row, first, second, third, reverseRow, reverseFirst, reverseSecond: Element
+  var centeredRow, centeredFirst, centeredSecond, contentSized, contentFirst:
+    Element
+  var contentSecond: Element
+  var column, columnFirst, columnSecond, columnThird: Element
+  var reverseColumn, reverseColumnFirst, reverseColumnSecond: Element
+  var growRow, growFirst, growSecond: Element
+  c.build(proc(ctx: Context) =
+    row = ctx.row().size(100, 50).gapX(5).gapY(3).wrap()
+      .alignItems(Align.Start)
+    discard row.children(proc() =
+      first = ctx.box().size(60, 10)
+      second = ctx.box().size(50, 20)
+      third = ctx.box().size(20, 12)
+    )
+    reverseRow = ctx.row().size(100, 50).gapY(4).wrapReverse()
+      .alignItems(Align.Start)
+    discard reverseRow.children(proc() =
+      reverseFirst = ctx.box().size(60, 10)
+      reverseSecond = ctx.box().size(50, 20)
+    )
+    centeredRow = ctx.row().size(100, 50).wrap()
+      .alignItems(Align.Start).alignContent(Align.Center)
+    discard centeredRow.children(proc() =
+      centeredFirst = ctx.box().size(60, 10)
+      centeredSecond = ctx.box().size(50, 20)
+    )
+    contentSized = ctx.row().width(100).wrap().gapY(3)
+      .alignItems(Align.Start)
+    discard contentSized.children(proc() =
+      contentFirst = ctx.box().size(60, 10)
+      contentSecond = ctx.box().size(50, 20)
+    )
+    column = ctx.column().size(50, 100).gapX(4).wrap()
+      .alignItems(Align.Start)
+    discard column.children(proc() =
+      columnFirst = ctx.box().size(20, 60)
+      columnSecond = ctx.box().size(20, 50)
+      columnThird = ctx.box().size(10, 30)
+    )
+    reverseColumn = ctx.column().size(50, 100).gapX(4).wrapReverse()
+      .alignItems(Align.Start)
+    discard reverseColumn.children(proc() =
+      reverseColumnFirst = ctx.box().size(20, 60)
+      reverseColumnSecond = ctx.box().size(20, 50)
+    )
+    growRow = ctx.row().size(100, 30).wrap().alignItems(Align.Start)
+    discard growRow.children(proc() =
+      growFirst = ctx.box().size(60, 10).grow()
+      growSecond = ctx.box().size(60, 10).grow()
+    )
+  )
+  let layout = c.layout(100, 100)
+  doAssert layout.bounds(first) == Rect(x: 0, y: 0, w: 60, h: 10)
+  doAssert layout.bounds(second) == Rect(x: 0, y: 13, w: 50, h: 20)
+  doAssert layout.bounds(third) == Rect(x: 55, y: 13, w: 20, h: 12)
+  doAssert layout.bounds(reverseFirst).y == layout.bounds(reverseRow).y + 40
+  doAssert layout.bounds(reverseSecond).y == layout.bounds(reverseRow).y + 16
+  doAssert layout.bounds(centeredFirst).y == layout.bounds(centeredRow).y + 10
+  doAssert layout.bounds(centeredSecond).y == layout.bounds(centeredRow).y + 20
+  doAssert layout.bounds(contentSized).h == 33
+  doAssert layout.bounds(contentSecond).y == layout.bounds(contentSized).y + 13
+  doAssert layout.bounds(columnFirst).x == layout.bounds(column).x
+  doAssert layout.bounds(columnSecond).x == layout.bounds(column).x + 24
+  doAssert layout.bounds(columnThird).y == layout.bounds(columnSecond).y + 50
+  doAssert layout.bounds(reverseColumnFirst).x ==
+    layout.bounds(reverseColumn).x + 30
+  doAssert layout.bounds(reverseColumnSecond).x ==
+    layout.bounds(reverseColumn).x + 6
+  doAssert layout.bounds(growFirst).w == 100
+  doAssert layout.bounds(growSecond).w == 100
+
+  var measuredParent, constrainedWrap, constrainedFirst, constrainedSecond:
+    Element
+  c.build(proc(ctx: Context) =
+    measuredParent = ctx.column().width(100)
+    discard measuredParent.children(proc() =
+      constrainedWrap = ctx.row().wrap().gapY(3).alignItems(Align.Start)
+      discard constrainedWrap.children(proc() =
+        constrainedFirst = ctx.box().size(60, 10)
+        constrainedSecond = ctx.box().size(50, 20)
+      )
+    )
+  )
+  let constrainedLayout = c.layout(100, 100)
+  doAssert constrainedLayout.bounds(constrainedWrap).h == 33
+  doAssert constrainedLayout.bounds(measuredParent).h == 33
+  doAssert constrainedLayout.bounds(constrainedSecond).y ==
+    constrainedLayout.bounds(constrainedFirst).y + 13
+
 block absolute_and_relative_positioning:
   let c = newContext()
   var parent, flow, overlay, next, start, endAnchor, half, otherHalf: Element

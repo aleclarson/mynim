@@ -52,6 +52,10 @@ proc clampWidth(node: ElementNode; width, base: float32): float32 =
 proc clampHeight(node: ElementNode; height, base: float32): float32 =
   clampSize(height, node.minH, node.maxH, base)
 
+proc crossSize(node: ElementNode; natural: NaturalSize; row: bool;
+               base, mainExtent, available, margins: float32;
+               align: Align): float32
+
 proc shapeText(nodes: var seq[ElementNode]) =
   let system = textStack.shared()
   for node in nodes.mitems:
@@ -72,12 +76,14 @@ proc shapeTextToBounds(nodes: var seq[ElementNode]; rects: seq[Rect]): bool =
       node.shapedText = system.layout(params)
       result = true
 
-proc measureTree(nodes: seq[ElementNode]; natural: var seq[NaturalSize]) =
+proc measureTree(nodes: seq[ElementNode]; natural: var seq[NaturalSize];
+                 constraints: seq[Rect] = @[]): bool =
   natural.setLen(nodes.len)
   if nodes.len == 0:
     return
 
   for slot in countdown(nodes.high, 0):
+    let previous = natural[slot]
     let node = nodes[slot]
     var contentW, contentH: float32
     if node.hasText and node.shapedText != nil:
@@ -114,6 +120,73 @@ proc measureTree(nodes: seq[ElementNode]; natural: var seq[NaturalSize]) =
         inc childCount
       child = int(childNode.nextSibling)
 
+    var measuredMain = (if node.row: node.width else: node.height).resolve(-1)
+    if slot < constraints.len:
+      measuredMain = (value: (if node.row: constraints[slot].w
+        else: constraints[slot].h), ok: true)
+    if node.wrap and measuredMain.ok and childCount > 0:
+      let mainInset = if node.row: node.contentInsetX else:
+        node.contentInsetY
+      let mainLimit = max(measuredMain.value - mainInset, 0'f32)
+      let mainGap = if node.row: node.gapX else: node.gapY
+      let crossGap = if node.row: node.gapY else: node.gapX
+      let crossDimension = if node.row: node.height else: node.width
+      let measuredCross = crossDimension.resolve(-1)
+      let crossInset = if node.row: node.contentInsetY else:
+        node.contentInsetX
+      var crossBase = if measuredCross.ok:
+          max(measuredCross.value - crossInset, 0'f32)
+        else:
+          -1'f32
+      if slot < constraints.len:
+        crossBase = max((if node.row: constraints[slot].h
+          else: constraints[slot].w) - crossInset, 0'f32)
+      var lineMain, lineCross, usedCross: float32
+      var lineCount = 0
+      var hasCompletedLine = false
+      child = int(node.firstChild)
+      while child >= 0:
+        let childSlot = child
+        let childNode = nodes[childSlot]
+        if not childNode.absolute:
+          let childNatural = natural[childSlot]
+          let basis = childNode.basis.resolve(mainLimit)
+          let dimension = (if node.row: childNode.width else:
+            childNode.height).resolve(mainLimit)
+          let mainSize = if basis.ok: basis.value
+            elif dimension.ok: dimension.value
+            elif node.row: childNatural.w
+            else: childNatural.h
+          let mainMargin = if node.row: childNode.marginX else:
+            childNode.marginY
+          let crossMargin = if node.row: childNode.marginY else:
+            childNode.marginX
+          let outerMain = max(mainSize, 0'f32) + mainMargin
+          if lineCount > 0 and lineMain + mainGap + outerMain > mainLimit:
+            if hasCompletedLine:
+              usedCross += crossGap
+            usedCross += lineCross
+            hasCompletedLine = true
+            lineMain = 0
+            lineCross = 0
+            lineCount = 0
+          if lineCount > 0:
+            lineMain += mainGap
+          lineMain += outerMain
+          let crossExtent = childNode.crossSize(childNatural, node.row,
+            crossBase, mainSize, 0'f32, crossMargin, Align.Start)
+          lineCross = max(lineCross, crossExtent + crossMargin)
+          inc lineCount
+        child = int(childNode.nextSibling)
+      if lineCount > 0:
+        if hasCompletedLine:
+          usedCross += crossGap
+        usedCross += lineCross
+      if node.row:
+        contentH = max(contentH, usedCross)
+      else:
+        contentW = max(contentW, usedCross)
+
     if childCount > 1:
       if node.row:
         contentW += node.gapX * float32(childCount - 1)
@@ -138,9 +211,12 @@ proc measureTree(nodes: seq[ElementNode]; natural: var seq[NaturalSize]) =
           rawH = contentWidth / node.aspectRatio + node.contentInsetY
         else:
           rawW = contentHeight * node.aspectRatio + node.contentInsetX
-    natural[slot] = NaturalSize(
+    let measured = NaturalSize(
       w: node.clampWidth(rawW, -1),
       h: node.clampHeight(rawH, -1))
+    if measured.w != previous.w or measured.h != previous.h:
+      result = true
+    natural[slot] = measured
 
 proc justifyOffsets(justify: Align; free: float32; count: int):
     tuple[start, between: float32] =
@@ -163,27 +239,27 @@ proc justifyOffsets(justify: Align; free: float32; count: int):
   else:
     (0'f32, 0'f32)
 
-proc distribute(nodes: seq[ElementNode]; parent: int;
+proc distribute(nodes: seq[ElementNode]; children: seq[int];
+                first, pastLast: int;
                 sizes, minimum, maximum, factors: var seq[float32];
                 amount: float32; growing: bool) =
   var remaining = amount
-  for _ in 0..nodes.len:
+  for _ in 0 .. (pastLast - first):
     var totalFactor: float32
-    var child = int(nodes[parent].firstChild)
-    while child >= 0:
+    for itemIndex in first ..< pastLast:
+      let child = children[itemIndex]
       let room = if growing:
           maximum[child] - sizes[child]
         else:
           sizes[child] - minimum[child]
       if room > 0 and factors[child] > 0:
         totalFactor += factors[child]
-      child = int(nodes[child].nextSibling)
     if totalFactor <= 0 or remaining <= 0:
       break
 
     var changed: float32
-    child = int(nodes[parent].firstChild)
-    while child >= 0:
+    for itemIndex in first ..< pastLast:
+      let child = children[itemIndex]
       let room = if growing:
           maximum[child] - sizes[child]
         else:
@@ -196,7 +272,6 @@ proc distribute(nodes: seq[ElementNode]; parent: int;
         else:
           sizes[child] -= delta
         changed += delta
-      child = int(nodes[child].nextSibling)
     remaining -= changed
     if changed <= 0:
       break
@@ -233,24 +308,26 @@ proc crossSize(node: ElementNode; natural: NaturalSize; row: bool;
 
 proc placeAbsoluteChild(nodes: seq[ElementNode]; natural: seq[NaturalSize];
                         rects: var seq[Rect]; sizes, bases, minimum, maximum,
-                        factors: var seq[float32]; parentSlot,
+                        factors: var seq[float32]; flexSlots: var seq[int];
+                        flexLines: var seq[FlexLine]; parentSlot,
                         childSlot: int; bounds: Rect)
 
 proc placeNode(nodes: seq[ElementNode]; natural: seq[NaturalSize];
                rects: var seq[Rect]; sizes, bases, minimum, maximum,
-               factors: var seq[float32]; slot: int; bounds: Rect) =
+               factors: var seq[float32]; flexSlots: var seq[int];
+               flexLines: var seq[FlexLine]; slot: int; bounds: Rect) =
   rects[slot] = bounds
   let node = nodes[slot]
   var child = int(node.firstChild)
-  var childCount = 0
   var totalChildren = 0
   while child >= 0:
     inc totalChildren
-    if not nodes[child].absolute:
-      inc childCount
     child = int(nodes[child].nextSibling)
   if totalChildren == 0:
     return
+
+  let slotsBase = flexSlots.len
+  let linesBase = flexLines.len
 
   let row = node.row
   let innerX = bounds.x + node.pad[3] + node.border[3]
@@ -268,12 +345,12 @@ proc placeNode(nodes: seq[ElementNode]; natural: seq[NaturalSize];
       (if node.reverse: 3 else: 1)
     else:
       (if node.reverse: 0 else: 2)
-  let crossStart = if row: 0 else: 3
-  let crossEnd = if row: 2 else: 1
+  var crossStart = if row: 0 else: 3
+  var crossEnd = if row: 2 else: 1
+  if node.wrapReverse:
+    swap(crossStart, crossEnd)
 
-  var outerMain, gaps: float32
-  if childCount > 1:
-    gaps = gap * float32(childCount - 1)
+  var activeLine = FlexLine(first: slotsBase)
 
   child = int(node.firstChild)
   while child >= 0:
@@ -312,54 +389,138 @@ proc placeNode(nodes: seq[ElementNode]; natural: seq[NaturalSize];
       sizes[childSlot] = min(max(bases[childSlot], minimum[childSlot]),
         maximum[childSlot])
       let marginMain = if row: childNode.marginX else: childNode.marginY
-      outerMain += sizes[childSlot] + marginMain
+      let outer = sizes[childSlot] + marginMain
+      if node.wrap and classify(mainSize) notin {fcNan, fcInf, fcNegInf} and
+          flexSlots.len > activeLine.first and
+          activeLine.main + gap + outer > mainSize:
+        activeLine.pastLast = flexSlots.len
+        flexLines.add(activeLine)
+        activeLine = FlexLine(first: flexSlots.len)
+      if flexSlots.len > activeLine.first:
+        activeLine.main += gap
+      activeLine.main += outer
+      flexSlots.add(childSlot)
     child = int(childNode.nextSibling)
 
-  var free = mainSize - gaps - outerMain
-  if free > 0:
-    child = int(node.firstChild)
-    while child >= 0:
-      factors[child] = if nodes[child].absolute: 0'f32 else:
-        nodes[child].grow
-      child = int(nodes[child].nextSibling)
-    distribute(nodes, slot, sizes, minimum, maximum, factors, free, true)
-  elif free < 0:
-    child = int(node.firstChild)
-    while child >= 0:
-      factors[child] = if nodes[child].absolute: 0'f32 else:
-        nodes[child].shrink * max(bases[child], 0'f32)
-      child = int(nodes[child].nextSibling)
-    distribute(nodes, slot, sizes, minimum, maximum, factors, -free, false)
+  if flexSlots.len > activeLine.first:
+    activeLine.pastLast = flexSlots.len
+    flexLines.add(activeLine)
 
-  outerMain = gaps
-  var autoMainMargins = 0
-  child = int(node.firstChild)
-  while child >= 0:
-    let childNode = nodes[child]
-    if not childNode.absolute:
-      outerMain += sizes[child] +
+  var lineIndex = linesBase
+  while lineIndex < flexLines.len:
+    var line = flexLines[lineIndex]
+    let itemCount = line.pastLast - line.first
+    let lineGaps = if itemCount > 1:
+        gap * float32(itemCount - 1)
+      else:
+        0'f32
+    var outerMain = lineGaps
+    for itemIndex in line.first ..< line.pastLast:
+      let childSlot = flexSlots[itemIndex]
+      let childNode = nodes[childSlot]
+      outerMain += sizes[childSlot] +
         (if row: childNode.marginX else: childNode.marginY)
+    let free = mainSize - outerMain
+    if free > 0:
+      for itemIndex in line.first ..< line.pastLast:
+        let childSlot = flexSlots[itemIndex]
+        factors[childSlot] = nodes[childSlot].grow
+      distribute(nodes, flexSlots, line.first, line.pastLast, sizes,
+        minimum, maximum, factors, free, true)
+    elif free < 0:
+      for itemIndex in line.first ..< line.pastLast:
+        let childSlot = flexSlots[itemIndex]
+        factors[childSlot] = nodes[childSlot].shrink *
+          max(bases[childSlot], 0'f32)
+      distribute(nodes, flexSlots, line.first, line.pastLast, sizes,
+        minimum, maximum, factors, -free, false)
+    line.main = lineGaps
+    for itemIndex in line.first ..< line.pastLast:
+      let childSlot = flexSlots[itemIndex]
+      let childNode = nodes[childSlot]
+      line.main += sizes[childSlot] +
+        (if row: childNode.marginX else: childNode.marginY)
+    flexLines[lineIndex] = line
+    inc lineIndex
+
+  let defaultAlign = if node.align == Align.Auto: Align.Stretch else: node.align
+  let crossBase = if row: innerH else: innerW
+
+  lineIndex = linesBase
+  while lineIndex < flexLines.len:
+    var line = flexLines[lineIndex]
+    for itemIndex in line.first ..< line.pastLast:
+      let childSlot = flexSlots[itemIndex]
+      let childNode = nodes[childSlot]
+      let childNatural = natural[childSlot]
+      let crossBefore = if childNode.margin[crossStart] == Auto:
+          0'f32
+        else:
+          childNode.margin[crossStart]
+      let crossAfter = if childNode.margin[crossEnd] == Auto:
+          0'f32
+        else:
+          childNode.margin[crossEnd]
+      let extent = childNode.crossSize(childNatural, row,
+        crossBase, sizes[childSlot], 0'f32, crossBefore + crossAfter,
+        Align.Start)
+      line.cross = max(line.cross, extent + crossBefore + crossAfter)
+    flexLines[lineIndex] = line
+    inc lineIndex
+
+  let lineCount = flexLines.len - linesBase
+  if lineCount == 1 and not node.wrap and
+      classify(crossSize) notin {fcNan, fcInf, fcNegInf}:
+    flexLines[linesBase].cross = crossSize
+
+  var linesCross: float32
+  for index in linesBase ..< flexLines.len:
+    if index > linesBase:
+      linesCross += (if row: node.gapY else: node.gapX)
+    linesCross += flexLines[index].cross
+  var lineStart, lineBetween: float32
+  if node.alignContent != Align.Auto and
+      classify(crossSize) notin {fcNan, fcInf, fcNegInf} and
+      lineCount > 0 and (node.wrap or lineCount > 1):
+    let crossFree = crossSize - linesCross
+    if node.alignContent == Align.Stretch and crossFree > 0:
+      for index in linesBase ..< flexLines.len:
+        flexLines[index].cross += crossFree / float32(lineCount)
+      linesCross = crossSize
+    else:
+      let distribution = justifyOffsets(node.alignContent,
+        max(crossFree, 0'f32), lineCount)
+      lineStart = distribution.start
+      lineBetween = distribution.between
+      if crossFree < 0 and node.alignContent in {Align.Center, Align.End}:
+        lineStart = justifyOffsets(node.alignContent, crossFree, lineCount).start
+
+  let crossGap = if row: node.gapY else: node.gapX
+  var linePosition = lineStart
+  lineIndex = linesBase
+  while lineIndex < flexLines.len:
+    let line = flexLines[lineIndex]
+    let free = max(mainSize - line.main, 0'f32)
+    var autoMainMargins = 0
+    for itemIndex in line.first ..< line.pastLast:
+      let childSlot = flexSlots[itemIndex]
+      let childNode = nodes[childSlot]
       if childNode.margin[mainStart] == Auto:
         inc autoMainMargins
       if childNode.margin[mainEnd] == Auto:
         inc autoMainMargins
-    child = int(childNode.nextSibling)
-  free = max(mainSize - outerMain, 0'f32)
-  let autoMain = if autoMainMargins > 0:
-      free / float32(autoMainMargins)
-    else:
-      0'f32
-  let justifyFree = if autoMainMargins > 0: 0'f32 else: free
-  let offsets = justifyOffsets(node.justify, justifyFree, childCount)
-  var position = offsets.start
-  let between = offsets.between
-  let defaultAlign = if node.align == Align.Auto: Align.Stretch else: node.align
-
-  child = int(node.firstChild)
-  while child >= 0:
-    let childSlot = child
-    let childNode = nodes[childSlot]
-    if not childNode.absolute:
+    let autoMain = if autoMainMargins > 0:
+        free / float32(autoMainMargins)
+      else:
+        0'f32
+    let justifyFree = if autoMainMargins > 0: 0'f32 else: free
+    let offsets = justifyOffsets(node.justify, justifyFree,
+      line.pastLast - line.first)
+    var position = offsets.start
+    var itemIndex = line.first
+    while itemIndex < line.pastLast:
+      let childSlot = flexSlots[itemIndex]
+      let childNode = nodes[childSlot]
       let childNatural = natural[childSlot]
       let mainBefore = if childNode.margin[mainStart] == Auto:
           autoMain
@@ -382,10 +543,9 @@ proc placeNode(nodes: seq[ElementNode]; natural: seq[NaturalSize];
           defaultAlign
         else:
           childNode.selfAlign
-      let crossBase = if row: innerH else: innerW
-      let crossExtent = childNode.crossSize(childNatural, row,
-        crossBase, sizes[childSlot], crossSize, crossMargins, childAlign)
-      let crossFree = crossSize - crossExtent - crossMargins
+      let childCross = childNode.crossSize(childNatural, row,
+        crossBase, sizes[childSlot], line.cross, crossMargins, childAlign)
+      let crossFree = line.cross - childCross - crossMargins
       var crossOffset: float32
       if childNode.margin[crossStart] == Auto and
           childNode.margin[crossEnd] == Auto:
@@ -400,7 +560,9 @@ proc placeNode(nodes: seq[ElementNode]; natural: seq[NaturalSize];
           crossOffset = crossFree
         else:
           discard
-      crossOffset += crossBefore
+      crossOffset += crossBefore + linePosition
+      if node.wrapReverse:
+        crossOffset = crossSize - crossOffset - childCross
 
       let mainPosition = position + mainBefore
       let mainOffset = if node.reverse:
@@ -410,10 +572,10 @@ proc placeNode(nodes: seq[ElementNode]; natural: seq[NaturalSize];
       var childRect: Rect
       if row:
         childRect = Rect(x: innerX + mainOffset, y: innerY + crossOffset,
-          w: sizes[childSlot], h: crossExtent)
+          w: sizes[childSlot], h: childCross)
       else:
         childRect = Rect(x: innerX + crossOffset, y: innerY + mainOffset,
-          w: crossExtent, h: sizes[childSlot])
+          w: childCross, h: sizes[childSlot])
       let left = childNode.inset[3].resolve(innerW)
       let right = childNode.inset[1].resolve(innerW)
       let top = childNode.inset[0].resolve(innerH)
@@ -427,9 +589,12 @@ proc placeNode(nodes: seq[ElementNode]; natural: seq[NaturalSize];
       elif bottom.ok:
         childRect.y -= bottom.value
       placeNode(nodes, natural, rects, sizes, bases, minimum, maximum,
-        factors, childSlot, childRect)
-      position += mainBefore + sizes[childSlot] + mainAfter + gap + between
-    child = int(childNode.nextSibling)
+        factors, flexSlots, flexLines, childSlot, childRect)
+      position += mainBefore + sizes[childSlot] + mainAfter + gap +
+        offsets.between
+      inc itemIndex
+    linePosition += line.cross + crossGap + lineBetween
+    inc lineIndex
 
   child = int(node.firstChild)
   while child >= 0:
@@ -437,12 +602,15 @@ proc placeNode(nodes: seq[ElementNode]; natural: seq[NaturalSize];
     let childNode = nodes[childSlot]
     if childNode.absolute:
       placeAbsoluteChild(nodes, natural, rects, sizes, bases, minimum,
-        maximum, factors, slot, childSlot, bounds)
+        maximum, factors, flexSlots, flexLines, slot, childSlot, bounds)
     child = int(childNode.nextSibling)
+  flexSlots.setLen(slotsBase)
+  flexLines.setLen(linesBase)
 
 proc placeAbsoluteChild(nodes: seq[ElementNode]; natural: seq[NaturalSize];
                         rects: var seq[Rect]; sizes, bases, minimum, maximum,
-                        factors: var seq[float32]; parentSlot,
+                        factors: var seq[float32]; flexSlots: var seq[int];
+                        flexLines: var seq[FlexLine]; parentSlot,
                         childSlot: int; bounds: Rect) =
   let parent = nodes[parentSlot]
   let child = nodes[childSlot]
@@ -514,7 +682,7 @@ proc placeAbsoluteChild(nodes: seq[ElementNode]; natural: seq[NaturalSize];
   let childRect = Rect(x: bounds.x + parent.border[3] + x,
     y: bounds.y + parent.border[0] + y, w: childW, h: childH)
   placeNode(nodes, natural, rects, sizes, bases, minimum, maximum,
-    factors, childSlot, childRect)
+    factors, flexSlots, flexLines, childSlot, childRect)
 
 proc layout*(c: Context; bounds: Rect): LayoutResult =
   ## Lays out the latest completed build inside bounds.
@@ -538,22 +706,28 @@ proc layout*(c: Context; bounds: Rect): LayoutResult =
   c.owner.flexMin.setLen(c.owner.nodes.len)
   c.owner.flexMax.setLen(c.owner.nodes.len)
   c.owner.flexFactors.setLen(c.owner.nodes.len)
+  c.owner.flexSlots.setLen(0)
+  c.owner.flexLines.setLen(0)
   shapeText(c.owner.nodes)
-  measureTree(c.owner.nodes, c.owner.natural)
+  discard measureTree(c.owner.nodes, c.owner.natural)
   if c.owner.nodes.len > 0:
     var stable = false
-    for attempt in 0..1:
+    for attempt in 0..2:
       placeNode(c.owner.nodes, c.owner.natural, c.owner.rectScratch,
         c.owner.flexSizes, c.owner.flexBases, c.owner.flexMin,
-        c.owner.flexMax, c.owner.flexFactors, 0, result.root)
-      if not shapeTextToBounds(c.owner.nodes, c.owner.rectScratch):
+        c.owner.flexMax, c.owner.flexFactors, c.owner.flexSlots,
+        c.owner.flexLines, 0, result.root)
+      let textChanged = shapeTextToBounds(c.owner.nodes, c.owner.rectScratch)
+      let sizesChanged = measureTree(c.owner.nodes, c.owner.natural,
+        c.owner.rectScratch)
+      if not textChanged and not sizesChanged:
         stable = true
         break
-      measureTree(c.owner.nodes, c.owner.natural)
     if not stable:
       placeNode(c.owner.nodes, c.owner.natural, c.owner.rectScratch,
         c.owner.flexSizes, c.owner.flexBases, c.owner.flexMin,
-        c.owner.flexMax, c.owner.flexFactors, 0, result.root)
+        c.owner.flexMax, c.owner.flexFactors, c.owner.flexSlots,
+        c.owner.flexLines, 0, result.root)
     for slot in 0..<result.rects.len:
       result.rects[slot] = c.owner.rectScratch[slot]
 
@@ -773,6 +947,28 @@ proc justify*(e: Element; value: Align): Element =
   let n = e.node
   if n != nil:
     n.justify = value
+
+proc wrap*(e: Element): Element =
+  ## Places in-flow children on additional lines when they exceed the main axis.
+  result = e
+  let n = e.node
+  if n != nil:
+    n.wrap = true
+
+proc wrapReverse*(e: Element): Element =
+  ## Wraps children and stacks the lines from the opposite cross-axis edge.
+  result = e
+  let n = e.node
+  if n != nil:
+    n.wrap = true
+    n.wrapReverse = true
+
+proc alignContent*(e: Element; value: Align): Element =
+  ## Positions wrapped lines across the container's cross axis.
+  result = e
+  let n = e.node
+  if n != nil:
+    n.alignContent = value
 
 proc reverse*(e: Element): Element =
   ## Lays out row children from right to left, or column children bottom to top.
