@@ -4,6 +4,13 @@ include "../src/mynim.nim"
 import mynim/internal/fake as fakeBackend
 import mynim/ui as ui
 
+proc focusedLabel(tree: ref platform.AccessTree): string =
+  if tree == nil:
+    return
+  for node in tree.nodes:
+    if node.id == tree.focus:
+      return node.label
+
 type Choice = enum
   firstChoice, secondChoice
 
@@ -98,4 +105,93 @@ doAssert (tree.nodes[1].states and platform.accessChecked) ==
   platform.AccessStates(0)
 
 win.destroy()
+
+var groupSelection = 1
+let groupContent = ui.newContent(proc(ctx: ui.Context) =
+  var frameSelection = groupSelection
+  discard ctx.column().size(180, 150).children(proc() =
+    discard ctx.text("Before").onClick(proc() = discard).label("Before")
+    discard ctx.radioGroup(proc() =
+      for index, name in ["Small", "Medium", "Large"]:
+        let option = ctx.radioBase(frameSelection, index).size(160, 28)
+          .label(name)
+        if option.changed():
+          groupSelection = frameSelection
+    ).label("Size")
+    discard ctx.text("After").onClick(proc() = discard).label("After")
+  )
+)
+let groupWin = newWindow(WindowOptions(width: 200, height: 180, hidden: true,
+  content: groupContent))
+let groupNative = fake.windows[^1].surface
+
+doAssert groupNative.frame()
+doAssert groupNative.send(platform.SurfaceEvent(kind: platform.accessibilityOn))
+var (groupTree, _) = groupNative.accessibility()
+doAssert groupTree != nil
+var hasRadioGroup = false
+for node in groupTree.nodes:
+  if node.role == platform.roleRadioGroup and node.label == "Size":
+    hasRadioGroup = true
+doAssert hasRadioGroup
+
+doAssert groupNative.send(platform.SurfaceEvent(kind: platform.keyPressed,
+  key: platform.keyTab))
+doAssert groupNative.frame()
+groupTree = groupNative.accessibility()[0]
+doAssert focusedLabel(groupTree) == "Before"
+doAssert groupNative.send(platform.SurfaceEvent(kind: platform.keyPressed,
+  key: platform.keyTab))
+doAssert groupNative.frame()
+groupTree = groupNative.accessibility()[0]
+doAssert focusedLabel(groupTree) == "Medium"
+
+doAssert groupNative.send(platform.SurfaceEvent(kind: platform.keyPressed,
+  key: platform.keyDown))
+doAssert groupNative.frame()
+doAssert groupSelection == 2
+groupTree = groupNative.accessibility()[0]
+doAssert focusedLabel(groupTree) == "Large"
+doAssert groupNative.send(platform.SurfaceEvent(kind: platform.keyPressed,
+  key: platform.keyDown))
+doAssert groupNative.frame()
+doAssert groupSelection == 0
+groupTree = groupNative.accessibility()[0]
+doAssert focusedLabel(groupTree) == "Small"
+doAssert groupNative.send(platform.SurfaceEvent(kind: platform.keyPressed,
+  key: platform.keyEnd))
+doAssert groupNative.frame()
+doAssert groupSelection == 2
+groupTree = groupNative.accessibility()[0]
+doAssert focusedLabel(groupTree) == "Large"
+doAssert groupNative.send(platform.SurfaceEvent(kind: platform.keyPressed,
+  key: platform.keyHome))
+doAssert groupNative.frame()
+doAssert groupSelection == 0
+groupTree = groupNative.accessibility()[0]
+doAssert focusedLabel(groupTree) == "Small"
+doAssert groupNative.send(platform.SurfaceEvent(kind: platform.keyPressed,
+  key: platform.keyEnd))
+doAssert groupNative.frame()
+doAssert groupSelection == 2
+groupTree = groupNative.accessibility()[0]
+doAssert focusedLabel(groupTree) == "Large"
+
+doAssert groupNative.send(platform.SurfaceEvent(kind: platform.keyPressed,
+  key: platform.keyTab))
+doAssert groupNative.frame()
+groupTree = groupNative.accessibility()[0]
+doAssert focusedLabel(groupTree) == "After"
+doAssert groupNative.send(platform.SurfaceEvent(kind: platform.keyPressed,
+  key: platform.keyTab, mods: platform.modShift))
+doAssert groupNative.frame()
+groupTree = groupNative.accessibility()[0]
+doAssert focusedLabel(groupTree) == "Large"
+doAssert groupNative.send(platform.SurfaceEvent(kind: platform.keyPressed,
+  key: platform.keyTab, mods: platform.modShift))
+doAssert groupNative.frame()
+groupTree = groupNative.accessibility()[0]
+doAssert focusedLabel(groupTree) == "Before"
+
+groupWin.destroy()
 loop.shutdown()

@@ -2636,6 +2636,30 @@ proc onClick*(e: Element;
     if handler != nil:
       n.focusable = true
 
+proc focusGroup*(e: Element; orientation: FocusOrientation;
+                 selects = false): Element =
+  ## Makes focusable descendants one Tab stop. Arrow keys move within the
+  ## group, and Home and End move to its first and last members. When selects
+  ## is true, moving focus activates the member it moves to.
+  result = e
+  let n = e.node
+  if n != nil:
+    n.focusGroupSet = true
+    n.focusOrientation = orientation
+    n.groupSelects = selects
+
+proc radioGroup*(c: Context; build: proc() {.closure.}; row = false): Element =
+  ## Creates one Tab stop for radioBase options. Arrows, Home, and End move
+  ## focus and choose the corresponding option. Set a label on the result;
+  ## pass row = true to lay out options horizontally.
+  let container = if row: c.row() else: c.column()
+  result = container.focusGroup(FocusOrientation.Both, selects = true)
+  let n = result.node
+  if n != nil:
+    n.accessRole = platform.roleRadioGroup
+    n.accessRoleSet = true
+  result = result.children(build)
+
 proc markBoundValueChanged(e: Element) =
   let n = e.node
   if n != nil:

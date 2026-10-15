@@ -136,6 +136,8 @@ type
       justifySet, focusable, activateEnter, focused, focusVisible,
       focusRingDisabled, scrollX, scrollY,
       revealInScroll, rightToLeft, directionSet: bool
+    focusGroupSet, groupSelects: bool
+    focusOrientation: FocusOrientation
     logical: uint8
     clipX, clipY, hasFollowScroll: bool
     followScrollSlot: int32

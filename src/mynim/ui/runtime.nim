@@ -19,6 +19,7 @@ type
     scrollbarDrag: ScrollbarDrag
     focusSlot, keyPressSlot: int
     keyPressKey: platform.Key
+    focusGroupLast: Table[uint64, uint64]
     listReorder, tableReorder: ListState
     pointerCursor: platform.Cursor
     hasPointerCursor: bool
@@ -218,7 +219,52 @@ proc keyboardActivationSlot(layout: LayoutResult; slot: int;
   else:
     false
 
-proc nextFocusSlot(layout: LayoutResult; current: int; reverse: bool): int =
+proc focusGroupOf(layout: LayoutResult; slot: int): int =
+  let owner = layout.owner
+  if owner == nil or slot <= 0 or slot >= owner.nodes.len:
+    return -1
+  result = -1
+  var current = slot
+  while current > 0:
+    if owner.nodes[current].focusGroupSet:
+      result = current
+    current = int(owner.nodes[current].parent)
+
+proc focusGroupEntry(rt: Runtime; layout: LayoutResult;
+                     groupSlot: int): int =
+  let owner = layout.owner
+  if owner == nil or groupSlot <= 0 or groupSlot >= owner.nodes.len:
+    return -1
+  let groupIdentity = owner.nodes[groupSlot].identity
+  if rt.focusGroupLast.hasKey(groupIdentity):
+    let lastIdentity = rt.focusGroupLast[groupIdentity]
+    let lastSlot = owner.idSlots.getOrDefault(lastIdentity, -1)
+    if layout.focusableSlot(lastSlot) and
+        layout.focusGroupOf(lastSlot) == groupSlot:
+      return lastSlot
+  var first = -1
+  for slot in 1..<owner.nodes.len:
+    if not layout.focusableSlot(slot) or layout.focusGroupOf(slot) != groupSlot:
+      continue
+    if first < 0:
+      first = slot
+    let node = owner.nodes[slot]
+    if node.accessRole in {platform.roleRadio, platform.roleTab} and
+        (node.accessExtraStates and platform.accessChecked) !=
+          platform.AccessStates(0):
+      return slot
+  first
+
+proc isFocusGroupTabStop(rt: Runtime; layout: LayoutResult; slot: int): bool =
+  let groupSlot = layout.focusGroupOf(slot)
+  groupSlot < 0 or rt.focusGroupEntry(layout, groupSlot) == slot
+
+proc cancelKeyPress(rt: Runtime)
+proc refreshPointer(rt: Runtime)
+proc requestFrame(rt: Runtime)
+
+proc nextFocusSlot(rt: Runtime; layout: LayoutResult; current: int;
+                   reverse: bool): int =
   let owner = layout.owner
   if owner == nil or owner.closed or owner.inBuild or not owner.hasFrame or
       layout.generation != owner.generation:
@@ -226,6 +272,7 @@ proc nextFocusSlot(layout: LayoutResult; current: int; reverse: bool): int =
   let last = owner.nodes.high
   if last <= 0:
     return -1
+  let currentGroup = layout.focusGroupOf(current)
   var slot = current
   if slot < 1 or slot > last:
     slot = if reverse: 1 else: 0
@@ -238,9 +285,104 @@ proc nextFocusSlot(layout: LayoutResult; current: int; reverse: bool): int =
       inc slot
       if slot > last:
         slot = 1
-    if layout.focusableSlot(slot):
+    let candidateGroup = layout.focusGroupOf(slot)
+    if layout.focusableSlot(slot) and
+        (currentGroup < 0 or candidateGroup != currentGroup) and
+        rt.isFocusGroupTabStop(layout, slot):
       return slot
   -1
+
+proc handleFocusGroupKey(rt: Runtime; key: platform.Key;
+                         mods: platform.Modifiers): bool =
+  if mods != 0 or not rt.frameLayout.focusableSlot(rt.focusSlot):
+    return false
+  let groupSlot = rt.frameLayout.focusGroupOf(rt.focusSlot)
+  if groupSlot < 0:
+    return false
+  let owner = rt.frameLayout.owner
+  let group = owner.nodes[groupSlot]
+  var members: seq[int]
+  var at = -1
+  for slot in 1..<owner.nodes.len:
+    if rt.frameLayout.focusableSlot(slot) and
+        rt.frameLayout.focusGroupOf(slot) == groupSlot:
+      if slot == rt.focusSlot:
+        at = members.len
+      members.add(slot)
+  if at < 0 or members.len == 0:
+    return false
+
+  let horizontal = group.focusOrientation in
+    {FocusOrientation.Horizontal, FocusOrientation.Both}
+  let vertical = group.focusOrientation in
+    {FocusOrientation.Vertical, FocusOrientation.Both}
+  var next = -1
+  var back, forth = false
+  case key
+  of platform.keyLeft:
+    back = not group.rightToLeft
+    forth = group.rightToLeft
+  of platform.keyRight:
+    back = group.rightToLeft
+    forth = not group.rightToLeft
+  of platform.keyUp:
+    back = true
+  of platform.keyDown:
+    forth = true
+  else:
+    discard
+  if key == platform.keyHome:
+    next = 0
+  elif key == platform.keyEnd:
+    next = members.high
+  elif (horizontal and key in {platform.keyLeft, platform.keyRight}) or
+      (vertical and key in {platform.keyUp, platform.keyDown}):
+    let movingBack = back
+    next = if movingBack:
+        (at - 1 + members.len) mod members.len
+      else:
+        (at + 1) mod members.len
+  else:
+    return false
+
+  let nextSlot = members[next]
+  rt.focusSlot = nextSlot
+  rt.keyboardFocusVisible = true
+  rt.cancelKeyPress()
+  let nextIdentity = owner.nodes[nextSlot].identity
+  rt.focusGroupLast[group.identity] = nextIdentity
+  if group.groupSelects:
+    let handler = owner.nodes[nextSlot].clickHandler
+    if handler != nil:
+      handler(0)
+      rt.clickedSlots = @[nextSlot]
+  discard rt.frameLayout.revealSlot(nextSlot)
+  rt.refreshPointer()
+  rt.requestFrame()
+  true
+
+proc rememberFocusGroup(rt: Runtime) =
+  let layout = rt.frameLayout
+  if layout.focusableSlot(rt.focusSlot):
+    let groupSlot = layout.focusGroupOf(rt.focusSlot)
+    if groupSlot >= 0:
+      let owner = layout.owner
+      rt.focusGroupLast[owner.nodes[groupSlot].identity] =
+        owner.nodes[rt.focusSlot].identity
+
+proc pruneFocusGroups(rt: Runtime; layout: LayoutResult) =
+  let owner = layout.owner
+  var stale: seq[uint64]
+  for groupIdentity, memberIdentity in rt.focusGroupLast:
+    let groupSlot = owner.idSlots.getOrDefault(groupIdentity, -1)
+    let memberSlot = owner.idSlots.getOrDefault(memberIdentity, -1)
+    if groupSlot <= 0 or groupSlot >= owner.nodes.len or
+        not owner.nodes[groupSlot].focusGroupSet or
+        not layout.focusableSlot(memberSlot) or
+        layout.focusGroupOf(memberSlot) != groupSlot:
+      stale.add(groupIdentity)
+  for groupIdentity in stale:
+    rt.focusGroupLast.del(groupIdentity)
 
 proc accessibilityTree(layout: LayoutResult;
                       focusSlot: int): platform.AccessTree =
@@ -357,8 +499,6 @@ proc remapSlots(identities: seq[uint64]; owner: ElementOwner;
     let slot = remapSlot(identities, owner, oldSlot)
     if slot > 0:
       result.add(slot)
-
-proc requestFrame(rt: Runtime)
 
 proc applyHandleFocusRequests(rt: Runtime; layout: LayoutResult): bool =
   let owner = layout.owner
@@ -731,6 +871,7 @@ proc renderFrame(rt: Runtime; presentFrame = true) =
       0'u64
   let previousTextInputSlot =
     if rt.textInputAdapter == nil: -1 else: rt.textInputAdapter.slot
+  rt.rememberFocusGroup()
   previousOwner.hoveredSlots.setLen(0)
   previousOwner.pressedSlots.setLen(0)
   previousOwner.clickedSlots.setLen(0)
@@ -772,6 +913,7 @@ proc renderFrame(rt: Runtime; presentFrame = true) =
   let layout = rt.context.layoutAt(Rect(w: width, h: height),
     getMonoTime(), rt.systemPreferences.reduceMotion)
   discard rt.applyHandleFocusRequests(layout)
+  rt.pruneFocusGroups(layout)
   if rt.focusSlot >= 0 and not layout.focusableSlot(rt.focusSlot):
     rt.focusSlot = -1
     rt.keyboardFocusVisible = false
@@ -978,7 +1120,8 @@ proc event(rt: Runtime; ev: platform.SurfaceEvent): bool =
     if ev.key == platform.keyTab and
         (ev.mods and (platform.modCtrl or platform.modAlt or
           platform.modSuper)) == 0:
-      let next = rt.frameLayout.nextFocusSlot(rt.focusSlot,
+      rt.rememberFocusGroup()
+      let next = rt.nextFocusSlot(rt.frameLayout, rt.focusSlot,
         (ev.mods and platform.modShift) != 0)
       if next >= 0:
         rt.cancelKeyPress()
@@ -997,6 +1140,8 @@ proc event(rt: Runtime; ev: platform.SurfaceEvent): bool =
         discard rt.frameLayout.revealSlot(nextFocusSlot)
       rt.keyboardFocusVisible = true
       rt.requestFrame()
+      return true
+    if rt.handleFocusGroupKey(ev.key, ev.mods):
       return true
     if ev.key in {platform.keyEnter, platform.keySpace} and
         ev.mods == 0 and rt.focusSlot > 0 and
@@ -1411,7 +1556,8 @@ proc close(rt: Runtime) =
 method attachContent*(content: Content; conn: surface.Conn) =
   let rt = Runtime(conn: conn, view: content.view, context: newContext(),
                    focusSlot: -1, keyPressSlot: -1, surfaceFocused: true,
-                   themeDirty: true)
+                   themeDirty: true,
+                   focusGroupLast: initTable[uint64, uint64]())
   rt.context.owner.focusActive = true
   let frameSurface = conn.surface
   rt.context.owner.invalidate = proc() =

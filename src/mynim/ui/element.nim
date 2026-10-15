@@ -15,6 +15,11 @@ type
     SpaceEvenly
     Auto ## Used internally when no alignment was specified.
 
+  FocusOrientation* {.pure.} = enum ## Arrow keys handled by a focus group.
+    Horizontal ## Left and Right move among group members.
+    Vertical ## Up and Down move among group members.
+    Both ## All four arrow keys move among group members.
+
   TrackKind = enum
     trackFit, trackFixed, trackFr
 
