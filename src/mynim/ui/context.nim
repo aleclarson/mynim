@@ -5,6 +5,7 @@ type
 
   ContextObj = object
     owner: ElementOwner
+    shortcutActions: seq[HandleShortcut]
     theme: Theme
     treeState: TreeState
     pendingKey: string
@@ -12,11 +13,44 @@ type
     hasPendingKey: bool
     themeEnabled, themeBackground: bool
 
+  Handle* = object ## Stable UI-thread element reference rebound each build.
+    state: HandleState
+
+  Ref* = Handle ## Compatibility name for Handle.
+
+  HandleState = ref object
+    identity: uint64
+    bindings: seq[HandleBinding]
+    pending: bool
+
+  HandleBinding = ref object
+    owner: ElementOwner
+    identity, requestIdentity, handleIdentity: uint64
+    slot, generation: uint32
+    requested: bool
+
+  HandleFocusRequest = object
+    handleIdentity, identity: uint64
+
+  HandleShortcut = object
+    handle: HandleState
+    identity: uint64
+    generation: uint32
+    modifiers: platform.Modifiers
+    key: platform.Key
+    action: proc() {.closure.}
+
   ElementOwner = ref object
     nodes: seq[ElementNode]
     idSlots: Table[uint64, int]
+    identityParents: Table[uint64, uint64]
     previousInteraction: Table[uint64, uint8]
     keyedSeen: HashSet[string]
+    focusRequests: seq[HandleFocusRequest]
+    committedRects: seq[Rect]
+    focusIdentity: uint64
+    focusActive: bool
+    invalidate: proc() {.closure.}
     natural: seq[NaturalSize]
     rectScratch: seq[Rect]
     paintSlots: seq[int]
@@ -254,11 +288,14 @@ proc bitmapSource(node: ElementNode): Rect =
     return
   Rect(x: left, y: top, w: right - left, h: bottom - top)
 
+var nextHandleIdentity = 0'u64
+
 proc newContext*(): Context =
   ## Creates a stable context. Call close when its owner shuts down.
   new(result)
   new(result.owner)
   result.owner.idSlots = initTable[uint64, int]()
+  result.owner.identityParents = initTable[uint64, uint64]()
   result.owner.previousInteraction = initTable[uint64, uint8]()
   result.owner.keyedSeen = initHashSet[string]()
   result.theme = lightTheme()
@@ -335,6 +372,160 @@ proc key*[T: SomeInteger](c: Context; value: T): Context =
     c.pendingKey = keyToken(value)
     c.hasPendingKey = true
 
+proc handleBinding(state: HandleState; owner: ElementOwner;
+                   create: bool): HandleBinding =
+  if state == nil or owner == nil:
+    return nil
+  for binding in state.bindings:
+    if binding.owner == owner:
+      return binding
+  if create:
+    result = HandleBinding(owner: owner, handleIdentity: state.identity)
+    state.bindings.add(result)
+
+proc newHandleState(): HandleState =
+  if nextHandleIdentity == high(uint64):
+    raise newException(ValueError, "ui: Handle identity space exhausted")
+  inc nextHandleIdentity
+  new(result)
+  result.identity = nextHandleIdentity
+
+proc initState(handle: var Handle): HandleState =
+  if handle.state == nil:
+    handle.state = newHandleState()
+  handle.state
+
+proc existingBinding(handle: Handle; owner: ElementOwner): HandleBinding =
+  if handle.state != nil:
+    result = handle.state.handleBinding(owner, false)
+
+proc removeFocusRequest(owner: ElementOwner; handleIdentity: uint64) =
+  if owner == nil or handleIdentity == 0:
+    return
+  var slot = 0
+  while slot < owner.focusRequests.len:
+    if owner.focusRequests[slot].handleIdentity == handleIdentity:
+      owner.focusRequests.delete(slot)
+    else:
+      inc slot
+
+proc hasFocusRequest(owner: ElementOwner; handleIdentity,
+                     identity: uint64): bool =
+  if owner == nil:
+    return false
+  for request in owner.focusRequests:
+    if request.handleIdentity == handleIdentity and
+        request.identity == identity:
+      return true
+
+proc queueFocusRequest(owner: ElementOwner; binding: HandleBinding) =
+  if owner == nil or binding == nil or binding.identity == 0:
+    return
+  if binding.requestIdentity != 0 and
+      binding.requestIdentity != binding.identity:
+    owner.removeFocusRequest(binding.handleIdentity)
+  var existing = -1
+  for slot, request in owner.focusRequests:
+    if request.handleIdentity == binding.handleIdentity:
+      existing = slot
+      break
+  let request = HandleFocusRequest(handleIdentity: binding.handleIdentity,
+                                   identity: binding.identity)
+  if existing >= 0:
+    owner.focusRequests[existing] = request
+  else:
+    owner.focusRequests.add(request)
+  binding.requestIdentity = binding.identity
+  binding.requested = false
+
+proc newHandle*(): Handle =
+  ## Creates a stable reference; the zero-value Handle also works.
+  result.state = newHandleState()
+
+proc focus*(handle: var Handle; c: Context = nil) =
+  ## Requests focus, waiting for the first binding when none exists yet.
+  let state = handle.initState()
+  var binding: HandleBinding
+  if c != nil:
+    if c.owner == nil or c.owner.closed:
+      return
+    binding = state.handleBinding(c.owner, true)
+  else:
+    for candidate in state.bindings:
+      if candidate.owner == nil or candidate.owner.closed:
+        continue
+      if binding != nil:
+        raise newException(ValueError,
+          "ui: Handle.focus needs a Context when bound in multiple windows")
+      binding = candidate
+  if binding == nil:
+    state.pending = true
+    return
+  binding.requested = true
+  binding.owner.queueFocusRequest(binding)
+  if binding.owner.invalidate != nil:
+    binding.owner.invalidate()
+
+proc requestFocus*(handle: var Handle; c: Context = nil) =
+  ## Alias for focus.
+  handle.focus(c)
+
+proc cancelFocus*(handle: var Handle; c: Context = nil) =
+  ## Cancels a pending request in c, or all requests when c is omitted.
+  if handle.state == nil:
+    return
+  if c == nil:
+    handle.state.pending = false
+  for binding in handle.state.bindings:
+    if c != nil and binding.owner != c.owner:
+      continue
+    binding.requested = false
+    if binding.owner != nil:
+      binding.owner.removeFocusRequest(binding.handleIdentity)
+    binding.requestIdentity = 0
+
+proc focused*(handle: Handle; c: Context): bool =
+  ## Reports whether the bound element owns keyboard focus in c.
+  if c == nil or c.owner == nil or c.owner.closed:
+    return false
+  let binding = handle.existingBinding(c.owner)
+  binding != nil and binding.identity != 0 and
+    c.owner.focusActive and
+    c.owner.focusIdentity == binding.identity
+
+proc focusWithin*(handle: Handle; c: Context): bool =
+  ## Reports whether the bound element or a descendant owns keyboard focus.
+  if c == nil or c.owner == nil or c.owner.closed or not c.owner.focusActive:
+    return false
+  let binding = handle.existingBinding(c.owner)
+  if binding == nil or binding.identity == 0:
+    return false
+  var identity = c.owner.focusIdentity
+  var remaining = c.owner.identityParents.len + 1
+  while identity != 0 and remaining > 0:
+    if identity == binding.identity:
+      return true
+    identity = c.owner.identityParents.getOrDefault(identity)
+    dec remaining
+
+proc focused*(c: Context; handle: Handle): bool =
+  ## Reports whether handle owns keyboard focus in c.
+  handle.focused(c)
+
+proc focusWithin*(c: Context; handle: Handle): bool =
+  ## Reports whether handle or a descendant owns keyboard focus in c.
+  handle.focusWithin(c)
+
+proc resolve*(c: Context; handle: Handle): Element =
+  ## Resolves handle to its current-pass checked element.
+  if c == nil or c.owner == nil or c.owner.closed or not c.owner.inBuild:
+    return
+  let binding = handle.existingBinding(c.owner)
+  if binding != nil and binding.generation == c.owner.generation and
+      int(binding.slot) < c.owner.nodes.len:
+    result = Element(owner: c.owner, slot: binding.slot,
+                     generation: binding.generation)
+
 proc theme*(c: Context): Theme =
   ## Returns the theme used by the current frame.
   if c == nil: lightTheme() else: c.theme
@@ -359,8 +550,14 @@ proc retire(owner: ElementOwner) =
   owner.parent = -1
   owner.nodes = @[]
   owner.idSlots.clear()
+  owner.identityParents.clear()
   owner.previousInteraction.clear()
   owner.keyedSeen.clear()
+  owner.focusRequests = @[]
+  owner.committedRects = @[]
+  owner.focusIdentity = 0
+  owner.focusActive = false
+  owner.invalidate = nil
   owner.natural = @[]
   owner.rectScratch = @[]
   owner.paintSlots = @[]
@@ -387,6 +584,46 @@ proc node(e: Element): ptr ElementNode =
 proc valid*(e: Element): bool =
   ## Reports whether e belongs to the active build callback.
   e.node != nil
+
+proc bindHandle*(e: Element; handle: var Handle): Element =
+  ## Binds handle to e for this build pass.
+  result = e
+  let elementNode = e.node
+  if elementNode == nil:
+    return
+  let state = handle.initState()
+  let binding = state.handleBinding(e.owner, true)
+  if binding.generation == e.generation and binding.slot != e.slot:
+    raise newException(ValueError,
+      "ui: Handle bound to two elements in one build")
+  if binding.requestIdentity != 0:
+    let requestPending = e.owner.hasFocusRequest(binding.handleIdentity,
+      binding.requestIdentity)
+    if binding.requestIdentity != elementNode[].identity:
+      if requestPending:
+        binding.requested = true
+      e.owner.removeFocusRequest(binding.handleIdentity)
+      binding.requestIdentity = 0
+    elif not requestPending:
+      binding.requestIdentity = 0
+  binding.slot = e.slot
+  binding.generation = e.generation
+  binding.identity = elementNode[].identity
+  if state.pending:
+    binding.requested = true
+    state.pending = false
+  if binding.requested:
+    e.owner.queueFocusRequest(binding)
+
+proc onShortcut*(handle: var Handle; c: Context; mods: platform.Modifiers;
+                 key: platform.Key; action: proc() {.closure.}) =
+  ## Registers an action for a key pressed while this element or its
+  ## descendants have focus. The handle must be bound during this build pass.
+  if c == nil or c.owner == nil or c.owner.closed or not c.owner.inBuild or
+      action == nil:
+    return
+  c.shortcutActions.add(HandleShortcut(handle: handle.initState(),
+    modifiers: mods, key: key, action: action))
 
 proc key*(e: Element; value: string): Element =
   ## Keys a container before its children; use Context.key for stateful controls.
@@ -586,11 +823,14 @@ proc build*(c: Context; view: proc(c: Context) {.closure.}) =
     c.owner.retire()
     new(c.owner)
     c.owner.idSlots = initTable[uint64, int]()
+    c.owner.identityParents = initTable[uint64, uint64]()
     c.owner.previousInteraction = initTable[uint64, uint8]()
     c.owner.keyedSeen = initHashSet[string]()
   inc c.owner.generation
+  c.shortcutActions.setLen(0)
   c.owner.nodes.setLen(0)
   c.owner.idSlots.clear()
+  c.owner.committedRects.setLen(0)
   c.owner.keyedSeen.clear()
   c.owner.paintSlots.setLen(0)
   c.owner.nodes.add(ElementNode(parent: -1, firstChild: -1,
@@ -610,13 +850,27 @@ proc build*(c: Context; view: proc(c: Context) {.closure.}) =
   try:
     if view != nil:
       view(c)
+    for index in 0..<c.shortcutActions.len:
+      let binding = c.shortcutActions[index].handle.handleBinding(
+        c.owner, false)
+      if binding != nil and binding.generation == c.owner.generation:
+        c.shortcutActions[index].identity = binding.identity
+        c.shortcutActions[index].generation = binding.generation
+      c.shortcutActions[index].handle = nil
     for slot, node in c.owner.nodes:
       c.owner.idSlots[node.identity] = slot
+    c.owner.identityParents.clear()
+    for node in c.owner.nodes:
+      if node.parent >= 0:
+        c.owner.identityParents[node.identity] =
+          c.owner.nodes[int(node.parent)].identity
     built = true
   finally:
     c.owner.inBuild = false
     c.owner.parent = -1
     c.owner.hasFrame = built
+    if not built:
+      c.shortcutActions.setLen(0)
     c.hasPendingKey = false
     c.pendingKey.setLen(0)
     c.owner.previousInteraction.clear()
@@ -630,4 +884,5 @@ proc close*(c: Context) =
   ## Detaches saved handles and releases frame storage when the context closes.
   if c == nil or c.owner.closed:
     return
+  c.shortcutActions.setLen(0)
   c.owner.retire()

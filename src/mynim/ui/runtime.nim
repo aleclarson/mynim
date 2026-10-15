@@ -347,6 +347,74 @@ proc remapSlots(identities: seq[uint64]; owner: ElementOwner;
       result.add(slot)
 
 proc requestFrame(rt: Runtime)
+
+proc applyHandleFocusRequests(rt: Runtime; layout: LayoutResult): bool =
+  let owner = layout.owner
+  if owner == nil or owner.focusRequests.len == 0:
+    return
+  var pending: seq[HandleFocusRequest]
+  var requestedSlot = -1
+  for request in owner.focusRequests:
+    let slot = owner.idSlots.getOrDefault(request.identity, -1)
+    if slot > 0 and layout.focusableSlot(slot):
+      requestedSlot = slot
+    else:
+      pending.add(request)
+  owner.focusRequests = pending
+  if requestedSlot <= 0:
+    return
+  for slot in 1..<owner.nodes.len:
+    owner.nodes[slot].focused = false
+    owner.nodes[slot].focusVisible = false
+  rt.focusSlot = requestedSlot
+  rt.keyboardFocusVisible = false
+  rt.cancelKeyPress()
+  owner.nodes[requestedSlot].focused = true
+  owner.focusedSlots = @[requestedSlot]
+  owner.focusVisibleSlots.setLen(0)
+  owner.focusIdentity = owner.nodes[requestedSlot].identity
+  if layout.revealSlot(requestedSlot):
+    rt.requestFrame()
+  rt.requestFrame()
+  true
+
+proc runHandleShortcut(rt: Runtime; mods: platform.Modifiers;
+                       key: platform.Key): bool =
+  let owner = rt.context.owner
+  if owner == nil or owner.closed or not owner.focusActive or
+      rt.focusSlot <= 0 or rt.focusSlot >= owner.nodes.len:
+    return false
+  let focusedIdentity = owner.nodes[rt.focusSlot].identity
+  var winner = -1
+  var bestDistance = high(int)
+  for index, shortcut in rt.context.shortcutActions:
+    if shortcut.modifiers != mods or shortcut.key != key or
+        shortcut.identity == 0 or shortcut.generation != owner.generation:
+      continue
+    let slot = owner.idSlots.getOrDefault(shortcut.identity, -1)
+    if slot <= 0:
+      continue
+    var identity = focusedIdentity
+    var distance = 0
+    var remaining = owner.identityParents.len + 1
+    while identity != 0 and remaining > 0:
+      if identity == shortcut.identity:
+        if distance < bestDistance:
+          winner = index
+          bestDistance = distance
+        break
+      identity = owner.identityParents.getOrDefault(identity)
+      inc distance
+      dec remaining
+  if winner < 0:
+    return false
+  let action = rt.context.shortcutActions[winner].action
+  if action == nil:
+    return false
+  action()
+  rt.requestFrame()
+  true
+
 proc updateTextInput(rt: Runtime)
 
 proc inputTarget(adapter: TextInputAdapter): platform.TextInputClient =
@@ -569,6 +637,7 @@ proc renderFrame(rt: Runtime; presentFrame = true) =
 
   if rt.themeDirty:
     rt.updateSystemTheme()
+  rt.context.owner.focusActive = rt.surfaceFocused
   rt.context.theme = rt.systemTheme
   rt.context.rightToLeft = rt.conn.rightToLeft != nil and
     rt.conn.rightToLeft()
@@ -580,6 +649,11 @@ proc renderFrame(rt: Runtime; presentFrame = true) =
   var previousIdentities = newSeq[uint64](previousOwner.nodes.len)
   for slot, node in previousOwner.nodes:
     previousIdentities[slot] = node.identity
+  previousOwner.focusIdentity =
+    if rt.focusSlot > 0 and rt.focusSlot < previousIdentities.len:
+      previousIdentities[rt.focusSlot]
+    else:
+      0'u64
   previousOwner.previousInteraction.clear()
   previousOwner.rememberInteraction(previousIdentities, rt.hoverSlots,
     identityHovered)
@@ -636,11 +710,18 @@ proc renderFrame(rt: Runtime; presentFrame = true) =
     currentOwner.focusedSlots.add(rt.focusSlot)
     if rt.keyboardFocusVisible:
       currentOwner.focusVisibleSlots.add(rt.focusSlot)
+  currentOwner.focusIdentity =
+    if rt.focusSlot > 0 and rt.focusSlot < currentOwner.nodes.len:
+      currentOwner.nodes[rt.focusSlot].identity
+    else:
+      0'u64
   let layout = rt.context.layoutAt(Rect(w: width, h: height),
     getMonoTime(), rt.systemPreferences.reduceMotion)
+  discard rt.applyHandleFocusRequests(layout)
   if rt.focusSlot >= 0 and not layout.focusableSlot(rt.focusSlot):
     rt.focusSlot = -1
     rt.keyboardFocusVisible = false
+    currentOwner.focusIdentity = 0
     rt.cancelKeyPress()
     layout.owner.focusedSlots.setLen(0)
     layout.owner.focusVisibleSlots.setLen(0)
@@ -835,6 +916,7 @@ proc event(rt: Runtime; ev: platform.SurfaceEvent): bool =
     false
   of platform.surfaceFocus:
     rt.surfaceFocused = true
+    rt.context.owner.focusActive = true
     rt.updateTextInput()
     rt.requestFrame()
     false
@@ -871,6 +953,8 @@ proc event(rt: Runtime; ev: platform.SurfaceEvent): bool =
         rt.keyboardFocusVisible = true
         rt.refreshPointer()
         rt.requestFrame()
+      return true
+    if rt.runHandleShortcut(ev.mods, ev.key):
       return true
     var dx, dy, page: float32
     if ev.mods == 0:
@@ -1131,6 +1215,7 @@ proc event(rt: Runtime; ev: platform.SurfaceEvent): bool =
     rt.cancelKeyPress()
     rt.keyboardFocusVisible = false
     rt.surfaceFocused = false
+    rt.context.owner.focusActive = false
     rt.pressTarget = Element()
     rt.pressMods = 0
     rt.pressHoverSlots.setLen(0)
@@ -1271,6 +1356,11 @@ method attachContent*(content: Content; conn: surface.Conn) =
   let rt = Runtime(conn: conn, view: content.view, context: newContext(),
                    focusSlot: -1, keyPressSlot: -1, surfaceFocused: true,
                    themeDirty: true)
+  rt.context.owner.focusActive = true
+  let frameSurface = conn.surface
+  rt.context.owner.invalidate = proc() =
+    if frameSurface != nil:
+      frameSurface.requestFrame()
   conn.event = proc(ev: platform.SurfaceEvent): bool = rt.event(ev)
   conn.changed = proc() = rt.requestFrame()
   conn.themeChanged = proc() =

@@ -1635,6 +1635,7 @@ proc layoutAt(c: Context; bounds: Rect; now: MonoTime;
         first = 0
       result.animating = state.finishList(first, last) or result.animating
       updateListReorderTarget(c.owner.nodes, result.rects, state, slot)
+  c.owner.committedRects = result.rects
 
 proc layout*(c: Context; bounds: Rect): LayoutResult =
   ## Lays out the latest completed build inside bounds.
@@ -1653,6 +1654,18 @@ proc bounds*(layout: LayoutResult; element: Element): Rect =
       int(element.slot) >= layout.rects.len:
     raise newException(ValueError, "ui: element is not part of this layout")
   layout.rects[int(element.slot)]
+
+proc bounds*(handle: Handle; c: Context): Rect =
+  ## Returns the last committed window-space bounds for handle in c.
+  if c == nil or c.owner == nil or c.owner.closed:
+    return
+  let binding = handle.existingBinding(c.owner)
+  if binding == nil or binding.identity == 0 or
+      not c.owner.idSlots.hasKey(binding.identity):
+    return
+  let slot = c.owner.idSlots[binding.identity]
+  if slot >= 0 and slot < c.owner.committedRects.len:
+    result = c.owner.committedRects[slot]
 
 proc insideClips(layout: LayoutResult; slot: int; x, y: float32): bool =
   var parent = int(layout.owner.nodes[slot].parent)
