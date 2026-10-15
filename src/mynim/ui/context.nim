@@ -148,6 +148,25 @@ proc newBitmap*(source: sourceImage.Image): Bitmap =
   if source != nil:
     result = Bitmap(image: scene.newSceneImage(source))
 
+proc update*(bitmap: Bitmap; source: sourceImage.Image) =
+  ## Replaces a bitmap's pixels while retaining its scene-image identity.
+  if bitmap == nil or source == nil:
+    return
+  let bounds = source.bounds()
+  let width = bounds.dx
+  let height = bounds.dy
+  var rgba = sourceImage.RgbaImage(pix: newSeq[uint8](4 * width * height),
+    stride: 4 * width, rect: sourceImage.rect(0, 0, width, height))
+  sourceImage.drawSrc(rgba, sourceImage.rect(0, 0, width, height), source,
+                      bounds.min)
+  if bitmap.image == nil:
+    bitmap.image = scene.newImageRgba(width, height, rgba.pix)
+  else:
+    bitmap.image.w = width
+    bitmap.image.h = height
+    bitmap.image.pix = rgba.pix
+    bitmap.image.changed()
+
 proc size*(bitmap: Bitmap): tuple[width, height: int] =
   ## Reports a bitmap's intrinsic size in pixels.
   if bitmap != nil and bitmap.image != nil:

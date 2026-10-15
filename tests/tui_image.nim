@@ -73,5 +73,25 @@ doAssert native.frame()
 doAssert native.pixel(5, 5) == [54'u8, 54, 54, 255]
 doAssert native.pixel(35, 5) == [182'u8, 182, 182, 255]
 
+grayscale = false
+let updatedPixels = sourceImage.newRgba(sourceImage.rect(0, 0, 2, 2))
+for y in 0..<2:
+  for x in 0..<2:
+    updatedPixels.set(x, y, sourceImage.Rgba(r: 255, g: 255, b: 0, a: 255))
+bitmap.update(updatedPixels)
+discard native.send(platform.SurfaceEvent(kind: platform.surfaceResize))
+doAssert native.frame()
+doAssert native.pixel(5, 5) == [0'u8, 255, 255, 255]
+doAssert native.pixel(35, 35) == [0'u8, 255, 255, 255]
+
+let resizedPixels = sourceImage.newRgba(sourceImage.rect(0, 0, 1, 1))
+resizedPixels.set(0, 0, sourceImage.Rgba(r: 0, g: 0, b: 255, a: 255))
+bitmap.update(resizedPixels)
+let updatedDimensions = bitmap.size()
+doAssert updatedDimensions.width == 1 and updatedDimensions.height == 1
+discard native.send(platform.SurfaceEvent(kind: platform.surfaceResize))
+doAssert native.frame()
+doAssert native.pixel(20, 20) == [255'u8, 0, 0, 255]
+
 win.destroy()
 loop.shutdown()
