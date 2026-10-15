@@ -25,6 +25,7 @@ include mynim/ui/element
 include mynim/ui/context
 include mynim/ui/list_state
 include mynim/ui/layout
+include mynim/ui/direction
 include mynim/ui/list
 include mynim/ui/paint
 include mynim/ui/runtime

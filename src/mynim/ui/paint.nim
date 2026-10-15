@@ -80,6 +80,7 @@ proc setBorderWidth(e: Element; values: array[4, float32]): Element =
   if n != nil:
     for i, value in values:
       n.border[i] = nonnegative(value)
+    n.logical = n.logical and not logBorder
 
 proc borderWidth*(e: Element): Element =
   ## Removes the element's border widths.

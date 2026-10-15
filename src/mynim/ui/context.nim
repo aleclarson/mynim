@@ -86,12 +86,14 @@ type
     row, reverse, wrap, wrapReverse, grid, absolute, alignSet,
       justifySet, focusable, focused, focusVisible, focusRingDisabled,
       scrollX, scrollY,
-      revealInScroll, rightToLeft: bool
+      revealInScroll, rightToLeft, directionSet: bool
+    logical: uint8
     clipX, clipY, hasFollowScroll: bool
     followScrollSlot: int32
     gridCol, gridRow, gridColSpan, gridRowSpan: int
     hasText, textColorSet, listRowSelected, listRowFocusVisible,
       listRowHeader, listRowPinnedHeader: bool
+    textAlign: Align
     hovered, pressed, clicked: bool
     label: string
     textValue: string
@@ -139,6 +141,45 @@ type
     generation: uint32
     rects: seq[Rect]
     animating: bool
+
+const
+  logPadStart = 1'u8 shl 0
+  logPadEnd = 1'u8 shl 1
+  logMarginStart = 1'u8 shl 2
+  logMarginEnd = 1'u8 shl 3
+  logBorderStart = 1'u8 shl 4
+  logBorderEnd = 1'u8 shl 5
+  logInsetStart = 1'u8 shl 6
+  logInsetEnd = 1'u8 shl 7
+  logPad = logPadStart or logPadEnd
+  logMargin = logMarginStart or logMarginEnd
+  logBorder = logBorderStart or logBorderEnd
+  logInset = logInsetStart or logInsetEnd
+
+func startSide(node: ElementNode): int =
+  if node.rightToLeft: 1 else: 3
+
+func endSide(node: ElementNode): int = 4 - node.startSide
+
+proc unlog(node: ptr ElementNode; side: int; group: uint8) =
+  if node == nil or side notin {1, 3}:
+    return
+  const starts = logPadStart or logMarginStart or logBorderStart or
+    logInsetStart
+  if side == node[].startSide:
+    node[].logical = node[].logical and not (group and starts)
+  else:
+    node[].logical = node[].logical and not (group and not starts)
+
+proc swapLogical(node: var ElementNode) =
+  if (node.logical and logPad) != 0:
+    swap(node.pad[1], node.pad[3])
+  if (node.logical and logMargin) != 0:
+    swap(node.margin[1], node.margin[3])
+  if (node.logical and logBorder) != 0:
+    swap(node.border[1], node.border[3])
+  if (node.logical and logInset) != 0:
+    swap(node.inset[1], node.inset[3])
 
 func clipsChildren(node: ElementNode): bool =
   node.scrollState != nil or node.clipX or node.clipY

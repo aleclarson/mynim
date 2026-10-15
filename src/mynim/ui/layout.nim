@@ -39,6 +39,12 @@ proc contentInsetX(node: ElementNode): float32 =
 proc contentInsetY(node: ElementNode): float32 =
   node.pad[0] + node.pad[2] + node.border[0] + node.border[2]
 
+func reverseHorizontalAlign(value: Align): Align =
+  case value
+  of Align.Start: Align.End
+  of Align.End: Align.Start
+  else: value
+
 proc clampSize(value: float32; minimum, maximum: UiLength;
                base: float32): float32 =
   result = max(value, 0'f32)
@@ -65,8 +71,17 @@ proc shapeText(nodes: var seq[ElementNode]) =
   for node in nodes.mitems:
     if not node.hasText:
       continue
+    let alignment = if node.textAlign == Align.Center:
+        textStack.Center
+      elif node.rightToLeft:
+        if node.textAlign == Align.End: textStack.Left else: textStack.Right
+      elif node.textAlign == Align.End:
+        textStack.End
+      else:
+        textStack.Start
     node.shapedText = system.layout(textStack.Params(text: node.textValue,
-      style: node.textStyle, keepSpaces: true))
+      style: node.textStyle, align: alignment, rtl: node.rightToLeft,
+      keepSpaces: true))
 
 proc shapeTextToBounds(nodes: var seq[ElementNode]; rects: seq[Rect]): bool =
   let system = textStack.shared()
@@ -337,15 +352,20 @@ proc sizeGridTracks(tracks: seq[Track]; count: int; available, gap: float32;
 proc gridItemAlign(grid, item: ElementNode; horizontal: bool): Align =
   if horizontal:
     if item.justifySelf != Align.Auto:
-      return item.justifySelf
-    if grid.justifyItems != Align.Auto:
-      return grid.justifyItems
+      result = item.justifySelf
+    elif grid.justifyItems != Align.Auto:
+      result = grid.justifyItems
+    else:
+      result = Align.Stretch
   else:
     if item.selfAlign != Align.Auto:
-      return item.selfAlign
-    if grid.align != Align.Auto:
-      return grid.align
-  Align.Stretch
+      result = item.selfAlign
+    elif grid.align != Align.Auto:
+      result = grid.align
+    else:
+      result = Align.Stretch
+  if horizontal and grid.rightToLeft:
+    result = reverseHorizontalAlign(result)
 
 proc gridCellDimension(node: ElementNode; natural: NaturalSize;
                        horizontal: bool; area, base, mainExtent: float32;
@@ -785,16 +805,18 @@ proc placeNode(nodes: seq[ElementNode]; natural: seq[NaturalSize];
   let mainSize = if row: innerW else: innerH
   let crossSize = if row: innerH else: innerW
   let gap = if row: node.gapX else: node.gapY
+  let reverseMain = node.reverse xor (row and node.rightToLeft)
   let mainStart = if row:
-      (if node.reverse: 1 else: 3)
+      (if reverseMain: 1 else: 3)
     else:
-      (if node.reverse: 2 else: 0)
+      (if reverseMain: 2 else: 0)
   let mainEnd = if row:
-      (if node.reverse: 3 else: 1)
+      (if reverseMain: 3 else: 1)
     else:
-      (if node.reverse: 0 else: 2)
-  var crossStart = if row: 0 else: 3
-  var crossEnd = if row: 2 else: 1
+      (if reverseMain: 0 else: 2)
+  var crossStart = if row: 0 else: (if node.rightToLeft: 1 else: 3)
+  var crossEnd = if row: 2 else: (if node.rightToLeft: 3 else: 1)
+  let reverseCross = node.wrapReverse xor (not row and node.rightToLeft)
   if node.wrapReverse:
     swap(crossStart, crossEnd)
 
@@ -1009,11 +1031,11 @@ proc placeNode(nodes: seq[ElementNode]; natural: seq[NaturalSize];
         else:
           discard
       crossOffset += crossBefore + linePosition
-      if node.wrapReverse:
+      if reverseCross:
         crossOffset = crossSize - crossOffset - childCross
 
       let mainPosition = position + mainBefore
-      let mainOffset = if node.reverse:
+      let mainOffset = if reverseMain:
           mainSize - mainPosition - sizes[childSlot]
         else:
           mainPosition
@@ -1081,11 +1103,17 @@ proc placeGridChildren(nodes: seq[ElementNode]; natural: seq[NaturalSize];
   for index in 0 ..< placed.columns:
     usedW += gridScratch.values[columnsFirst + index]
   var xStart, xBetween, yStart, yBetween: float32
+  let freeW = innerW - usedW
   if grid.justify != Align.Auto:
-    let offsets = justifyOffsets(grid.justify, max(innerW - usedW, 0'f32),
-      placed.columns)
+    let alignment = if grid.rightToLeft:
+        reverseHorizontalAlign(grid.justify)
+      else:
+        grid.justify
+    let offsets = justifyOffsets(alignment, max(freeW, 0'f32), placed.columns)
     xStart = offsets.start
     xBetween = offsets.between
+    if freeW < 0 and alignment in {Align.Center, Align.End}:
+      xStart = justifyOffsets(alignment, freeW, placed.columns).start
   let itemValues = gridScratch.values.len
   gridScratch.values.setLen(itemValues + 2 * itemCount)
   for itemIndex in placed.first ..< placed.pastLast:
@@ -1118,10 +1146,17 @@ proc placeGridChildren(nodes: seq[ElementNode]; natural: seq[NaturalSize];
   gridScratch.values.setLen(columnPositions + placed.columns + placed.rows)
   let rowPositions = columnPositions + placed.columns
   var position = xStart
-  for index in 0 ..< placed.columns:
-    gridScratch.values[columnPositions + index] = position
-    position += gridScratch.values[columnsFirst + index] + grid.gapX +
-      xBetween
+  if grid.rightToLeft:
+    position += usedW + xBetween * float32(max(placed.columns - 1, 0))
+    for index in 0 ..< placed.columns:
+      position -= gridScratch.values[columnsFirst + index]
+      gridScratch.values[columnPositions + index] = position
+      position -= grid.gapX + xBetween
+  else:
+    for index in 0 ..< placed.columns:
+      gridScratch.values[columnPositions + index] = position
+      position += gridScratch.values[columnsFirst + index] + grid.gapX +
+        xBetween
   position = yStart
   for index in 0 ..< placed.rows:
     gridScratch.values[rowPositions + index] = position
@@ -1134,12 +1169,17 @@ proc placeGridChildren(nodes: seq[ElementNode]; natural: seq[NaturalSize];
     let relativeIndex = itemIndex - placed.first
     let width = gridScratch.values[itemValues + relativeIndex]
     let offsetX = gridScratch.values[itemValues + itemCount + relativeIndex]
+    let firstPhysicalColumn = if grid.rightToLeft:
+        item.col + item.colSpan - 1
+      else:
+        item.col
     let area = gridScratch.values.gridArea(rowsFirst, item.row,
       item.rowSpan, grid.gapY + yBetween)
     let itemSize = child.gridCellDimension(natural[childSlot], false,
       area, innerH, width, grid.gridItemAlign(child, false))
     var childRect = Rect(
-      x: innerX + gridScratch.values[columnPositions + item.col] + offsetX,
+      x: innerX + gridScratch.values[columnPositions + firstPhysicalColumn] +
+        offsetX,
       y: innerY + gridScratch.values[rowPositions + item.row] + itemSize.offset,
       w: width,
       h: itemSize.size)
@@ -1220,8 +1260,9 @@ proc placeAbsoluteChild(nodes: seq[ElementNode]; natural: seq[NaturalSize];
   var x = marginValue(child.margin[3])
   if left.ok:
     x += left.value
-  elif right.ok:
-    x = paddingW - right.value - childW - marginValue(child.margin[1])
+  elif right.ok or child.rightToLeft:
+    let inset = if right.ok: right.value else: 0'f32
+    x = paddingW - inset - childW - marginValue(child.margin[1])
   if left.ok and right.ok:
     let free = paddingW - left.value - right.value - childW - child.marginX
     let autoLeft = child.margin[3] == Auto
@@ -1254,10 +1295,15 @@ proc scrollExtent(nodes: seq[ElementNode]; rects: seq[Rect]; root: int;
                   horizontal: bool): float32 =
   let node = nodes[root]
   let box = rects[root]
+  var leftStart: float32
+  var leftmost: float32
   result = if horizontal:
       box.x + node.border[3] + node.pad[3]
     else:
       box.y + node.border[0] + node.pad[0]
+  if horizontal:
+    leftStart = result
+    leftmost = result
   var pending: seq[int]
   var child = int(node.firstChild)
   while child >= 0:
@@ -1268,6 +1314,8 @@ proc scrollExtent(nodes: seq[ElementNode]; rects: seq[Rect]; root: int;
     let item = nodes[slot]
     let itemBox = rects[slot]
     if horizontal:
+      leftmost = min(leftmost,
+        itemBox.x - marginValue(item.margin[3]))
       result = max(result, itemBox.x + itemBox.w +
         marginValue(item.margin[1]))
     else:
@@ -1279,8 +1327,10 @@ proc scrollExtent(nodes: seq[ElementNode]; rects: seq[Rect]; root: int;
         pending.add(child)
         child = int(nodes[child].nextSibling)
   if horizontal:
-    result = max(result + node.pad[1] -
+    let rightOverflow = max(result + node.pad[1] -
       (box.x + box.w - node.border[1]), 0'f32)
+    let leftOverflow = max(leftStart - leftmost, 0'f32)
+    result = leftOverflow + rightOverflow
   else:
     result = max(result + node.pad[2] -
       (box.y + box.h - node.border[2]), 0'f32)
@@ -1289,7 +1339,7 @@ proc scrollExtent(nodes: seq[ElementNode]; rects: seq[Rect]; root: int;
 
 proc physicalScrollX(node: ElementNode; state: ScrollState): float32 =
   if node.rightToLeft:
-    state.maxX - state.offsetX
+    -state.offsetX
   else:
     state.offsetX
 
@@ -1337,16 +1387,15 @@ proc revealInScrollContainers(nodes: seq[ElementNode]; rects: seq[Rect]) =
         let view = rects[parent]
         let oldY = state.offsetY
         if node.scrollX:
-          let oldPhysicalX = node.physicalScrollX(state)
-          let newPhysicalX = nearestScrollOffset(oldPhysicalX,
-            box.x, box.w,
-            view.x + node.border[3],
-            max(view.x + view.w - node.border[1],
-              view.x + node.border[3]), state.maxX)
-          state.offsetX = if node.rightToLeft:
-              state.maxX - newPhysicalX
-            else:
-              newPhysicalX
+          let visibleLeft = view.x + node.border[3]
+          let visibleRight = max(view.x + view.w - node.border[1],
+            visibleLeft)
+          if node.rightToLeft:
+            state.offsetX = nearestScrollOffset(state.offsetX, -box.x,
+              box.w, -visibleRight, -visibleLeft, state.maxX)
+          else:
+            state.offsetX = nearestScrollOffset(state.offsetX, box.x, box.w,
+              visibleLeft, visibleRight, state.maxX)
         if node.scrollY:
           state.offsetY = nearestScrollOffset(oldY, box.y, box.h,
             view.y + node.border[0],
@@ -2330,6 +2379,7 @@ proc updateInset(e: Element; side: int; value: UiLength): Element =
   let n = e.node
   if n != nil:
     n.inset[side] = value
+    n.unlog(side, logInset)
 
 proc top*(e: Element; value: float32): Element =
   ## Sets the top inset, or moves an in-flow element down.
@@ -2372,6 +2422,7 @@ proc setPadding(e: Element; values: array[4, float32]): Element =
   let n = e.node
   if n != nil:
     n.pad = values
+    n.logical = n.logical and not logPad
 
 proc padding*(e: Element; all: float32): Element =
   e.setPadding([all, all, all, all])
@@ -2388,6 +2439,7 @@ proc paddingX*(e: Element; value: float32): Element =
   if n != nil:
     n.pad[1] = value
     n.pad[3] = value
+    n.logical = n.logical and not logPad
 
 proc paddingY*(e: Element; value: float32): Element =
   result = e
@@ -2401,6 +2453,7 @@ proc setMargin(e: Element; values: array[4, float32]): Element =
   let n = e.node
   if n != nil:
     n.margin = values
+    n.logical = n.logical and not logMargin
 
 proc margin*(e: Element; all: float32): Element =
   e.setMargin([all, all, all, all])
@@ -2449,6 +2502,13 @@ proc textItalic*(e: Element; value = true): Element =
   let n = e.node
   if n != nil and n.hasText:
     n.textStyle.italic = value
+
+proc textAlign*(e: Element; value: Align): Element =
+  ## Aligns text to Start, Center, or End within its element.
+  result = e
+  let n = e.node
+  if n != nil and n.hasText:
+    n.textAlign = value
 
 proc onClick*(e: Element; handler: proc() {.closure.}): Element =
   ## Runs handler for pointer clicks and Enter/Space activation on e.
@@ -2508,6 +2568,7 @@ proc marginX*(e: Element; value: float32): Element =
   if n != nil:
     n.margin[1] = value
     n.margin[3] = value
+    n.logical = n.logical and not logMargin
 
 proc marginY*(e: Element; value: float32): Element =
   result = e

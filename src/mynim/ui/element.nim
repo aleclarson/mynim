@@ -1,6 +1,10 @@
 ## Public value types used by elements and layout.
 
 type
+  Direction* {.pure.} = enum ## Reading direction for an element and its descendants.
+    LeftToRight
+    RightToLeft
+
   Align* {.pure.} = enum ## Positions children in a row, column, or grid.
     Start ## Left in a row; top in a column.
     Center
