@@ -2,6 +2,8 @@
 
 type TextFieldClient = ref object of platform.TextInputClient
   text, lastBoundValue, placeholder: string
+  boundBuffer: TextBuffer
+  bufferSnapshot: TextSnapshot
   anchor, caret: int
   mark: platform.TextRange
   hasMark, nativeChanged, readOnly, rightToLeft: bool
@@ -130,46 +132,43 @@ proc fieldClient(e: Element): TextFieldClient =
   if n != nil and n[].textClient of TextFieldClient:
     result = TextFieldClient(n[].textClient)
 
-proc textInputBase*(c: Context; value: var string): Element =
-  ## Creates an unstyled single-line text field. It copies native edits into
-  ## value on the next build before running that field's change/submit actions.
-  result = c.newElement(false, identityKindTextInput)
-  let node = result.node
+proc newTextFieldElement(c: Context): Element =
+  c.newElement(false, identityKindTextInput)
+
+proc acquireTextField(e: Element; initial: string): TextFieldClient =
+  let node = e.node
   if node == nil:
     return
   let identity = node[].identity
-  var client: TextFieldClient
-  let oldClient = result.owner.textInputClients.getOrDefault(identity)
+  let oldClient = e.owner.textInputClients.getOrDefault(identity)
   if oldClient of TextFieldClient:
-    client = TextFieldClient(oldClient)
+    result = TextFieldClient(oldClient)
   else:
-    client = TextFieldClient(text: value, lastBoundValue: value,
-      caret: platform.utf16Len(value), anchor: platform.utf16Len(value))
-    result.owner.textInputClients[identity] = client
+    result = TextFieldClient(text: initial, lastBoundValue: initial,
+      caret: platform.utf16Len(initial), anchor: platform.utf16Len(initial))
+    e.owner.textInputClients[identity] = result
 
-  if value != client.lastBoundValue:
-    client.setFieldText(value)
-  elif client.nativeChanged:
-    value = client.text
-    client.lastBoundValue = value
-    client.nativeChanged = false
-
-  let changeCallbacks = result.owner.pendingTextCallbacks.getOrDefault(identity)
-  let submitCallbacks =
-    result.owner.pendingTextSubmitCallbacks.getOrDefault(identity)
-  result.owner.pendingTextCallbacks.del(identity)
-  result.owner.pendingTextSubmitCallbacks.del(identity)
+proc deliverTextFieldCallbacks(e: Element): bool =
+  let owner = e.owner
+  let identity = e.node[].identity
+  let changeCallbacks = owner.pendingTextCallbacks.getOrDefault(identity)
+  let submitCallbacks = owner.pendingTextSubmitCallbacks.getOrDefault(identity)
+  owner.pendingTextCallbacks.del(identity)
+  owner.pendingTextSubmitCallbacks.del(identity)
   for callback in changeCallbacks:
     callback()
-    if result.owner.closed or not result.owner.inBuild:
-      return
+    if owner.closed or not owner.inBuild:
+      return false
   for callback in submitCallbacks:
     callback()
-    if result.owner.closed or not result.owner.inBuild:
-      return
-  if value != client.text:
-    client.setFieldText(value)
+    if owner.closed or not owner.inBuild:
+      return false
+  true
 
+proc finishTextField(c: Context; e: Element; client: TextFieldClient) =
+  let node = e.node
+  if node == nil:
+    return
   client.style = textStack.Style(family: c.theme.font,
                                  size: c.theme.fontSize)
   client.rightToLeft = node[].rightToLeft
@@ -191,11 +190,68 @@ proc textInputBase*(c: Context; value: var string): Element =
   client.insetX = node[].pad[3] + node[].border[3]
   client.insetY = node[].pad[0] + node[].border[0]
 
-proc textInput*(c: Context; value: var string): Element =
-  ## Creates a themed single-line text input editing value. Native edits are
-  ## copied back on the next build before change/submit actions run.
+proc textInputBase*(c: Context; value: var string): Element =
+  ## Creates an unstyled single-line text field. It copies native edits into
+  ## value on the next build before running that field's change/submit actions.
+  result = c.newTextFieldElement()
+  let node = result.node
+  if node == nil:
+    return
+  let client = result.acquireTextField(value)
+
+  if client.boundBuffer != nil:
+    client.boundBuffer = nil
+    client.bufferSnapshot = TextSnapshot()
+    client.setFieldText(value)
+  elif value != client.lastBoundValue:
+    client.setFieldText(value)
+  elif client.nativeChanged:
+    value = client.text
+    client.lastBoundValue = value
+    client.nativeChanged = false
+
+  if not result.deliverTextFieldCallbacks():
+    return
+  if value != client.text:
+    client.setFieldText(value)
+
+  c.finishTextField(result, client)
+
+proc textInputBufferBase*(c: Context; buffer: TextBuffer): Element =
+  ## Creates an unstyled single-line field editing an indexed text buffer.
+  ## Edits publish on the next build before change/submit actions run.
+  buffer.requireTextBuffer()
+  result = c.newTextFieldElement()
+  let node = result.node
+  if node == nil:
+    return
+  let client = result.acquireTextField("")
+  if client.boundBuffer != buffer:
+    client.boundBuffer = buffer
+    client.bufferSnapshot = buffer.snapshot()
+    client.setFieldText($client.bufferSnapshot)
+  elif client.nativeChanged and not client.hasMark:
+    let (snapshot, committed) = buffer.commitTextBuffer(client.bufferSnapshot,
+                                                         client.text)
+    client.bufferSnapshot = snapshot
+    if committed:
+      client.lastBoundValue = client.text
+      client.nativeChanged = false
+    else:
+      client.setFieldText($snapshot)
+  elif not client.hasMark:
+    let snapshot = buffer.snapshot()
+    if snapshot.version != client.bufferSnapshot.version:
+      client.bufferSnapshot = snapshot
+      client.setFieldText($snapshot)
+
+  if not result.deliverTextFieldCallbacks():
+    return
+  c.finishTextField(result, client)
+
+proc themeTextInput(c: Context; e: Element): Element =
   let theme = c.theme
-  result = c.textInputBase(value)
+  result = e
   result = result.padding(theme.space(1.5), theme.space(2.5))
   let node = result.node
   if node != nil:
@@ -205,6 +261,16 @@ proc textInput*(c: Context; value: var string): Element =
     node[].borderColor = if result.focused(): theme.accent
       elif result.hovered(): theme.border.mix(theme.text, 0.2'f32)
       else: theme.border
+
+proc textInput*(c: Context; value: var string): Element =
+  ## Creates a themed single-line text input editing value. Native edits are
+  ## copied back on the next build before change/submit actions run.
+  result = c.themeTextInput(c.textInputBase(value))
+
+proc textInputBuffer*(c: Context; buffer: TextBuffer): Element =
+  ## Creates a themed single-line input editing an indexed text buffer.
+  ## Native edits publish on the next build before change/submit actions run.
+  result = c.themeTextInput(c.textInputBufferBase(buffer))
 
 proc placeholder*(e: Element; value: string): Element =
   ## Shows value while the text field is empty.

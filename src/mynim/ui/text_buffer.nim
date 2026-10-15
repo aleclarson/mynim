@@ -186,6 +186,19 @@ proc requireTextBuffer(buffer: TextBuffer) =
     raise newException(ValueError,
       "ui: cannot mutate a nil TextBuffer; use newTextBuffer")
 
+proc commitTextBuffer(buffer: TextBuffer; before: TextSnapshot; text: string):
+    tuple[snapshot: TextSnapshot, committed: bool] =
+  buffer.requireTextBuffer()
+  let root = textRope.build(text)
+  withLock buffer.mu:
+    if buffer.root != before.root or buffer.version != before.version:
+      result.snapshot = TextSnapshot(root: buffer.root, version: buffer.version)
+    else:
+      buffer.root = root
+      inc buffer.version
+      result.snapshot = TextSnapshot(root: buffer.root, version: buffer.version)
+      result.committed = true
+
 proc set*(buffer: TextBuffer; text: string) =
   ## Replaces the document; existing snapshots keep their previous content.
   ## Raises `ValueError` when buffer is nil.
