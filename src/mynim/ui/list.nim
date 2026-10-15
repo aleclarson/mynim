@@ -8,8 +8,9 @@ proc list*(c: Context; state: ListState; count: Natural;
   ## Builds only the rows visible in the viewport and a small overscan.
   ## Heights are measured as rows appear; unseen rows use the mean measured
   ## height, or the estimate passed to newListState before any are measured.
-  ## When multiSelectable is enabled, selectedRows() and isSelected(row)
-  ## report its chosen rows; callers can use them to style each row.
+  ## rowLabel names each row for accessibility and type-to-select. When
+  ## multiSelectable is enabled, selectedRows() and isSelected(row) let
+  ## callers style the chosen rows.
   if state == nil:
     raise newException(ValueError, "ui: list state cannot be nil")
   if c == nil or c.owner == nil or not c.owner.inBuild:
@@ -37,6 +38,8 @@ proc list*(c: Context; state: ListState; count: Natural;
     for rowIndex in plan.first..<plan.pastLast:
       let row = c.box().shrink(0)
       let rowNode = row.node
+      if state.rowLabel != nil:
+        discard row.label(state.rowLabel(rowIndex))
       if rowNode != nil:
         rowNode.listState = state
         rowNode.listRowIndex = rowIndex

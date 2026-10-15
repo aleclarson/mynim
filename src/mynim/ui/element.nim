@@ -98,6 +98,7 @@ type
     dirty: bool
 
   ListRowKey* = proc(row: int): string {.closure.} ## Returns a stable, unique row key.
+  ListRowLabel* = proc(row: int): string {.closure.} ## Names and searches a list row.
 
   ListSelectedRow = object
     row, nearRow: int
@@ -109,6 +110,7 @@ type
     scrollState: ScrollState
     heights: ListHeights
     rowKey: ListRowKey
+    rowLabel: ListRowLabel
     keepOffset: bool
     rowCount: int
     viewportHeight: float32
@@ -118,6 +120,8 @@ type
     chosenRows: seq[ListSelectedRow]
     selectedKeys: HashSet[string]
     selectedIndices: HashSet[int]
+    typedLabel: string
+    typedAt: MonoTime
     selectionPivot: int
     selectionPivotKey: string
     selectionPivotKeyValid: bool

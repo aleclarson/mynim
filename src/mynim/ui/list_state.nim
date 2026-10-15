@@ -352,16 +352,19 @@ proc resizeListHeights(heights: var ListHeights; count: int) =
 proc newListState*(estimatedRowHeight = 28'f32; rowGap = 0'f32;
                    rowKey: ListRowKey = nil; keepOffset = false;
                    selectable = false; followEnd = false;
-                   multiSelectable = false): ListState =
+                   multiSelectable = false;
+                   rowLabel: ListRowLabel = nil): ListState =
   ## Creates persistent state for a virtualized list.
   ##
   ## rowKey should return a stable, unique key for each logical row. When a
   ## keyed row moves, the list follows it unless keepOffset is true. The moved
   ## key is searched within 1000 rows of its previous index. Set selectable
-  ## to enable row clicks and keyboard selection; select also enables it.
+  ## to enable row clicks and keyboard selection; rowLabel enables row focus
+  ## and type-to-select. select also enables keyboard selection.
   ## followEnd starts at and follows the end until the user scrolls away.
   ## multiSelectable enables multi-row selection and modifier handling; rowKey
   ## keeps those choices with their rows as they move.
+  ## rowLabel names rows for accessibility and enables type-to-select.
   if not estimatedRowHeight.finiteMotion or estimatedRowHeight <= 0 or
       not rowGap.finiteMotion or rowGap < 0:
     raise newException(ValueError,
@@ -374,8 +377,9 @@ proc newListState*(estimatedRowHeight = 28'f32; rowGap = 0'f32;
   result.heights.dirty = true
   result.gap = rowGap
   result.rowKey = rowKey
+  result.rowLabel = rowLabel
   result.keepOffset = keepOffset
-  result.selectionEnabled = selectable or multiSelectable
+  result.selectionEnabled = selectable or multiSelectable or rowLabel != nil
   result.multiSelectionEnabled = multiSelectable
   result.followEnd = followEnd
   result.selectedRow = -1
@@ -508,6 +512,36 @@ proc selectAllListRows(state: ListState) =
   for row in 0..<state.rowCount:
     discard state.setListRowSelected(row, true)
 
+proc typeSelectListLabel(state: ListState; text: string): bool =
+  if state.rowLabel == nil:
+    return false
+  if text.len == 0:
+    return false
+
+  let now = getMonoTime()
+  if state.typedLabel.len > 0 and
+      (now - state.typedAt).inMilliseconds > 1_000:
+    state.typedLabel.setLen(0)
+  let lowerText = unicode.toLower(text)
+  let repeated = text.runeLen == 1 and state.typedLabel.runeLen == 1 and
+    unicode.toLower(state.typedLabel) == lowerText
+  var query = state.typedLabel & text
+  var start = max(state.selectedRow, 0)
+  if repeated:
+    query = text
+    if state.selectedRow >= 0:
+      start = state.selectedRow + 1
+  state.typedLabel = query
+  state.typedAt = now
+
+  let prefix = unicode.toLower(query)
+  for distance in 0..<state.rowCount:
+    let row = (start + distance) mod state.rowCount
+    if unicode.toLower(state.rowLabel(row)).startsWith(prefix):
+      state.select(row)
+      break
+  true
+
 proc selectListKey(state: ListState; key: platform.Key;
                    mods: platform.Modifiers): bool =
   if state == nil or not state.selectionEnabled or state.rowCount <= 0:
@@ -593,6 +627,20 @@ proc handleListKey(layout: LayoutResult; focusSlot: int;
     let node = owner.nodes[slot]
     if node.listState != nil and node.listRowIndex == -1:
       return node.listState.selectListKey(key, mods)
+    slot = int(node.parent)
+
+proc handleListText(layout: LayoutResult; focusSlot: int;
+                    text: string): bool =
+  let owner = layout.owner
+  if owner == nil or owner.closed or owner.inBuild or
+      layout.generation != owner.generation or focusSlot <= 0 or
+      focusSlot >= owner.nodes.len:
+    return false
+  var slot = focusSlot
+  while slot > 0:
+    let node = owner.nodes[slot]
+    if node.listState != nil and node.listRowIndex == -1:
+      return node.listState.typeSelectListLabel(text)
     slot = int(node.parent)
 
 proc offset*(state: ListState): tuple[x, y: float32] =

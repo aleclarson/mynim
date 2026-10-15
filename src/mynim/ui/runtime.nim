@@ -639,6 +639,10 @@ proc event(rt: Runtime; ev: platform.SurfaceEvent): bool =
   of platform.textInput:
     let adapter = rt.textInputAdapter
     if adapter == nil or adapter.inputTarget() == nil:
+      if rt.frameLayout.handleListText(rt.focusSlot, ev.text):
+        rt.keyboardFocusVisible = true
+        rt.requestFrame()
+        return true
       return false
     var replacement: ref platform.TextRange
     if ev.replace:

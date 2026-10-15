@@ -165,3 +165,64 @@ doAssert multiSurface.send(platform.SurfaceEvent(kind: platform.keyPressed,
 doAssert multiSurface.frame()
 doAssert multiState.selectedRows().len == 100
 doAssert multiState.isSelected(99)
+
+let searchState = ui.newListState(20, rowLabel = proc(row: int): string =
+  case row
+  of 10: "Folder"
+  of 11: "File"
+  else: "Row " & $row
+)
+let searchContent = ui.newContent(proc(ctx: ui.Context) =
+  discard ctx.list(searchState, 100, proc(row: int) =
+    discard ctx.box().size(20, 20).shrink(0)
+  ).size(20, 40)
+)
+discard newWindow(WindowOptions(width: 20, height: 40, hidden: true,
+  content: searchContent))
+let searchSurface = fake.windows[^1].surface
+
+doAssert searchSurface.frame()
+doAssert searchSurface.send(platform.SurfaceEvent(kind: platform.pointerDown,
+  x: 5, y: 5))
+doAssert searchSurface.send(platform.SurfaceEvent(kind: platform.pointerUp,
+  x: 5, y: 5))
+doAssert searchSurface.frame()
+doAssert searchSurface.send(platform.SurfaceEvent(kind: platform.textInput,
+  text: "f"))
+doAssert searchSurface.frame()
+doAssert searchState.selected() == 10
+doAssert searchSurface.send(platform.SurfaceEvent(kind: platform.textInput,
+  text: "f"))
+doAssert searchSurface.frame()
+doAssert searchState.selected() == 11
+
+let unicodeSearchState = ui.newListState(20,
+  rowLabel = proc(row: int): string =
+    case row
+    of 10: "Éclair"
+    of 11: "École"
+    else: "Row " & $row
+)
+let unicodeSearchContent = ui.newContent(proc(ctx: ui.Context) =
+  discard ctx.list(unicodeSearchState, 100, proc(row: int) =
+    discard ctx.box().size(20, 20).shrink(0)
+  ).size(20, 40)
+)
+discard newWindow(WindowOptions(width: 20, height: 40, hidden: true,
+  content: unicodeSearchContent))
+let unicodeSearchSurface = fake.windows[^1].surface
+
+doAssert unicodeSearchSurface.frame()
+doAssert unicodeSearchSurface.send(platform.SurfaceEvent(kind: platform.pointerDown,
+  x: 5, y: 5))
+doAssert unicodeSearchSurface.send(platform.SurfaceEvent(kind: platform.pointerUp,
+  x: 5, y: 5))
+doAssert unicodeSearchSurface.frame()
+doAssert unicodeSearchSurface.send(platform.SurfaceEvent(kind: platform.textInput,
+  text: "É"))
+doAssert unicodeSearchSurface.frame()
+doAssert unicodeSearchState.selected() == 10
+doAssert unicodeSearchSurface.send(platform.SurfaceEvent(kind: platform.textInput,
+  text: "c"))
+doAssert unicodeSearchSurface.frame()
+doAssert unicodeSearchState.selected() == 10
