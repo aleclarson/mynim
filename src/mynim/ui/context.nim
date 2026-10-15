@@ -81,7 +81,8 @@ type
   ElementNode = object
     parent, firstChild, lastChild, nextSibling: int32
     row, reverse, wrap, wrapReverse, grid, absolute, alignSet,
-      justifySet, focusable, focused, focusVisible, scrollX, scrollY: bool
+      justifySet, focusable, focused, focusVisible, scrollX, scrollY,
+      revealInScroll: bool
     gridCol, gridRow, gridColSpan, gridRowSpan: int
     hasText: bool
     hovered, pressed, clicked: bool

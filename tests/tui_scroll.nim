@@ -50,6 +50,27 @@ block scroll_both_axes:
   doAssert layout.bounds(content).x == -25
   doAssert layout.bounds(content).y == -40
 
+block scroll_into_view_moves_nested_viewports:
+  let c = newContext()
+  let outerState = newScrollState()
+  let innerState = newScrollState()
+  var target: Element
+  c.build(proc(ctx: Context) =
+    let outer = ctx.scroll(outerState).size(20, 20)
+    discard outer.children(proc() =
+      discard ctx.box().size(20, 20).shrink(0)
+      let inner = ctx.scroll(innerState).size(20, 20).shrink(0)
+      discard inner.children(proc() =
+        discard ctx.box().size(20, 20).shrink(0)
+        target = ctx.box().size(20, 20).shrink(0).scrollIntoView()
+      )
+    )
+  )
+  let layout = c.layout(20, 20)
+  doAssert innerState.offset().y == 20
+  doAssert outerState.offset().y == 20
+  doAssert layout.bounds(target).y == 0
+
 block scroll_paint_clips_descendants:
   let c = newContext()
   let state = newScrollState()

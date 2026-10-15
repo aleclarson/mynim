@@ -18,7 +18,7 @@ let scrollContent = ui.newContent(proc(ctx: ui.Context) =
   discard viewport.children(proc() =
     discard ctx.box().size(20, 20).shrink(0).background(ui.rgb(255, 0, 0))
     discard ctx.box().size(20, 20).shrink(0).background(ui.rgb(0, 255, 0))
-      .onClick(proc() = inc clicks)
+      .label("Green").onClick(proc() = inc clicks)
   )
 )
 let win = newWindow(WindowOptions(width: 40, height: 40, hidden: true,
@@ -48,6 +48,63 @@ discard native.send(platform.SurfaceEvent(kind: platform.pointerDown,
 discard native.send(platform.SurfaceEvent(kind: platform.pointerUp,
   x: 5, y: 10, button: 0))
 doAssert clicks == 1
+
+doAssert native.send(platform.SurfaceEvent(kind: platform.accessibilityOn))
+let (scrollTree, _) = native.accessibility()
+var greenID = 0'u64
+var greenActions: platform.AccessActions
+for node in scrollTree.nodes:
+  if node.label == "Green":
+    greenID = node.id
+    greenActions = node.actions
+doAssert greenID != 0
+doAssert (greenActions and platform.actionScrollIntoView) !=
+  platform.AccessActions(0)
+doAssert native.send(platform.SurfaceEvent(kind: platform.accessAction,
+  id: greenID, action: platform.accessScrollIntoView))
+doAssert scrollState.offset().y == 20
+doAssert native.frame()
+doAssert native.pixel(5, 5) == [0'u8, 255, 0, 255]
+
+doAssert native.send(platform.SurfaceEvent(kind: platform.keyPressed,
+  key: platform.keyHome))
+doAssert scrollState.offset().y == 0
+doAssert native.frame()
+doAssert native.send(platform.SurfaceEvent(kind: platform.keyPressed,
+  key: platform.keyPageDown))
+doAssert scrollState.offset().y == 10
+doAssert native.frame()
+doAssert native.send(platform.SurfaceEvent(kind: platform.keyPressed,
+  key: platform.keySpace, mods: platform.modShift))
+doAssert scrollState.offset().y == 0
+doAssert native.frame()
+doAssert native.send(platform.SurfaceEvent(kind: platform.keyPressed,
+  key: platform.keyEnd))
+doAssert scrollState.offset().y == 20
+doAssert native.frame()
+
+let focusState = ui.newScrollState()
+let focusContent = ui.newContent(proc(ctx: ui.Context) =
+  let viewport = ctx.scroll(focusState).size(30, 20)
+  discard viewport.children(proc() =
+    for i in 0..<3:
+      discard ctx.box().size(30, 20).shrink(0).label("Button " & $i)
+        .onClick(proc() = discard)
+  )
+)
+let focusWindow = newWindow(WindowOptions(width: 30, height: 20, hidden: true,
+  content: focusContent))
+let focusSurface = fake.windows[^1].surface
+doAssert focusSurface.frame()
+doAssert focusSurface.send(platform.SurfaceEvent(kind: platform.keyPressed,
+  key: platform.keyTab))
+doAssert focusSurface.frame()
+doAssert focusState.offset().y == 0
+doAssert focusSurface.send(platform.SurfaceEvent(kind: platform.keyPressed,
+  key: platform.keyTab))
+doAssert focusState.offset().y == 20
+doAssert focusSurface.frame()
+doAssert focusState.offset().y == 20
 
 let outerState = ui.newScrollState()
 let innerState = ui.newScrollState()
@@ -85,7 +142,20 @@ discard nestedSurface.send(platform.SurfaceEvent(kind: platform.pointerScroll,
 doAssert nestedSurface.frame()
 doAssert innerState.offset().y == 20
 doAssert outerState.offset().y == 10
+doAssert nestedSurface.send(platform.SurfaceEvent(kind: platform.keyPressed,
+  key: platform.keyRight))
+doAssert innerState.offset().x == 30
+doAssert nestedSurface.frame()
+doAssert nestedSurface.send(platform.SurfaceEvent(kind: platform.keyPressed,
+  key: platform.keyLeft))
+doAssert innerState.offset().x == 0
+doAssert nestedSurface.frame()
+doAssert nestedSurface.send(platform.SurfaceEvent(kind: platform.keyPressed,
+  key: platform.keyDown))
+doAssert outerState.offset().y == 30
+doAssert nestedSurface.frame()
 
 win.destroy()
+focusWindow.destroy()
 nestedWindow.destroy()
 loop.shutdown()

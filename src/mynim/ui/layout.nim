@@ -1304,6 +1304,46 @@ proc updateScrollRanges(nodes: seq[ElementNode]; rects: seq[Rect]) =
     state.offsetX = min(max(state.offsetX, 0'f32), state.maxX)
     state.offsetY = min(max(state.offsetY, 0'f32), state.maxY)
 
+proc nearestScrollOffset(offset, pos, size, visibleStart,
+                         visibleEnd, maximum: float32): float32 =
+  let start = pos - offset
+  let finish = pos + size - offset
+  if start < visibleStart:
+    return min(max(pos - visibleStart, 0'f32), maximum)
+  if finish > visibleEnd:
+    return min(max(offset + min(finish - visibleEnd,
+      start - visibleStart), 0'f32), maximum)
+  offset
+
+proc revealInScrollContainers(nodes: seq[ElementNode]; rects: seq[Rect]) =
+  for slot in 1..<nodes.len:
+    if not nodes[slot].revealInScroll:
+      continue
+    var box = rects[slot]
+    var parent = int(nodes[slot].parent)
+    while parent > 0:
+      let node = nodes[parent]
+      let state = node.scrollState
+      if state != nil:
+        let view = rects[parent]
+        let oldX = state.offsetX
+        let oldY = state.offsetY
+        if node.scrollX:
+          state.offsetX = nearestScrollOffset(oldX, box.x, box.w,
+            view.x + node.border[3],
+            max(view.x + view.w - node.border[1],
+              view.x + node.border[3]), state.maxX)
+        if node.scrollY:
+          state.offsetY = nearestScrollOffset(oldY, box.y, box.h,
+            view.y + node.border[0],
+            max(view.y + view.h - node.border[2],
+              view.y + node.border[0]), state.maxY)
+        if node.scrollX:
+          box.x -= state.offsetX
+        if node.scrollY:
+          box.y -= state.offsetY
+      parent = int(node.parent)
+
 proc shiftScrolledRects(nodes: seq[ElementNode]; rects: var seq[Rect]) =
   for slot in 1..<nodes.len:
     var parent = int(nodes[slot].parent)
@@ -1368,6 +1408,7 @@ proc layout*(c: Context; bounds: Rect): LayoutResult =
     for slot in 0..<result.rects.len:
       result.rects[slot] = c.owner.rectScratch[slot]
     updateScrollRanges(c.owner.nodes, c.owner.rectScratch)
+    revealInScrollContainers(c.owner.nodes, c.owner.rectScratch)
     shiftScrolledRects(c.owner.nodes, result.rects)
 
 proc layout*(c: Context; width, height: float32): LayoutResult =
@@ -1428,6 +1469,49 @@ proc targetAt(layout: LayoutResult; x, y: float32): Element =
     dec orderIndex
   topmost
 
+proc hasScrollAncestor(layout: LayoutResult; slot: int): bool =
+  if layout.owner == nil or slot <= 0 or slot >= layout.owner.nodes.len:
+    return false
+  var parent = int(layout.owner.nodes[slot].parent)
+  while parent > 0:
+    if layout.owner.nodes[parent].scrollState != nil:
+      return true
+    parent = int(layout.owner.nodes[parent].parent)
+  false
+
+proc revealSlot(layout: LayoutResult; slot: int): bool =
+  if layout.owner == nil or layout.owner.closed or layout.owner.inBuild or
+      layout.generation != layout.owner.generation or
+      layout.rects.len != layout.owner.nodes.len or
+      slot <= 0 or slot >= layout.owner.nodes.len:
+    return false
+  var moved = false
+  var box = layout.rects[slot]
+  var parent = int(layout.owner.nodes[slot].parent)
+  while parent > 0:
+    let node = layout.owner.nodes[parent]
+    let state = node.scrollState
+    if state != nil:
+      let view = layout.rects[parent]
+      let oldX = state.offsetX
+      let oldY = state.offsetY
+      if node.scrollX:
+        state.offsetX = nearestScrollOffset(oldX, box.x + oldX, box.w,
+          view.x + node.border[3],
+          max(view.x + view.w - node.border[1],
+            view.x + node.border[3]), state.maxX)
+      if node.scrollY:
+        state.offsetY = nearestScrollOffset(oldY, box.y + oldY, box.h,
+          view.y + node.border[0],
+          max(view.y + view.h - node.border[2],
+            view.y + node.border[0]), state.maxY)
+      if state.offsetX != oldX or state.offsetY != oldY:
+        moved = true
+      box.x -= state.offsetX - oldX
+      box.y -= state.offsetY - oldY
+    parent = int(node.parent)
+  moved
+
 proc slotsAt(layout: LayoutResult; x, y: float32): seq[int] =
   if layout.owner == nil or layout.owner.closed or layout.owner.inBuild or
       not layout.owner.hasFrame or
@@ -1458,6 +1542,61 @@ proc scrollAt(layout: LayoutResult; x, y, dx, dy: float32): bool =
         return true
     slot = int(node.parent)
   false
+
+proc scrollKey(layout: LayoutResult; focusSlot: int;
+               pointerX, pointerY, dx, dy, page: float32;
+               hasPointer: bool): bool =
+  if layout.owner == nil or layout.owner.closed or
+      layout.owner.inBuild or layout.generation != layout.owner.generation:
+    return false
+  var slot = focusSlot
+  if slot <= 0 or slot >= layout.owner.nodes.len:
+    if not hasPointer:
+      return false
+    let target = layout.targetAt(pointerX, pointerY)
+    if target.owner == nil:
+      return false
+    slot = int(target.slot)
+  var hasScroller = false
+  var check = slot
+  while check > 0:
+    if layout.owner.nodes[check].scrollState != nil:
+      hasScroller = true
+      break
+    check = int(layout.owner.nodes[check].parent)
+  if not hasScroller:
+    if not hasPointer:
+      return false
+    let target = layout.targetAt(pointerX, pointerY)
+    if target.owner == nil:
+      return false
+    slot = int(target.slot)
+  while slot > 0:
+    let node = layout.owner.nodes[slot]
+    let state = node.scrollState
+    if state != nil:
+      let oldX = state.offsetX
+      let oldY = state.offsetY
+      let stepY = if page == 0:
+          dy
+        else:
+          page * max(layout.rects[slot].h - 40'f32,
+                     layout.rects[slot].h / 2)
+      if node.scrollX:
+        state.offsetX = min(max(oldX + dx, 0'f32), state.maxX)
+      if node.scrollY:
+        state.offsetY = min(max(oldY + stepY, 0'f32), state.maxY)
+      if state.offsetX != oldX or state.offsetY != oldY:
+        return true
+    slot = int(node.parent)
+  false
+
+proc scrollIntoView*(e: Element): Element =
+  ## Scrolls the element's ancestors just enough to show it in each viewport.
+  result = e
+  let node = e.node
+  if node != nil:
+    node.revealInScroll = true
 
 proc dispatchClick(layout: LayoutResult; pressed: Element;
                    x, y: float32; clickedSlot: var int): bool =

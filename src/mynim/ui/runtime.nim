@@ -252,6 +252,8 @@ proc accessibilityTree(layout: LayoutResult;
     if node.focusable or node.clickHandler != nil or node.textClient != nil:
       accessible.states = platform.accessFocusable
       accessible.actions = platform.actionFocus
+    if layout.hasScrollAncestor(slot):
+      accessible.actions = accessible.actions or platform.actionScrollIntoView
     if node.textClient != nil:
       accessible.actions = accessible.actions or platform.actionSetValue
     if role == platform.roleButton:
@@ -544,13 +546,13 @@ proc event(rt: Runtime; ev: platform.SurfaceEvent): bool =
         rt.cancelKeyPress()
         rt.focusSlot = next
         rt.keyboardFocusVisible = true
+        discard rt.frameLayout.revealSlot(next)
         rt.refreshPointer()
         rt.requestFrame()
         return true
       return false
     if ev.key in {platform.keyEnter, platform.keySpace} and
-        (ev.mods and (platform.modCtrl or platform.modAlt or
-          platform.modSuper)) == 0 and rt.focusSlot > 0 and
+        ev.mods == 0 and rt.focusSlot > 0 and
         rt.frameLayout.clickableSlot(rt.focusSlot):
       if not ev.repeat:
         rt.keyPressSlot = rt.focusSlot
@@ -558,6 +560,36 @@ proc event(rt: Runtime; ev: platform.SurfaceEvent): bool =
         rt.keyboardFocusVisible = true
         rt.refreshPointer()
         rt.requestFrame()
+      return true
+    var dx, dy, page: float32
+    if ev.mods == 0:
+      case ev.key
+      of platform.keyDown: dy = 40
+      of platform.keyUp: dy = -40
+      of platform.keyRight: dx = 40
+      of platform.keyLeft: dx = -40
+      of platform.keyPageDown, platform.keySpace:
+        page = 1
+      of platform.keyPageUp:
+        page = -1
+      of platform.keyHome: dy = -1_000_000_000
+      of platform.keyEnd: dy = 1_000_000_000
+      else: discard
+    elif ev.mods == platform.modShift and ev.key == platform.keySpace:
+      page = -1
+    elif ev.mods == platform.modSuper and ev.key == platform.keyHome:
+      dy = -1_000_000_000
+    elif ev.mods == platform.modSuper and ev.key == platform.keyEnd:
+      dy = 1_000_000_000
+    when defined(macosx):
+      if ev.mods == platform.modSuper and ev.key == platform.keyUp:
+        dy = -1_000_000_000
+      elif ev.mods == platform.modSuper and ev.key == platform.keyDown:
+        dy = 1_000_000_000
+    if (dx != 0 or dy != 0 or page != 0) and
+        rt.frameLayout.scrollKey(rt.focusSlot, rt.pointerX, rt.pointerY,
+          dx, dy, page, rt.hasPointer):
+      rt.requestFrame()
       return true
     false
   of platform.keyReleased:
@@ -712,8 +744,15 @@ proc event(rt: Runtime; ev: platform.SurfaceEvent): bool =
         rt.focusSlot = slot
         rt.keyboardFocusVisible = false
         rt.cancelKeyPress()
-        if changed:
+        let scrolled = rt.frameLayout.revealSlot(slot)
+        if changed or scrolled:
           rt.requestFrame()
+        result = true
+    elif ev.action == platform.accessScrollIntoView and ev.id > 0:
+      let slot = int(ev.id - 1)
+      if rt.frameLayout.hasScrollAncestor(slot):
+        discard rt.frameLayout.revealSlot(slot)
+        rt.requestFrame()
         result = true
     elif ev.action == platform.accessSetValue and ev.id > 0:
       let slot = int(ev.id - 1)
