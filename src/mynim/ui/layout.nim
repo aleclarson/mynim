@@ -456,25 +456,41 @@ proc targetAt(layout: LayoutResult; x, y: float32): Element =
       layout.generation != layout.owner.generation or
       layout.rects.len != layout.owner.nodes.len:
     return
+  var topmost: Element
   for slot in countdown(layout.rects.high, 1):
-    if layout.owner.nodes[slot].clickHandler != nil and
-        layout.rects[slot].contains(x, y):
-      return Element(owner: layout.owner, slot: uint32(slot),
-                     generation: layout.generation)
+    if not layout.rects[slot].contains(x, y):
+      continue
+    let target = Element(owner: layout.owner, slot: uint32(slot),
+                         generation: layout.generation)
+    if topmost.owner == nil:
+      topmost = target
+    if layout.owner.nodes[slot].clickHandler != nil:
+      return target
+  topmost
+
+proc slotsAt(layout: LayoutResult; x, y: float32): seq[int] =
+  if layout.owner == nil or layout.owner.closed or layout.owner.inBuild or
+      not layout.owner.hasFrame or
+      layout.generation != layout.owner.generation or
+      layout.rects.len != layout.owner.nodes.len:
+    return
+  for slot in 1..<layout.rects.len:
+    if layout.rects[slot].contains(x, y):
+      result.add(slot)
 
 proc dispatchClick(layout: LayoutResult; pressed: Element;
-                   x, y: float32): bool =
+                   x, y: float32; clickedSlot: var int): bool =
   if pressed.owner == nil or pressed.owner != layout.owner or
-      pressed.generation != layout.generation:
+      layout.owner == nil or layout.owner.closed or layout.owner.inBuild or
+      not layout.owner.hasFrame or layout.generation != layout.owner.generation:
     return false
   let target = layout.targetAt(x, y)
-  if target.owner != pressed.owner or target.slot != pressed.slot or
-      target.generation != pressed.generation:
+  if target.owner != pressed.owner or target.slot != pressed.slot:
     return false
-  let handler = layout.owner.nodes[int(target.slot)].clickHandler
-  if handler == nil:
-    return false
-  handler()
+  clickedSlot = int(target.slot)
+  let handler = layout.owner.nodes[clickedSlot].clickHandler
+  if handler != nil:
+    handler()
   true
 
 proc dispatchAccessPress(layout: LayoutResult; id: uint64): bool =
@@ -492,6 +508,22 @@ proc dispatchAccessPress(layout: LayoutResult; id: uint64): bool =
     return true
 
 proc len*(layout: LayoutResult): int = max(layout.rects.len - 1, 0)
+
+proc hovered*(e: Element): bool =
+  ## Reports whether the pointer is over this element during the current build.
+  ## During a press, only elements under the pointer when the press began stay hovered.
+  let n = e.node
+  n != nil and n.hovered
+
+proc pressed*(e: Element): bool =
+  ## Reports whether a primary press began over this element and remains over it.
+  let n = e.node
+  n != nil and n.pressed
+
+proc clicked*(e: Element): bool =
+  ## Reports a primary pointer or accessibility activation since the previous build.
+  let n = e.node
+  n != nil and n.clicked
 
 proc updateDimension(e: Element; dimension: LayoutDimension;
                      value: UiLength): Element =

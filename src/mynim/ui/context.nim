@@ -11,6 +11,7 @@ type
     natural: seq[NaturalSize]
     rectScratch: seq[Rect]
     flexSizes, flexBases, flexMin, flexMax, flexFactors: seq[float32]
+    hoveredSlots, pressedSlots, clickedSlots: seq[int]
     generation: uint32
     parent: int32
     inBuild: bool
@@ -54,6 +55,7 @@ type
     parent, firstChild, lastChild, nextSibling: int32
     row: bool
     hasText: bool
+    hovered, pressed, clicked: bool
     label: string
     textValue: string
     textStyle: textStack.Style
@@ -100,6 +102,9 @@ proc retire(owner: ElementOwner) =
   owner.flexMin = @[]
   owner.flexMax = @[]
   owner.flexFactors = @[]
+  owner.hoveredSlots = @[]
+  owner.pressedSlots = @[]
+  owner.clickedSlots = @[]
 
 proc node(e: Element): ptr ElementNode =
   if e.owner == nil or e.owner.closed or not e.owner.inBuild or
@@ -118,8 +123,12 @@ proc newElement(c: Context; row: bool): Element =
     raise newException(ValueError, "ui: too many elements in one frame")
 
   let slot = uint32(c.owner.nodes.len)
+  let index = int(slot)
   let node = ElementNode(parent: c.owner.parent, firstChild: -1,
                          lastChild: -1, nextSibling: -1, row: row,
+                         hovered: index in c.owner.hoveredSlots,
+                         pressed: index in c.owner.pressedSlots,
+                         clicked: index in c.owner.clickedSlots,
                          shrink: 1, justify: Align.Start,
                          align: if row: Align.Center else: Align.Auto,
                          selfAlign: Align.Auto)
@@ -260,6 +269,9 @@ proc build*(c: Context; view: proc(c: Context) {.closure.}) =
     c.owner.inBuild = false
     c.owner.parent = -1
     c.owner.hasFrame = built
+    c.owner.hoveredSlots.setLen(0)
+    c.owner.pressedSlots.setLen(0)
+    c.owner.clickedSlots.setLen(0)
 
 proc close*(c: Context) =
   ## Detaches saved handles and releases frame storage when the context closes.

@@ -17,12 +17,14 @@ app.initialized = true
 app.handleReady()
 
 var presses = 0
+var saveClicked = false
 let content = ui.newContent(proc(ctx: ui.Context) =
   let panel = ctx.column().size(180, 120).label("Panel")
   discard panel.children(proc() =
     discard ctx.text("Status")
-    discard ctx.box().size(80, 36).label("Save")
+    let save = ctx.box().size(80, 36).label("Save")
       .onClick(proc() = inc presses)
+    saveClicked = save.clicked()
     discard ctx.image(bitmap).size(16, 16)
     discard ctx.image(bitmap).size(16, 16).label("Logo")
   )
@@ -47,11 +49,13 @@ doAssert tree.nodes[2].label == "Save" and tree.nodes[2].parent == 0
 doAssert tree.nodes[2].actions == platform.actionPress
 doAssert tree.nodes[3].role == platform.roleImage
 doAssert tree.nodes[3].label == "Logo" and tree.nodes[3].parent == 0
+doAssert not saveClicked
 
 doAssert native.send(platform.SurfaceEvent(kind: platform.accessAction,
   id: tree.nodes[2].id, action: platform.accessPress))
 doAssert presses == 1
 doAssert native.frame()
+doAssert saveClicked
 let (_, refreshed) = native.accessibility()
 doAssert refreshed == 2
 

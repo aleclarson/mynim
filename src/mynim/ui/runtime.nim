@@ -13,6 +13,9 @@ type
     context: Context
     frameLayout: LayoutResult
     pressTarget: Element
+    pointerX, pointerY: float32
+    hasPointer: bool
+    hoverSlots, pressHoverSlots, pressedSlots, clickedSlots: seq[int]
     frameScene: scene.Scene
     hasScene: bool
     accessibilityOn: bool
@@ -163,6 +166,22 @@ proc updateAccessibility(rt: Runtime) =
   if rt.accessibilityOn and rt.conn.surface != nil:
     rt.conn.surface.updateAccessibility(rt.frameLayout.accessibilityTree())
 
+proc refreshPointer(rt: Runtime) =
+  rt.hoverSlots.setLen(0)
+  rt.pressedSlots.setLen(0)
+  let under = if rt.hasPointer:
+      rt.frameLayout.slotsAt(rt.pointerX, rt.pointerY)
+    else:
+      @[]
+  if rt.pressTarget.owner != nil:
+    for slot in rt.pressHoverSlots:
+      if slot in under:
+        rt.hoverSlots.add(slot)
+        rt.pressedSlots.add(slot)
+  else:
+    rt.hoverSlots = under
+    rt.pressedSlots.setLen(0)
+
 proc renderFrame(rt: Runtime; presentFrame = true) =
   if rt.closed or rt.inFrame:
     return
@@ -178,6 +197,11 @@ proc renderFrame(rt: Runtime; presentFrame = true) =
   else:
     float32(size.scale)
 
+  rt.refreshPointer()
+  rt.context.owner.hoveredSlots = rt.hoverSlots
+  rt.context.owner.pressedSlots = rt.pressedSlots
+  rt.context.owner.clickedSlots = rt.clickedSlots
+  rt.clickedSlots.setLen(0)
   rt.context.build(rt.view)
   let layout = rt.context.layout(width, height)
   rt.frameLayout = layout
@@ -211,21 +235,66 @@ proc event(rt: Runtime; ev: platform.SurfaceEvent): bool =
     rt.gpuTried = false
     rt.requestFrame()
     false
+  of platform.pointerMove:
+    let previousHover = rt.hoverSlots
+    let previousPressed = rt.pressedSlots
+    rt.pointerX = float32(ev.x)
+    rt.pointerY = float32(ev.y)
+    rt.hasPointer = true
+    rt.refreshPointer()
+    if rt.hoverSlots != previousHover or rt.pressedSlots != previousPressed:
+      rt.requestFrame()
+    false
   of platform.pointerDown:
-    rt.pressTarget = Element()
-    if ev.button == 0:
-      rt.pressTarget = rt.frameLayout.targetAt(float32(ev.x), float32(ev.y))
+    if ev.button != 0:
+      return false
+    let previousHover = rt.hoverSlots
+    let previousPressed = rt.pressedSlots
+    rt.pointerX = float32(ev.x)
+    rt.pointerY = float32(ev.y)
+    rt.hasPointer = true
+    rt.pressTarget = rt.frameLayout.targetAt(rt.pointerX, rt.pointerY)
+    rt.pressHoverSlots = rt.frameLayout.slotsAt(rt.pointerX, rt.pointerY)
+    rt.refreshPointer()
+    if rt.hoverSlots != previousHover or rt.pressedSlots != previousPressed:
+      rt.requestFrame()
     return rt.pressTarget.owner != nil
   of platform.pointerUp:
-    if ev.button == 0:
-      result = rt.frameLayout.dispatchClick(rt.pressTarget,
-        float32(ev.x), float32(ev.y))
-    rt.pressTarget = Element()
+    if ev.button != 0:
+      return false
+    let previousHover = rt.hoverSlots
+    let previousPressed = rt.pressedSlots
+    rt.pointerX = float32(ev.x)
+    rt.pointerY = float32(ev.y)
+    rt.hasPointer = true
+    var clickedSlot = -1
+    result = rt.frameLayout.dispatchClick(rt.pressTarget,
+      rt.pointerX, rt.pointerY, clickedSlot)
+    rt.clickedSlots.setLen(0)
     if result:
+      rt.clickedSlots.add(clickedSlot)
+    rt.pressTarget = Element()
+    rt.pressHoverSlots.setLen(0)
+    rt.refreshPointer()
+    if result or rt.hoverSlots != previousHover or
+        rt.pressedSlots != previousPressed:
       rt.requestFrame()
     return result
   of platform.surfaceBlur:
+    let previousPressed = rt.pressedSlots
     rt.pressTarget = Element()
+    rt.pressHoverSlots.setLen(0)
+    rt.refreshPointer()
+    if rt.pressedSlots != previousPressed:
+      rt.requestFrame()
+    false
+  of platform.pointerLeave:
+    let previousHover = rt.hoverSlots
+    let previousPressed = rt.pressedSlots
+    rt.hasPointer = false
+    rt.refreshPointer()
+    if rt.hoverSlots != previousHover or rt.pressedSlots != previousPressed:
+      rt.requestFrame()
     false
   of platform.accessibilityOn:
     rt.accessibilityOn = true
@@ -235,6 +304,7 @@ proc event(rt: Runtime; ev: platform.SurfaceEvent): bool =
     if ev.action == platform.accessPress:
       result = rt.frameLayout.dispatchAccessPress(ev.id)
       if result:
+        rt.clickedSlots = @[int(ev.id - 1)]
         rt.requestFrame()
     return result
   else:
