@@ -1534,6 +1534,69 @@ proc applyTableFits(nodes: var seq[ElementNode]; natural: seq[NaturalSize]): boo
         nodes[other].tableFitMeasure = false
     result = true
 
+proc advance(channel: var ScalarAnimation; now: MonoTime) =
+  if not channel.moving:
+    return
+  let durationNs = channel.duration.inNanoseconds
+  let elapsedNs = max((now - channel.startAt).inNanoseconds, 0'i64)
+  let progress = min(float32(float64(elapsedNs) / float64(durationNs)), 1'f32)
+  let inverse = 1'f32 - progress
+  let eased = 1'f32 - inverse * inverse * inverse
+  channel.value = channel.fromValue +
+    (channel.target - channel.fromValue) * eased
+  if progress >= 1:
+    channel.value = channel.target
+    channel.moving = false
+
+proc animate*(e: Element; key: string; target: float32;
+              duration: Duration): float32 =
+  ## Moves a keyed scalar value to target with cubic ease-out and requests
+  ## frames while it moves. The first target appears immediately. Reduced
+  ## motion preferences also apply immediately.
+  let node = e.node
+  if node == nil:
+    return target
+  let owner = e.owner
+  var channels = owner.animations.mgetOrPut(node.identity,
+    initTable[string, ScalarAnimation]())
+  var channel = channels.getOrDefault(key)
+  if not channel.initialized or
+      (channel.generation != owner.generation and
+       channel.generation + 1 != owner.generation):
+    channel = ScalarAnimation(value: target, fromValue: target,
+      target: target, generation: owner.generation, initialized: true)
+    channels[key] = channel
+    owner.animations[node.identity] = channels
+    return target
+
+  if owner.reduceMotion:
+    channel.value = target
+    channel.fromValue = target
+    channel.target = target
+    channel.moving = false
+  else:
+    if channel.moving:
+      channel.advance(owner.frameNow)
+    if target != channel.target:
+      channel.fromValue = channel.value
+      channel.target = target
+      channel.startAt = owner.frameNow
+      channel.duration = if duration < initDuration(milliseconds = 1):
+          initDuration(milliseconds = 1)
+        else:
+          duration
+      channel.moving = channel.fromValue != target
+      if not channel.moving:
+        channel.value = target
+    if channel.moving:
+      channel.advance(owner.frameNow)
+      owner.animating = owner.animating or channel.moving
+
+  channel.generation = owner.generation
+  channels[key] = channel
+  owner.animations[node.identity] = channels
+  channel.value
+
 proc layoutAt(c: Context; bounds: Rect; now: MonoTime;
               reduceMotion: bool): LayoutResult =
   ## Lays out the latest completed build inside bounds.
@@ -1547,6 +1610,7 @@ proc layoutAt(c: Context; bounds: Rect; now: MonoTime;
 
   result.owner = c.owner
   result.generation = c.owner.generation
+  result.animating = c.owner.animating
   result.root = Rect(x: bounds.x, y: bounds.y,
     w: max(bounds.w, 0'f32), h: max(bounds.h, 0'f32))
   result.rects = newSeq[Rect](c.owner.nodes.len)

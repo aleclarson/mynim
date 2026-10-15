@@ -1060,6 +1060,7 @@ proc renderFrame(rt: Runtime; presentFrame = true) =
   previousOwner.focusedSlots.setLen(0)
   previousOwner.focusVisibleSlots.setLen(0)
   rt.clickedSlots.setLen(0)
+  rt.context.reduceMotion = rt.systemPreferences.reduceMotion
   rt.context.build(rt.view)
   let currentOwner = rt.context.owner
   rt.hoverSlots = remapSlots(previousIdentities, currentOwner, rt.hoverSlots)

@@ -6,6 +6,7 @@ type
   ContextObj = object
     owner: ElementOwner
     theme: Theme
+    reduceMotion: bool
     treeState: TreeState
     checkboxGroup: CheckboxGroupBuild
     segmentedToggles: bool
@@ -48,6 +49,13 @@ type
     key: platform.Key
     action: proc() {.closure.}
 
+  ScalarAnimation = object
+    value, fromValue, target: float32
+    startAt: MonoTime
+    duration: Duration
+    generation: uint32
+    initialized, moving: bool
+
   ElementOwner = ref object
     nodes: seq[ElementNode]
     idSlots: Table[uint64, int]
@@ -61,6 +69,8 @@ type
     pendingTextCallbacks: Table[uint64, seq[proc() {.closure.}]]
     pendingTextSubmitCallbacks: Table[uint64, seq[proc() {.closure.}]]
     textInputClients: Table[uint64, platform.TextInputClient]
+    animations: Table[uint64, Table[string, ScalarAnimation]]
+    frameNow: MonoTime
     committedRects: seq[Rect]
     focusIdentity: uint64
     focusActive: bool
@@ -76,7 +86,7 @@ type
       focusVisibleSlots: seq[int]
     generation: uint32
     parent: int32
-    inBuild: bool
+    inBuild, reduceMotion, animating: bool
     hasFrame: bool
     closed: bool
 
@@ -328,6 +338,8 @@ proc newContext*(): Context =
     initTable[uint64, seq[proc() {.closure.}]]()
   result.owner.textInputClients =
     initTable[uint64, platform.TextInputClient]()
+  result.owner.animations =
+    initTable[uint64, Table[string, ScalarAnimation]]()
   result.theme = lightTheme()
 
 proc multiplyWrap(a, b: uint64): uint64 {.inline.} =
@@ -653,6 +665,7 @@ proc retire(owner: ElementOwner) =
   owner.pendingTextCallbacks.clear()
   owner.pendingTextSubmitCallbacks.clear()
   owner.textInputClients.clear()
+  owner.animations.clear()
   owner.committedRects = @[]
   owner.focusIdentity = 0
   owner.focusActive = false
@@ -950,7 +963,11 @@ proc build*(c: Context; view: proc(c: Context) {.closure.}) =
       initTable[uint64, seq[proc() {.closure.}]]()
     c.owner.textInputClients =
       initTable[uint64, platform.TextInputClient]()
+    c.owner.animations =
+      initTable[uint64, Table[string, ScalarAnimation]]()
   inc c.owner.generation
+  c.owner.frameNow = getMonoTime()
+  c.owner.animating = false
   c.owner.actions.setLen(0)
   c.owner.nodes.setLen(0)
   c.owner.idSlots.clear()
@@ -969,6 +986,7 @@ proc build*(c: Context; view: proc(c: Context) {.closure.}) =
                                 align: Align.Auto, selfAlign: Align.Auto))
   c.owner.parent = 0
   c.owner.inBuild = true
+  c.owner.reduceMotion = c.reduceMotion
   c.owner.hasFrame = false
   var built = false
   try:
@@ -990,6 +1008,12 @@ proc build*(c: Context; view: proc(c: Context) {.closure.}) =
       if node.parent >= 0:
         c.owner.identityParents[node.identity] =
           c.owner.nodes[int(node.parent)].identity
+    var staleAnimations: seq[uint64]
+    for identity in c.owner.animations.keys:
+      if not c.owner.idSlots.hasKey(identity):
+        staleAnimations.add(identity)
+    for identity in staleAnimations:
+      c.owner.animations.del(identity)
     built = true
   finally:
     c.owner.inBuild = false

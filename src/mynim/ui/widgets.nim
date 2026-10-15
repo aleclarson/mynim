@@ -362,14 +362,18 @@ proc switch*(c: Context; on: var bool): Element =
   let inset = theme.space(0.5)
   let node = result.node
   let rightToLeft = node != nil and node.rightToLeft
-  let knobAtEnd = frameOn != rightToLeft
+  let position = result.animate("knob", if frameOn: 1'f32 else: 0'f32,
+    initDuration(milliseconds = 140))
+  let travel = theme.space(9) - height
   let offColor = theme.border.mix(theme.text, 0.15'f32)
   result = result.size(theme.space(9), height).padding(inset)
-    .justify(if knobAtEnd: Align.End else: Align.Start)
+    .justify(Align.Start)
     .alignItems(Align.Center).radius(height / 2)
-    .background(if frameOn: theme.accent else: offColor)
+    .background(offColor.mix(theme.accent, position))
   result = result.children(proc() =
     discard c.box().size(height - 2 * inset, height - 2 * inset)
       .shrink(0).radius(height / 2).background(rgb(255, 255, 255))
       .shadow(0, 1, 2, 0, rgba(0, 0, 0, 0.25'f32))
+      .margin(0, if rightToLeft: position * travel else: 0'f32,
+        0, if rightToLeft: 0'f32 else: position * travel)
   )
