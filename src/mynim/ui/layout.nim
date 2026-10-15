@@ -424,6 +424,33 @@ proc bounds*(layout: LayoutResult; element: Element): Rect =
     raise newException(ValueError, "ui: element is not part of this layout")
   layout.rects[int(element.slot)]
 
+proc targetAt(layout: LayoutResult; x, y: float32): Element =
+  if layout.owner == nil or layout.owner.closed or layout.owner.inBuild or
+      not layout.owner.hasFrame or
+      layout.generation != layout.owner.generation or
+      layout.rects.len != layout.owner.nodes.len:
+    return
+  for slot in countdown(layout.rects.high, 1):
+    if layout.owner.nodes[slot].clickHandler != nil and
+        layout.rects[slot].contains(x, y):
+      return Element(owner: layout.owner, slot: uint32(slot),
+                     generation: layout.generation)
+
+proc dispatchClick(layout: LayoutResult; pressed: Element;
+                   x, y: float32): bool =
+  if pressed.owner == nil or pressed.owner != layout.owner or
+      pressed.generation != layout.generation:
+    return false
+  let target = layout.targetAt(x, y)
+  if target.owner != pressed.owner or target.slot != pressed.slot or
+      target.generation != pressed.generation:
+    return false
+  let handler = layout.owner.nodes[int(target.slot)].clickHandler
+  if handler == nil:
+    return false
+  handler()
+  true
+
 proc len*(layout: LayoutResult): int = max(layout.rects.len - 1, 0)
 
 proc updateDimension(e: Element; dimension: LayoutDimension;
@@ -634,6 +661,13 @@ proc textItalic*(e: Element; value = true): Element =
   let n = e.node
   if n != nil and n.hasText:
     n.textStyle.italic = value
+
+proc onClick*(e: Element; handler: proc() {.closure.}): Element =
+  ## Runs handler when the primary pointer is pressed and released on e.
+  result = e
+  let n = e.node
+  if n != nil:
+    n.clickHandler = handler
 
 proc marginX*(e: Element; value: float32): Element =
   result = e

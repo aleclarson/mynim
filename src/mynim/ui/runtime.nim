@@ -11,6 +11,8 @@ type
     conn: surface.Conn
     view: View
     context: Context
+    frameLayout: LayoutResult
+    pressTarget: Element
     frameScene: scene.Scene
     hasScene: bool
     inFrame, closed, ready, gpuTried: bool
@@ -133,6 +135,7 @@ proc renderFrame(rt: Runtime; presentFrame = true) =
 
   rt.context.build(rt.view)
   let layout = rt.context.layout(width, height)
+  rt.frameLayout = layout
   rt.frameScene = layout.paintScene(scale)
   rt.hasScene = true
   if presentFrame:
@@ -162,6 +165,22 @@ proc event(rt: Runtime; ev: platform.SurfaceEvent): bool =
     rt.gpuTried = false
     rt.requestFrame()
     false
+  of platform.pointerDown:
+    rt.pressTarget = Element()
+    if ev.button == 0:
+      rt.pressTarget = rt.frameLayout.targetAt(float32(ev.x), float32(ev.y))
+    return rt.pressTarget.owner != nil
+  of platform.pointerUp:
+    if ev.button == 0:
+      result = rt.frameLayout.dispatchClick(rt.pressTarget,
+        float32(ev.x), float32(ev.y))
+    rt.pressTarget = Element()
+    if result:
+      rt.requestFrame()
+    return result
+  of platform.surfaceBlur:
+    rt.pressTarget = Element()
+    false
   else:
     false
 
@@ -189,6 +208,8 @@ proc close(rt: Runtime) =
   rt.closed = true
   rt.context.close()
   rt.releaseGpu()
+  rt.frameLayout = LayoutResult()
+  rt.pressTarget = Element()
   rt.gpuError.setLen(0)
   rt.software.release()
   rt.frameScene = scene.Scene()

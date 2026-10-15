@@ -41,6 +41,7 @@ type
     textStyle: textStack.Style
     textColor: Color
     shapedText: textStack.Layout
+    clickHandler: proc() {.closure.}
     width, height, minW, minH, maxW, maxH, basis: UiLength
     grow, shrink: float32
     pad, margin: array[4, float32]

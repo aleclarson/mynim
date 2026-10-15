@@ -21,10 +21,14 @@ fake.init(AppHandlerImpl(), platform.AppOptions(name: "ui text test"))
 app.initialized = true
 app.handleReady()
 
+var clicks = 0
+
 let content = ui.newContent(proc(ctx: ui.Context) =
   let panel = ctx.box().fill().background(ui.rgb(255, 255, 255))
   discard panel.children(proc() =
     discard ctx.text("Mygo").textSize(32).textColor(ui.rgb(0, 0, 0))
+    discard ctx.box().size(80, 40).background(ui.rgb(180, 180, 180))
+      .onClick(proc() = inc clicks)
   )
 )
 let win = newWindow(WindowOptions(width: 320, height: 120, hidden: true,
@@ -32,6 +36,26 @@ let win = newWindow(WindowOptions(width: 320, height: 120, hidden: true,
 let native = fake.windows[^1].surface
 
 doAssert native.frame()
+doAssert native.send(platform.SurfaceEvent(kind: platform.pointerDown,
+  x: 10, y: 60))
+doAssert native.send(platform.SurfaceEvent(kind: platform.pointerUp,
+  x: 10, y: 60))
+doAssert clicks == 1
+discard native.send(platform.SurfaceEvent(kind: platform.pointerDown,
+  x: 10, y: 60))
+discard native.send(platform.SurfaceEvent(kind: platform.pointerUp,
+  x: 10, y: 60, button: 1))
+doAssert clicks == 1
+discard native.send(platform.SurfaceEvent(kind: platform.pointerDown,
+  x: 10, y: 60))
+discard native.send(platform.SurfaceEvent(kind: platform.pointerUp,
+  x: 200, y: 110))
+doAssert clicks == 1
+discard native.send(platform.SurfaceEvent(kind: platform.pointerDown,
+  x: 10, y: 60, button: 1))
+discard native.send(platform.SurfaceEvent(kind: platform.pointerUp,
+  x: 10, y: 60, button: 1))
+doAssert clicks == 1
 var darkOpaquePixels = 0
 for y in 0..<80:
   for x in 0..<320:
