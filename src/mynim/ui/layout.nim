@@ -121,8 +121,22 @@ proc measureTree(nodes: seq[ElementNode]; natural: var seq[NaturalSize]) =
 
     let width = node.width.resolve(-1)
     let height = node.height.resolve(-1)
-    let rawW = if width.ok: width.value else: contentW + node.contentInsetX
-    let rawH = if height.ok: height.value else: contentH + node.contentInsetY
+    var rawW = if width.ok: width.value else: contentW + node.contentInsetX
+    var rawH = if height.ok: height.value else: contentH + node.contentInsetY
+    if node.aspectRatio > 0:
+      if width.ok and not height.ok:
+        rawH = max(rawW - node.contentInsetX, 0'f32) /
+          node.aspectRatio + node.contentInsetY
+      elif height.ok and not width.ok:
+        rawW = max(rawH - node.contentInsetY, 0'f32) *
+          node.aspectRatio + node.contentInsetX
+      elif not width.ok and not height.ok:
+        let contentWidth = max(rawW - node.contentInsetX, 0'f32)
+        let contentHeight = max(rawH - node.contentInsetY, 0'f32)
+        if contentWidth > 0 or contentHeight <= 0:
+          rawH = contentWidth / node.aspectRatio + node.contentInsetY
+        else:
+          rawW = contentHeight * node.aspectRatio + node.contentInsetX
     natural[slot] = NaturalSize(
       w: node.clampWidth(rawW, -1),
       h: node.clampHeight(rawH, -1))
@@ -194,7 +208,7 @@ proc preferredMain(node: ElementNode; natural: NaturalSize; row: bool;
   if resolved.ok: resolved.value else: intrinsic
 
 proc crossSize(node: ElementNode; natural: NaturalSize; row: bool;
-               base: float32; available, margins: float32;
+               base, mainExtent, available, margins: float32;
                align: Align): float32 =
   let dimension = if row: node.height else: node.width
   let minimum = if row: node.minH else: node.minW
@@ -206,7 +220,13 @@ proc crossSize(node: ElementNode; natural: NaturalSize; row: bool;
   let endMargin = if row: 2 else: 1
   let autoMargin = node.margin[startMargin] == Auto or
     node.margin[endMargin] == Auto
-  if not resolved.ok and align == Align.Stretch and not autoMargin:
+  if not resolved.ok and node.aspectRatio > 0:
+    let mainInset = if row: node.contentInsetX else: node.contentInsetY
+    let crossInset = if row: node.contentInsetY else: node.contentInsetX
+    let mainContent = max(mainExtent - mainInset, 0'f32)
+    value = (if row: mainContent / node.aspectRatio
+             else: mainContent * node.aspectRatio) + crossInset
+  elif not resolved.ok and align == Align.Stretch and not autoMargin:
     value = max(available - margins, 0'f32)
   clampSize(value, minimum, maximum, base)
 
@@ -344,7 +364,7 @@ proc placeNode(nodes: seq[ElementNode]; natural: seq[NaturalSize];
         childNode.selfAlign
     let crossBase = if row: innerH else: innerW
     let crossExtent = childNode.crossSize(childNatural, row,
-      crossBase, crossSize, crossMargins, childAlign)
+      crossBase, sizes[childSlot], crossSize, crossMargins, childAlign)
     let crossFree = crossSize - crossExtent - crossMargins
     var crossOffset: float32
     if childNode.margin[crossStart] == Auto and
@@ -481,6 +501,14 @@ proc height*(e: Element; value: float32): Element =
 proc size*(e: Element; width, height: float32): Element =
   discard e.width(width)
   e.height(height)
+
+proc aspectRatio*(e: Element; value: float32): Element =
+  ## Keeps an element's content proportions as flex layout changes its size.
+  result = e
+  let n = e.node
+  if n != nil:
+    n.aspectRatio = if classify(value) notin {fcNan, fcInf, fcNegInf} and
+        value > 0: value else: 0'f32
 
 proc widthPercent*(e: Element; value: float32): Element =
   e.updateDimension(ldWidth, percent(value))

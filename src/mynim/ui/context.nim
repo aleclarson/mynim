@@ -65,6 +65,7 @@ type
     grayscale: bool
     fit: Fit
     width, height, minW, minH, maxW, maxH, basis: UiLength
+    aspectRatio: float32
     grow, shrink: float32
     pad, margin: array[4, float32]
     gapX, gapY: float32

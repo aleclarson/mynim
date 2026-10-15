@@ -111,6 +111,31 @@ block percentages_and_limits:
   let layout = c.layout(200, 100)
   doAssert layout.bounds(child) == Rect(x: 0, y: 35, w: 80, h: 30)
 
+block aspect_ratio:
+  let c = newContext()
+  var row, fromWidth, rowGrowing, column, fromHeight, columnGrowing: Element
+  c.build(proc(ctx: Context) =
+    row = ctx.row().size(200, 100).alignItems(Align.Start)
+    discard row.children(proc() =
+      fromWidth = ctx.box().width(90).aspectRatio(16'f32 / 9)
+      rowGrowing = ctx.box().aspectRatio(2).grow()
+    )
+    column = ctx.column().size(200, 100).alignItems(Align.Start)
+    discard column.children(proc() =
+      fromHeight = ctx.box().height(50).aspectRatio(2)
+      columnGrowing = ctx.box().aspectRatio(2).grow()
+    )
+  )
+  let layout = c.layout(200, 200)
+  let wide = layout.bounds(fromWidth)
+  doAssert wide.w == 90 and abs(wide.h - 50.625'f32) < 0.01'f32
+  let tall = layout.bounds(fromHeight)
+  doAssert tall.h == 50 and tall.w == 100
+  let rowGrow = layout.bounds(rowGrowing)
+  doAssert rowGrow.w == 110 and rowGrow.h == 55
+  let columnGrow = layout.bounds(columnGrowing)
+  doAssert columnGrow.h == 50 and columnGrow.w == 100
+
 block stale_layout_results:
   let c = newContext()
   var element: Element
