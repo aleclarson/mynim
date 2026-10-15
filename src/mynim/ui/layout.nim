@@ -1398,6 +1398,23 @@ proc clicked*(e: Element): bool =
   let n = e.node
   n != nil and n.clicked
 
+proc focusable*(e: Element): Element =
+  ## Includes this element in sequential keyboard and accessibility focus.
+  result = e
+  let n = e.node
+  if n != nil:
+    n.focusable = true
+
+proc focused*(e: Element): bool =
+  ## Reports whether this element has keyboard focus during the current build.
+  let n = e.node
+  n != nil and n.focused
+
+proc focusVisible*(e: Element): bool =
+  ## Reports whether focus came from keyboard navigation during the current build.
+  let n = e.node
+  n != nil and n.focusVisible
+
 proc updateDimension(e: Element; dimension: LayoutDimension;
                      value: UiLength): Element =
   result = e
@@ -1801,11 +1818,13 @@ proc textItalic*(e: Element; value = true): Element =
     n.textStyle.italic = value
 
 proc onClick*(e: Element; handler: proc() {.closure.}): Element =
-  ## Runs handler when the primary pointer is pressed and released on e.
+  ## Runs handler for pointer clicks and Enter/Space activation on e.
   result = e
   let n = e.node
   if n != nil:
     n.clickHandler = handler
+    if handler != nil:
+      n.focusable = true
 
 proc label*(e: Element; value: string): Element =
   ## Gives an element an accessible name.

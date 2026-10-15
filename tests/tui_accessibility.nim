@@ -46,7 +46,9 @@ doAssert tree.nodes[1].role == platform.roleText
 doAssert tree.nodes[1].label == "Status" and tree.nodes[1].parent == 0
 doAssert tree.nodes[2].role == platform.roleButton
 doAssert tree.nodes[2].label == "Save" and tree.nodes[2].parent == 0
-doAssert tree.nodes[2].actions == platform.actionPress
+doAssert tree.nodes[2].states == platform.accessFocusable
+doAssert tree.nodes[2].actions ==
+  (platform.actionFocus or platform.actionPress)
 doAssert tree.nodes[3].role == platform.roleImage
 doAssert tree.nodes[3].label == "Logo" and tree.nodes[3].parent == 0
 doAssert not saveClicked

@@ -15,7 +15,8 @@ type
     flexLines: seq[FlexLine]
     gridScratch: GridScratch
     flexSizes, flexBases, flexMin, flexMax, flexFactors: seq[float32]
-    hoveredSlots, pressedSlots, clickedSlots: seq[int]
+    hoveredSlots, pressedSlots, clickedSlots, focusedSlots,
+      focusVisibleSlots: seq[int]
     generation: uint32
     parent: int32
     inBuild: bool
@@ -75,7 +76,7 @@ type
   ElementNode = object
     parent, firstChild, lastChild, nextSibling: int32
     row, reverse, wrap, wrapReverse, grid, absolute, alignSet,
-      justifySet: bool
+      justifySet, focusable, focused, focusVisible: bool
     gridCol, gridRow, gridColSpan, gridRowSpan: int
     hasText: bool
     hovered, pressed, clicked: bool
@@ -135,6 +136,8 @@ proc retire(owner: ElementOwner) =
   owner.hoveredSlots = @[]
   owner.pressedSlots = @[]
   owner.clickedSlots = @[]
+  owner.focusedSlots = @[]
+  owner.focusVisibleSlots = @[]
 
 proc node(e: Element): ptr ElementNode =
   if e.owner == nil or e.owner.closed or not e.owner.inBuild or
@@ -159,6 +162,8 @@ proc newElement(c: Context; row: bool): Element =
                          hovered: index in c.owner.hoveredSlots,
                          pressed: index in c.owner.pressedSlots,
                          clicked: index in c.owner.clickedSlots,
+                         focused: index in c.owner.focusedSlots,
+                         focusVisible: index in c.owner.focusVisibleSlots,
                          shrink: 1, justify: Align.Start,
                          align: if row: Align.Center else: Align.Auto,
                          selfAlign: Align.Auto,
