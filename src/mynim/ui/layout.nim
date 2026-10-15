@@ -1287,6 +1287,12 @@ proc scrollExtent(nodes: seq[ElementNode]; rects: seq[Rect]; root: int;
   if not result.finiteUi:
     result = 0
 
+proc physicalScrollX(node: ElementNode; state: ScrollState): float32 =
+  if node.rightToLeft:
+    state.maxX - state.offsetX
+  else:
+    state.offsetX
+
 proc updateScrollRanges(nodes: seq[ElementNode]; rects: seq[Rect];
                         now: MonoTime; reduceMotion: bool): bool =
   for slot in 1..<nodes.len:
@@ -1329,20 +1335,25 @@ proc revealInScrollContainers(nodes: seq[ElementNode]; rects: seq[Rect]) =
       let state = node.scrollState
       if state != nil:
         let view = rects[parent]
-        let oldX = state.offsetX
         let oldY = state.offsetY
         if node.scrollX:
-          state.offsetX = nearestScrollOffset(oldX, box.x, box.w,
+          let oldPhysicalX = node.physicalScrollX(state)
+          let newPhysicalX = nearestScrollOffset(oldPhysicalX,
+            box.x, box.w,
             view.x + node.border[3],
             max(view.x + view.w - node.border[1],
               view.x + node.border[3]), state.maxX)
+          state.offsetX = if node.rightToLeft:
+              state.maxX - newPhysicalX
+            else:
+              newPhysicalX
         if node.scrollY:
           state.offsetY = nearestScrollOffset(oldY, box.y, box.h,
             view.y + node.border[0],
             max(view.y + view.h - node.border[2],
               view.y + node.border[0]), state.maxY)
         if node.scrollX:
-          box.x -= state.offsetX
+          box.x -= node.physicalScrollX(state)
         if node.scrollY:
           box.y -= state.offsetY
       parent = int(node.parent)
@@ -1355,7 +1366,7 @@ proc shiftScrolledRects(nodes: seq[ElementNode]; rects: var seq[Rect]) =
       let state = ancestor.scrollState
       if state != nil:
         if ancestor.scrollX:
-          rects[slot].x -= state.offsetX
+          rects[slot].x -= ancestor.physicalScrollX(state)
         if ancestor.scrollY:
           rects[slot].y -= state.offsetY
       if ancestor.hasFollowScroll:
@@ -1363,7 +1374,7 @@ proc shiftScrolledRects(nodes: seq[ElementNode]; rects: var seq[Rect]) =
         if followSlot >= 0 and followSlot < nodes.len:
           let follow = nodes[followSlot]
           if follow.scrollX and follow.scrollState != nil:
-            rects[slot].x -= follow.scrollState.offsetX
+            rects[slot].x -= follow.physicalScrollX(follow.scrollState)
       parent = int(ancestor.parent)
 
 proc shiftDescendantRectsY(nodes: seq[ElementNode]; rects: var seq[Rect];
@@ -1661,23 +1672,35 @@ proc scrollbars(layout: LayoutResult; slot: int): ScrollbarGeometry =
       0'f32
   if result.vertical:
     let trackHeight = max(box.h - barTop - barBottom - corner, 0'f32)
-    let trackX = box.x + box.w - barRight - width - 6
+    let trackX = if node.rightToLeft:
+        box.x + barLeft
+      else:
+        box.x + box.w - barRight - width - 6
     let trackY = box.y + barTop
     result.verticalTrack = Rect(x: trackX, y: trackY,
       w: width + 6, h: trackHeight)
     let thumb = scrollbarThumb(trackY, trackHeight, viewHeight,
       contentHeight, state.offsetY)
-    result.verticalThumb = Rect(x: box.x + box.w - barRight - width - 3,
+    let thumbX = if node.rightToLeft:
+        box.x + barLeft + 3
+      else:
+        box.x + box.w - barRight - width - 3
+    result.verticalThumb = Rect(x: thumbX,
       y: thumb.position, w: width, h: thumb.length)
   if result.horizontal:
     let trackWidth = max(box.w - barLeft - barRight - corner, 0'f32)
-    let trackX = box.x + barLeft
+    let cornerInset = if node.rightToLeft and result.vertical: corner else: 0'f32
+    let trackX = box.x + barLeft + cornerInset
     let trackY = box.y + box.h - barBottom - width - 6
     result.horizontalTrack = Rect(x: trackX, y: trackY,
       w: trackWidth, h: width + 6)
     let thumb = scrollbarThumb(trackX, trackWidth, viewWidth,
       contentWidth, state.offsetX)
-    result.horizontalThumb = Rect(x: thumb.position,
+    let thumbX = if node.rightToLeft:
+        trackX + trackWidth - (thumb.position - trackX) - thumb.length
+      else:
+        thumb.position
+    result.horizontalThumb = Rect(x: thumbX,
       y: box.y + box.h - barBottom - width - 3,
       w: thumb.length, h: width)
 
@@ -1711,12 +1734,13 @@ proc scrollbarPress(layout: LayoutResult; x, y: float32;
         state.stopScrollMotion()
         if geometry.horizontalThumb.contains(x, y):
           drag = ScrollbarDrag(state: state, horizontal: true,
+            rightToLeft: node.rightToLeft,
             pointerStart: x, offsetStart: state.offsetX,
             rangeStart: state.maxX,
             travel: max(geometry.horizontalTrack.w - 4 -
               geometry.horizontalThumb.w, 0'f32))
           state.scrollbarDragging = true
-        elif x < geometry.horizontalThumb.x:
+        elif (x < geometry.horizontalThumb.x) != node.rightToLeft:
           state.offsetX = max(0'f32, state.offsetX -
             layout.rects[slot].w * 0.9'f32)
         else:
@@ -1733,8 +1757,12 @@ proc dragScrollbar(drag: ScrollbarDrag; x, y: float32): bool =
   state.stopScrollMotion()
   let maxOffset = if drag.horizontal: state.maxX else: state.maxY
   let coordinate = if drag.horizontal: x else: y
+  let movement = if drag.horizontal and drag.rightToLeft:
+      drag.pointerStart - coordinate
+    else:
+      coordinate - drag.pointerStart
   let offset = min(max(drag.offsetStart / drag.rangeStart +
-    (coordinate - drag.pointerStart) / drag.travel, 0'f32), 1'f32) * maxOffset
+    movement / drag.travel, 0'f32), 1'f32) * maxOffset
   if drag.horizontal:
     result = state.offsetX != offset
     state.offsetX = offset
@@ -1767,7 +1795,8 @@ proc scrollAt(layout: LayoutResult; x, y, dx, dy: float32): bool =
       if dx != 0 or dy != 0:
         state.stopScrollMotion()
       if node.scrollX:
-        state.offsetX = min(max(oldX + dx, 0'f32), state.maxX)
+        let deltaX = if node.rightToLeft: -dx else: dx
+        state.offsetX = min(max(oldX + deltaX, 0'f32), state.maxX)
       if node.scrollY:
         state.offsetY = min(max(oldY + dy, 0'f32), state.maxY)
       if state.offsetX != oldX or state.offsetY != oldY:
@@ -1817,7 +1846,8 @@ proc scrollKey(layout: LayoutResult; focusSlot: int;
           page * max(layout.rects[slot].h - 40'f32,
                      layout.rects[slot].h / 2)
       if node.scrollX:
-        state.offsetX = min(max(oldX + dx, 0'f32), state.maxX)
+        let deltaX = if node.rightToLeft: -dx else: dx
+        state.offsetX = min(max(oldX + deltaX, 0'f32), state.maxX)
       if node.scrollY:
         state.offsetY = min(max(oldY + stepY, 0'f32), state.maxY)
       if state.offsetX != oldX or state.offsetY != oldY:

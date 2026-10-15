@@ -522,6 +522,8 @@ proc renderFrame(rt: Runtime; presentFrame = true) =
   if rt.themeDirty:
     rt.updateSystemTheme()
   rt.context.theme = rt.systemTheme
+  rt.context.rightToLeft = rt.conn.rightToLeft != nil and
+    rt.conn.rightToLeft()
   rt.context.themeEnabled = true
   rt.context.themeBackground = false
 

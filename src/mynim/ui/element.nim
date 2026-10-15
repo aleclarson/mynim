@@ -156,7 +156,7 @@ type
 
   ScrollbarDrag = object
     state: ScrollState
-    horizontal: bool
+    horizontal, rightToLeft: bool
     pointerStart, offsetStart, rangeStart, travel: float32
 
 const

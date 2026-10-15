@@ -6,6 +6,7 @@ type
   ContextObj = object
     owner: ElementOwner
     theme: Theme
+    rightToLeft: bool
     themeEnabled, themeBackground: bool
 
   ElementOwner = ref object
@@ -85,7 +86,7 @@ type
     row, reverse, wrap, wrapReverse, grid, absolute, alignSet,
       justifySet, focusable, focused, focusVisible, focusRingDisabled,
       scrollX, scrollY,
-      revealInScroll: bool
+      revealInScroll, rightToLeft: bool
     clipX, clipY, hasFollowScroll: bool
     followScrollSlot: int32
     gridCol, gridRow, gridColSpan, gridRowSpan: int
@@ -235,6 +236,8 @@ proc newElement(c: Context; row: bool): Element =
   let index = int(slot)
   let node = ElementNode(parent: c.owner.parent, firstChild: -1,
                          lastChild: -1, nextSibling: -1, row: row,
+                         rightToLeft:
+                           c.owner.nodes[int(c.owner.parent)].rightToLeft,
                          hovered: index in c.owner.hoveredSlots,
                          pressed: index in c.owner.pressedSlots,
                          clicked: index in c.owner.clickedSlots,
@@ -389,6 +392,7 @@ proc build*(c: Context; view: proc(c: Context) {.closure.}) =
   c.owner.paintSlots.setLen(0)
   c.owner.nodes.add(ElementNode(parent: -1, firstChild: -1,
                                 lastChild: -1, nextSibling: -1,
+                                rightToLeft: c.rightToLeft,
                                 background: if c.themeBackground:
                                     c.theme.background
                                   else:
