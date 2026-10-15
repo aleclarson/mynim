@@ -11,6 +11,13 @@ type
     SpaceEvenly
     Auto ## Used internally when no alignment was specified.
 
+  TrackKind = enum
+    trackFit, trackFixed, trackFr
+
+  Track* = object ## A fixed, fractional, or content-fitting grid track.
+    kind: TrackKind
+    value: float32
+
   Rect* = object ## A rectangle in device independent pixels.
     x*, y*, w*, h*: float32
 

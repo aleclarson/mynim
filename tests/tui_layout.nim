@@ -1,4 +1,4 @@
-import std/assertions
+import std/[assertions, strutils]
 
 import mynim/ui
 
@@ -217,6 +217,162 @@ block flex_wrap:
   doAssert constrainedLayout.bounds(measuredParent).h == 33
   doAssert constrainedLayout.bounds(constrainedSecond).y ==
     constrainedLayout.bounds(constrainedFirst).y + 13
+
+block grid_layout:
+  let c = newContext()
+  var grid, a, b, header, d, e: Element
+  var tracks, fixedItem, fitItem, oneFr, twoFr: Element
+  var aligned, centered, selfStart, autoMargin: Element
+  var spanningGrid, spanRows, rowTwoColumnTwo: Element
+  var fittingRow, fittingGrid, fitLeft, fitRight: Element
+  var stretchingGrid, stretchLeft, stretchRight: Element
+  c.build(proc(ctx: Context) =
+    grid = ctx.grid().columns(3).gap(10).padding(5).width(320)
+    discard grid.children(proc() =
+      a = ctx.box().height(20)
+      b = ctx.box().height(40).columnSpan(2)
+      header = ctx.box().height(10).columnSpan(-1)
+      d = ctx.box().height(10).columnStart(3).rowStart(3)
+      e = ctx.box().height(10)
+    )
+    tracks = ctx.grid().columnTracks(fixed(100), fitContent(), fr(), fr(2))
+      .gapX(10).width(500)
+    discard tracks.children(proc() =
+      fixedItem = ctx.box().size(100, 10)
+      fitItem = ctx.box().size(60, 10)
+      oneFr = ctx.box().height(10)
+      twoFr = ctx.box().height(10)
+    )
+    aligned = ctx.grid().columns(2).rowTracks(fixed(50)).width(200)
+      .justifyItems(Align.Center).alignItems(Align.End)
+    discard aligned.children(proc() =
+      centered = ctx.box().size(20, 10)
+      selfStart = ctx.box().size(20, 10).justifySelf(Align.Start)
+        .alignSelf(Align.Start)
+      autoMargin = ctx.box().size(20, 10).marginX(Auto)
+    )
+    spanningGrid = ctx.grid().columns(2)
+      .rowTracks(fixed(30), fixed(40)).size(100, 100)
+    discard spanningGrid.children(proc() =
+      spanRows = ctx.box().columnStart(1).rowSpan(-1)
+      rowTwoColumnTwo = ctx.box().columnStart(2).rowStart(2).size(10, 10)
+    )
+    fittingRow = ctx.row()
+    discard fittingRow.children(proc() =
+      fittingGrid = ctx.grid().columnTracks(fitContent(), fitContent())
+      discard fittingGrid.children(proc() =
+        fitLeft = ctx.box().size(30, 10)
+        fitRight = ctx.box().size(50, 10)
+      )
+    )
+    stretchingGrid = ctx.grid().columnTracks(fitContent(), fitContent())
+      .width(200)
+    discard stretchingGrid.children(proc() =
+      stretchLeft = ctx.box().height(10).minWidth(30)
+      stretchRight = ctx.box().height(10).minWidth(50)
+    )
+  )
+  let layout = c.layout(600, 400)
+  let column = (310'f32 - 20'f32) / 3'f32
+  doAssert abs(layout.bounds(a).x - 5) < 0.01'f32
+  doAssert abs(layout.bounds(a).y - 5) < 0.01'f32
+  doAssert abs(layout.bounds(a).w - column) < 0.01'f32
+  doAssert abs(layout.bounds(b).x - (5 + column + 10)) < 0.01'f32
+  doAssert abs(layout.bounds(b).w - (2 * column + 10)) < 0.01'f32
+  doAssert layout.bounds(header).y == 55
+  doAssert layout.bounds(header).w == 310
+  doAssert layout.bounds(d).x == 5 + 2 * column + 20
+  doAssert layout.bounds(d).y == 75
+  doAssert layout.bounds(e).x == 5
+  doAssert layout.bounds(e).y == 75
+  doAssert layout.bounds(fixedItem).w == 100
+  doAssert layout.bounds(fitItem).x == 110
+  doAssert layout.bounds(fitItem).w == 60
+  doAssert abs(layout.bounds(oneFr).w - 310'f32 / 3'f32) < 0.01'f32
+  doAssert abs(layout.bounds(twoFr).w - 620'f32 / 3'f32) < 0.01'f32
+  doAssert layout.bounds(centered).x == layout.bounds(aligned).x + 40
+  doAssert layout.bounds(centered).y == layout.bounds(aligned).y + 40
+  doAssert layout.bounds(selfStart).x == layout.bounds(aligned).x + 100
+  doAssert layout.bounds(selfStart).y == layout.bounds(aligned).y
+  doAssert layout.bounds(autoMargin).x == layout.bounds(aligned).x + 40
+  doAssert layout.bounds(spanRows).h == 70
+  doAssert layout.bounds(rowTwoColumnTwo).x ==
+    layout.bounds(spanningGrid).x + 50
+  doAssert layout.bounds(rowTwoColumnTwo).y ==
+    layout.bounds(spanningGrid).y + 30
+  doAssert layout.bounds(fittingGrid).w == 80
+  doAssert layout.bounds(fitRight).x == layout.bounds(fittingGrid).x + 30
+  doAssert layout.bounds(stretchLeft).w == 90
+  doAssert layout.bounds(stretchRight).w == 110
+
+block nested_grid_layout:
+  let c = newContext()
+  var outer, inner, nestedFirst, nestedSecond, following: Element
+  c.build(proc(ctx: Context) =
+    outer = ctx.grid().columns(2).width(200)
+    discard outer.children(proc() =
+      inner = ctx.grid().columns(2).gapX(4)
+      discard inner.children(proc() =
+        nestedFirst = ctx.box().size(20, 10)
+        nestedSecond = ctx.box().size(30, 12)
+      )
+      following = ctx.box().size(10, 10)
+    )
+  )
+  let layout = c.layout(200, 100)
+  doAssert layout.bounds(nestedFirst).w == 20
+  doAssert layout.bounds(nestedSecond).x ==
+    layout.bounds(inner).x + 52
+  doAssert layout.bounds(following).x == layout.bounds(outer).x + 100
+  doAssert layout.bounds(following).y == layout.bounds(outer).y
+
+block grid_rows_remeasure_wrapped_text:
+  let c = newContext()
+  var grid, shortText, wrappedText, following: Element
+  c.build(proc(ctx: Context) =
+    grid = ctx.grid().columns(2).gapY(4).width(200)
+    discard grid.children(proc() =
+      shortText = ctx.text("one").alignSelf(Align.Start)
+      wrappedText = ctx.text(repeat("word ", 30)).alignSelf(Align.Start)
+      following = ctx.box().height(25)
+    )
+  )
+  let layout = c.layout(200, 400)
+  doAssert layout.bounds(wrappedText).h > layout.bounds(shortText).h
+  doAssert layout.bounds(following).y >=
+    layout.bounds(wrappedText).y + layout.bounds(wrappedText).h + 4
+  doAssert layout.bounds(grid).h ==
+    layout.bounds(following).y + 25 - layout.bounds(grid).y
+
+block grid_track_distribution_in_spans:
+  let c = newContext()
+  var columns, wide, rows, tall: Element
+  c.build(proc(ctx: Context) =
+    columns = ctx.row().justify(Align.SpaceBetween)
+      .columnTracks(fixed(20), fixed(20)).width(200).grid()
+    discard columns.children(proc() =
+      wide = ctx.box().height(10).columnSpan(2)
+    )
+    rows = ctx.row().alignItems(Align.Center)
+      .rowTracks(fixed(10), fixed(10)).gapY(4).height(100)
+      .alignContent(Align.SpaceBetween).grid()
+    discard rows.children(proc() = tall = ctx.box().size(10, 10).rowSpan(-1))
+  )
+  let layout = c.layout(200, 200)
+  doAssert layout.bounds(wide).w == 200
+  doAssert layout.bounds(tall).h == 10
+  doAssert layout.bounds(tall).y == layout.bounds(rows).y + 45
+
+block grid_placement_bounds:
+  let c = newContext()
+  c.build(proc(ctx: Context) =
+    let grid = ctx.grid().columns(32_767)
+    discard grid.children(proc() =
+      discard ctx.box().columnStart(high(int)).rowStart(high(int))
+    )
+  )
+  doAssertRaises ValueError:
+    discard c.layout(100, 100)
 
 block absolute_and_relative_positioning:
   let c = newContext()

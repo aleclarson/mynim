@@ -3,6 +3,10 @@
 type LayoutDimension = enum
   ldWidth, ldHeight, ldMinWidth, ldMinHeight, ldMaxWidth, ldMaxHeight
 
+const
+  MaxGridTrackIndex = high(int16).int
+  MaxGridOccupiedCells = 1_048_576
+
 proc pixels(value: float32): UiLength =
   UiLength(value: value, kind: lengthPixels)
 
@@ -76,8 +80,447 @@ proc shapeTextToBounds(nodes: var seq[ElementNode]; rects: seq[Rect]): bool =
       node.shapedText = system.layout(params)
       result = true
 
+proc finiteUi(value: float32): bool =
+  classify(value) notin {fcNan, fcInf, fcNegInf}
+
+proc checkGridCellCount(columns, rows, base: int) =
+  if columns < 0 or rows < 0 or base < 0 or
+      base > MaxGridOccupiedCells or
+      (rows > 0 and columns > (MaxGridOccupiedCells - base) div rows):
+    raise newException(ValueError,
+      "ui: grid placement exceeds 1,048,576 occupied cells")
+
+proc gridCellOccupied(scratch: GridScratch; base, columns, row,
+                      column: int): bool =
+  let index = base + row * columns + column
+  index < scratch.occupied.len and scratch.occupied[index]
+
+proc gridCellFits(scratch: GridScratch; base, columns, row, column,
+                  rowSpan, columnSpan: int): bool =
+  if row < 0 or column < 0 or column + columnSpan > columns:
+    return false
+  for r in row ..< row + rowSpan:
+    for c in column ..< column + columnSpan:
+      if scratch.gridCellOccupied(base, columns, r, c):
+        return false
+  true
+
+proc markGridCell(scratch: var GridScratch; base, columns, itemIndex,
+                  row, column: int; rowCount: var int) =
+  let item = scratch.items[itemIndex]
+  checkGridCellCount(columns, row + item.rowSpan, base)
+  let needed = base + (row + item.rowSpan) * columns
+  if needed > scratch.occupied.len:
+    let oldLength = scratch.occupied.len
+    scratch.occupied.setLen(needed)
+    for index in oldLength ..< needed:
+      scratch.occupied[index] = false
+  scratch.items[itemIndex].row = row
+  scratch.items[itemIndex].col = column
+  for r in row ..< row + item.rowSpan:
+    for c in column ..< column + item.colSpan:
+      scratch.occupied[base + r * columns + c] = true
+  rowCount = max(rowCount, row + item.rowSpan)
+
+proc gridPlaceItems(nodes: seq[ElementNode]; parent: int;
+                    scratch: var GridScratch): tuple[first, pastLast,
+                    columns, rows: int] =
+  let grid = nodes[parent]
+  result.first = scratch.items.len
+  result.columns = max(grid.cols.len, 1)
+  result.rows = grid.rows.len
+  var child = int(grid.firstChild)
+  while child >= 0:
+    let node = nodes[child]
+    if not node.absolute:
+      var item = GridItem(slot: child,
+        col: (if node.gridCol > 0: node.gridCol - 1 else: -1),
+        row: (if node.gridRow > 0: node.gridRow - 1 else: -1),
+        colSpan: node.gridColSpan, rowSpan: node.gridRowSpan)
+      if item.colSpan < 0:
+        item.colSpan = max(grid.cols.len - max(item.col, 0), 1)
+      elif item.colSpan == 0:
+        item.colSpan = 1
+      if item.rowSpan < 0:
+        item.rowSpan = max(grid.rows.len - max(item.row, 0), 1)
+      elif item.rowSpan == 0:
+        item.rowSpan = 1
+      result.columns = max(result.columns,
+        max(item.col, 0) + item.colSpan)
+      scratch.items.add(item)
+    child = int(node.nextSibling)
+  result.pastLast = scratch.items.len
+
+  for index in result.first ..< result.pastLast:
+    let item = scratch.items[index]
+    checkGridCellCount(item.colSpan, item.rowSpan, 0)
+    if item.row >= 0:
+      checkGridCellCount(result.columns, item.row + item.rowSpan, 0)
+
+  let cellsBase = scratch.occupied.len
+  for index in result.first ..< result.pastLast:
+    let item = scratch.items[index]
+    if item.row >= 0 and item.col >= 0:
+      scratch.markGridCell(cellsBase, result.columns, index,
+        item.row, item.col, result.rows)
+
+  for index in result.first ..< result.pastLast:
+    let item = scratch.items[index]
+    if item.row >= 0 and item.col < 0:
+      var column = 0
+      while column + item.colSpan <= result.columns and
+          not scratch.gridCellFits(cellsBase, result.columns, item.row,
+            column, item.rowSpan, item.colSpan):
+        inc column
+      if column + item.colSpan > result.columns:
+        column = max(result.columns - item.colSpan, 0)
+      scratch.markGridCell(cellsBase, result.columns, index,
+        item.row, column, result.rows)
+
+  var cursorRow, cursorColumn: int
+  for index in result.first ..< result.pastLast:
+    let item = scratch.items[index]
+    if item.row < 0:
+      if item.col >= 0:
+        if item.col < cursorColumn:
+          inc cursorRow
+        cursorColumn = item.col
+        var row = cursorRow
+        while not scratch.gridCellFits(cellsBase, result.columns, row,
+            item.col, item.rowSpan, item.colSpan):
+          inc row
+        cursorRow = row
+        scratch.markGridCell(cellsBase, result.columns, index,
+          row, item.col, result.rows)
+      else:
+        var row = cursorRow
+        var column = cursorColumn
+        while not scratch.gridCellFits(cellsBase, result.columns, row,
+            column, item.rowSpan, item.colSpan):
+          if column + item.colSpan <= result.columns:
+            inc column
+          else:
+            inc row
+            column = 0
+        scratch.markGridCell(cellsBase, result.columns, index,
+          row, column, result.rows)
+        cursorRow = row
+        cursorColumn = column + item.colSpan
+  scratch.occupied.setLen(cellsBase)
+
+proc gridTrack(tracks: seq[Track]; index: int): Track =
+  if index < tracks.len: tracks[index] else: Track(kind: trackFit)
+
+proc gridTrackCount(tracks: seq[Track]; first, span: int;
+                    kind: TrackKind): int =
+  for index in first ..< first + span:
+    if tracks.gridTrack(index).kind == kind:
+      inc result
+
+proc sizeGridTracks(tracks: seq[Track]; count: int; available, gap: float32;
+                    scratch: GridScratch; contributionFirst,
+                    contributionPast: int; minContent, stretch: bool;
+                    values: var seq[float32]; valuesFirst: int) =
+  let limitFirst = valuesFirst + count
+  values.setLen(max(values.len, valuesFirst + 2 * count))
+  for index in 0 ..< count:
+    let track = tracks.gridTrack(index)
+    values[valuesFirst + index] = if track.kind == trackFixed:
+        track.value
+      else:
+        0'f32
+    values[limitFirst + index] = values[valuesFirst + index]
+
+  for itemIndex in contributionFirst ..< contributionPast:
+    let contribution = scratch.contributions[itemIndex]
+    if contribution.span == 1 and
+        tracks.gridTrack(contribution.start).kind == trackFit:
+      let sizeIndex = valuesFirst + contribution.start
+      let limitIndex = limitFirst + contribution.start
+      values[sizeIndex] = max(values[sizeIndex], contribution.minimum)
+      values[limitIndex] = max(values[limitIndex], contribution.maximum)
+
+  for itemIndex in contributionFirst ..< contributionPast:
+    let contribution = scratch.contributions[itemIndex]
+    let fractionalCount = tracks.gridTrackCount(contribution.start,
+      contribution.span, trackFr)
+    if contribution.span > 1 and fractionalCount == 0:
+      let fitCount = tracks.gridTrackCount(contribution.start,
+        contribution.span, trackFit)
+      if fitCount > 0:
+        var sum, limit: float32
+        for index in contribution.start ..<
+            contribution.start + contribution.span:
+          sum += values[valuesFirst + index]
+          limit += max(values[limitFirst + index], values[valuesFirst + index])
+        sum += gap * float32(contribution.span - 1)
+        limit += gap * float32(contribution.span - 1)
+        for index in contribution.start ..<
+            contribution.start + contribution.span:
+          if tracks.gridTrack(index).kind == trackFit:
+            if contribution.minimum > sum:
+              values[valuesFirst + index] +=
+                (contribution.minimum - sum) / float32(fitCount)
+            if contribution.maximum > limit:
+              values[limitFirst + index] =
+                max(values[limitFirst + index], values[valuesFirst + index]) +
+                (contribution.maximum - limit) / float32(fitCount)
+
+  var fractionalSum: float32
+  for index in 0 ..< count:
+    values[limitFirst + index] = max(values[limitFirst + index],
+      values[valuesFirst + index])
+    let track = tracks.gridTrack(index)
+    if track.kind == trackFr:
+      fractionalSum += track.value
+  if minContent:
+    return
+
+  let gaps = gap * float32(max(count - 1, 0))
+  if not finiteUi(available):
+    var unit: float32
+    for itemIndex in contributionFirst ..< contributionPast:
+      let contribution = scratch.contributions[itemIndex]
+      var fractional, other: float32
+      for index in contribution.start ..< contribution.start +
+          contribution.span:
+        let track = tracks.gridTrack(index)
+        if track.kind == trackFr:
+          fractional += track.value
+        else:
+          other += values[limitFirst + index]
+      if fractional > 0:
+        unit = max(unit, (contribution.maximum - other -
+          gap * float32(contribution.span - 1)) / fractional)
+    for index in 0 ..< count:
+      let track = tracks.gridTrack(index)
+      values[valuesFirst + index] = if track.kind == trackFr:
+          unit * track.value
+        else:
+          values[limitFirst + index]
+    return
+
+  var free = available - gaps
+  for index in 0 ..< count:
+    free -= values[valuesFirst + index]
+  while free > 0.01'f32:
+    var growing: int
+    for index in 0 ..< count:
+      if tracks.gridTrack(index).kind == trackFit and
+          values[valuesFirst + index] < values[limitFirst + index]:
+        inc growing
+    if growing == 0:
+      break
+    let share = free / float32(growing)
+    for index in 0 ..< count:
+      if tracks.gridTrack(index).kind == trackFit and
+          values[valuesFirst + index] < values[limitFirst + index]:
+        let delta = min(share,
+          values[limitFirst + index] - values[valuesFirst + index])
+        values[valuesFirst + index] += delta
+        free -= delta
+  free = max(free, 0'f32)
+  if fractionalSum > 0:
+    let unit = free / max(fractionalSum, 1'f32)
+    for index in 0 ..< count:
+      let track = tracks.gridTrack(index)
+      if track.kind == trackFr:
+        values[valuesFirst + index] = unit * track.value
+    return
+  if stretch and free > 0:
+    let fitCount = tracks.gridTrackCount(0, count, trackFit)
+    if fitCount > 0:
+      for index in 0 ..< count:
+        if tracks.gridTrack(index).kind == trackFit:
+          values[valuesFirst + index] += free / float32(fitCount)
+
+proc gridItemAlign(grid, item: ElementNode; horizontal: bool): Align =
+  if horizontal:
+    if item.justifySelf != Align.Auto:
+      return item.justifySelf
+    if grid.justifyItems != Align.Auto:
+      return grid.justifyItems
+  else:
+    if item.selfAlign != Align.Auto:
+      return item.selfAlign
+    if grid.align != Align.Auto:
+      return grid.align
+  Align.Stretch
+
+proc gridCellDimension(node: ElementNode; natural: NaturalSize;
+                       horizontal: bool; area, base, mainExtent: float32;
+                       align: Align): tuple[size, offset: float32] =
+  let dimension = if horizontal: node.width else: node.height
+  let minimum = if horizontal: node.minW else: node.minH
+  let maximum = if horizontal: node.maxW else: node.maxH
+  let marginStartIndex = if horizontal: 3 else: 0
+  let marginEndIndex = if horizontal: 1 else: 2
+  let marginStart = marginValue(node.margin[marginStartIndex])
+  let marginEnd = marginValue(node.margin[marginEndIndex])
+  let margins = marginStart + marginEnd
+  let autoStart = node.margin[marginStartIndex] == Auto
+  let autoEnd = node.margin[marginEndIndex] == Auto
+  let resolved = dimension.resolve(base)
+  if resolved.ok:
+    result.size = clampSize(resolved.value, minimum, maximum, base)
+  elif not horizontal and node.aspectRatio > 0:
+    result.size = clampSize(
+      max(mainExtent - node.contentInsetX, 0'f32) / node.aspectRatio +
+        node.contentInsetY, minimum, maximum, base)
+  elif align == Align.Stretch and not autoStart and not autoEnd and
+      (horizontal or node.aspectRatio <= 0):
+    result.size = clampSize(max(area - margins, 0'f32),
+      minimum, maximum, base)
+  else:
+    let naturalSize = if horizontal: natural.w else: natural.h
+    result.size = clampSize(min(naturalSize, max(area - margins, 0'f32)),
+      minimum, maximum, base)
+
+  let free = area - result.size - margins
+  result.offset = marginStart
+  if autoStart and autoEnd:
+    result.offset += max(free, 0'f32) / 2
+  elif autoStart:
+    result.offset += max(free, 0'f32)
+  elif not autoEnd:
+    case align
+    of Align.Center:
+      result.offset += free / 2
+    of Align.End:
+      result.offset += free
+    else:
+      discard
+
+proc gridArea(values: seq[float32]; first, start, span: int;
+              gap: float32): float32 =
+  result = gap * float32(span - 1)
+  for index in start ..< start + span:
+    result += values[first + index]
+
+proc gridColumns(nodes: seq[ElementNode]; natural: seq[NaturalSize];
+                 parent: int; scratch: var GridScratch; first, pastLast,
+                 columns, valuesFirst: int; available, base: float32) =
+  let grid = nodes[parent]
+  let contributionFirst = scratch.contributions.len
+  for itemIndex in first ..< pastLast:
+    let item = scratch.items[itemIndex]
+    let node = nodes[item.slot]
+    let width = node.width.resolve(base)
+    let contentWidth = if width.ok:
+        node.clampWidth(width.value, base)
+      else:
+        natural[item.slot].w
+    scratch.contributions.add(GridContribution(start: item.col,
+      span: item.colSpan, minimum: contentWidth + node.marginX,
+      maximum: contentWidth + node.marginX))
+  sizeGridTracks(grid.cols, columns, available, grid.gapX,
+    scratch, contributionFirst, scratch.contributions.len, false,
+    grid.justify == Align.Auto, scratch.values, valuesFirst)
+  scratch.contributions.setLen(contributionFirst)
+
+proc justifyOffsets(justify: Align; free: float32; count: int):
+    tuple[start, between: float32] =
+  if count <= 0:
+    return (0'f32, 0'f32)
+  case justify
+  of Align.Center:
+    (free / 2, 0'f32)
+  of Align.End:
+    (free, 0'f32)
+  of Align.SpaceBetween:
+    if count > 1:
+      (0'f32, free / float32(count - 1))
+    else:
+      (0'f32, 0'f32)
+  of Align.SpaceAround:
+    (free / float32(count) / 2, free / float32(count))
+  of Align.SpaceEvenly:
+    (free / float32(count + 1), free / float32(count + 1))
+  else:
+    (0'f32, 0'f32)
+
+proc gridRows(nodes: seq[ElementNode]; natural: seq[NaturalSize]; parent: int;
+              scratch: var GridScratch; first, pastLast, columns, rows,
+              columnValues, rowValues: int; available, widthBase,
+              heightBase, columnGap: float32) =
+  let grid = nodes[parent]
+  let contributionFirst = scratch.contributions.len
+  for itemIndex in first ..< pastLast:
+    let item = scratch.items[itemIndex]
+    let node = nodes[item.slot]
+    let areaWidth = scratch.values.gridArea(columnValues, item.col,
+      item.colSpan, columnGap)
+    let itemWidth = node.gridCellDimension(natural[item.slot], true,
+      areaWidth, widthBase, 0'f32, grid.gridItemAlign(node, true)).size
+    let height = node.height.resolve(heightBase)
+    let itemHeight = if height.ok:
+        node.clampHeight(height.value, heightBase)
+      elif node.aspectRatio > 0:
+        node.clampHeight(
+          max(itemWidth - node.contentInsetX, 0'f32) / node.aspectRatio +
+            node.contentInsetY, heightBase)
+      else:
+        natural[item.slot].h
+    scratch.contributions.add(GridContribution(start: item.row,
+      span: item.rowSpan, minimum: itemHeight + node.marginY,
+      maximum: itemHeight + node.marginY))
+  sizeGridTracks(grid.rows, rows, available, grid.gapY, scratch,
+    contributionFirst, scratch.contributions.len, false,
+    grid.alignContent == Align.Auto, scratch.values, rowValues)
+  scratch.contributions.setLen(contributionFirst)
+
+proc measureGrid(nodes: seq[ElementNode]; natural: seq[NaturalSize];
+                 parent: int; constraints: seq[Rect];
+                 scratch: var GridScratch): tuple[w, h: float32] =
+  let grid = nodes[parent]
+  let itemsFirst = scratch.items.len
+  let valuesFirst = scratch.values.len
+  let placed = gridPlaceItems(nodes, parent, scratch)
+  let width = grid.width.resolve(-1)
+  let height = grid.height.resolve(-1)
+  let outerWidth = if parent < constraints.len: constraints[parent].w
+    elif width.ok: width.value
+    else: Inf.float32
+  let outerHeight = if parent < constraints.len: constraints[parent].h
+    elif height.ok: height.value
+    else: Inf.float32
+  let widthBase = if finiteUi(outerWidth):
+      max(outerWidth - grid.contentInsetX, 0'f32)
+    else:
+      -1'f32
+  let heightBase = if finiteUi(outerHeight):
+      max(outerHeight - grid.contentInsetY, 0'f32)
+    else:
+      -1'f32
+  let columnAvailable = if widthBase >= 0: widthBase else: Inf.float32
+  let rowAvailable = if heightBase >= 0: heightBase else: Inf.float32
+  let columnsFirst = scratch.values.len
+  gridColumns(nodes, natural, parent, scratch, placed.first,
+    placed.pastLast, placed.columns, columnsFirst, columnAvailable, widthBase)
+  var usedWidth = grid.gapX * float32(max(placed.columns - 1, 0))
+  for index in 0 ..< placed.columns:
+    usedWidth += scratch.values[columnsFirst + index]
+  let columnOffsets = if finiteUi(columnAvailable) and
+      grid.justify != Align.Auto:
+    justifyOffsets(grid.justify,
+      max(columnAvailable - usedWidth, 0'f32), placed.columns)
+  else:
+    (start: 0'f32, between: 0'f32)
+  let rowsFirst = scratch.values.len
+  gridRows(nodes, natural, parent, scratch, placed.first, placed.pastLast,
+    placed.columns, placed.rows, columnsFirst, rowsFirst, rowAvailable,
+    widthBase, heightBase, grid.gapX + columnOffsets.between)
+  result.w = grid.gapX * float32(max(placed.columns - 1, 0))
+  for index in 0 ..< placed.columns:
+    result.w += scratch.values[columnsFirst + index]
+  result.h = grid.gapY * float32(max(placed.rows - 1, 0))
+  for index in 0 ..< placed.rows:
+    result.h += scratch.values[rowsFirst + index]
+  scratch.items.setLen(itemsFirst)
+  scratch.values.setLen(valuesFirst)
+
 proc measureTree(nodes: seq[ElementNode]; natural: var seq[NaturalSize];
-                 constraints: seq[Rect] = @[]): bool =
+                 scratch: var GridScratch; constraints: seq[Rect] = @[]): bool =
   natural.setLen(nodes.len)
   if nodes.len == 0:
     return
@@ -100,7 +543,7 @@ proc measureTree(nodes: seq[ElementNode]; natural: var seq[NaturalSize];
     while child >= 0:
       let childNode = nodes[child]
       let childSize = natural[child]
-      if not childNode.absolute:
+      if not childNode.absolute and not node.grid:
         if node.row:
           let basis = childNode.basis.resolve(-1)
           let mainW = if basis.ok:
@@ -120,11 +563,16 @@ proc measureTree(nodes: seq[ElementNode]; natural: var seq[NaturalSize];
         inc childCount
       child = int(childNode.nextSibling)
 
+    if node.grid:
+      let gridNatural = measureGrid(nodes, natural, slot, constraints, scratch)
+      contentW = max(contentW, gridNatural.w)
+      contentH = max(contentH, gridNatural.h)
+
     var measuredMain = (if node.row: node.width else: node.height).resolve(-1)
     if slot < constraints.len:
       measuredMain = (value: (if node.row: constraints[slot].w
         else: constraints[slot].h), ok: true)
-    if node.wrap and measuredMain.ok and childCount > 0:
+    if node.wrap and not node.grid and measuredMain.ok and childCount > 0:
       let mainInset = if node.row: node.contentInsetX else:
         node.contentInsetY
       let mainLimit = max(measuredMain.value - mainInset, 0'f32)
@@ -218,27 +666,6 @@ proc measureTree(nodes: seq[ElementNode]; natural: var seq[NaturalSize];
       result = true
     natural[slot] = measured
 
-proc justifyOffsets(justify: Align; free: float32; count: int):
-    tuple[start, between: float32] =
-  if count <= 0:
-    return (0'f32, 0'f32)
-  case justify
-  of Align.Center:
-    (free / 2, 0'f32)
-  of Align.End:
-    (free, 0'f32)
-  of Align.SpaceBetween:
-    if count > 1:
-      (0'f32, free / float32(count - 1))
-    else:
-      (0'f32, 0'f32)
-  of Align.SpaceAround:
-    (free / float32(count) / 2, free / float32(count))
-  of Align.SpaceEvenly:
-    (free / float32(count + 1), free / float32(count + 1))
-  else:
-    (0'f32, 0'f32)
-
 proc distribute(nodes: seq[ElementNode]; children: seq[int];
                 first, pastLast: int;
                 sizes, minimum, maximum, factors: var seq[float32];
@@ -309,13 +736,28 @@ proc crossSize(node: ElementNode; natural: NaturalSize; row: bool;
 proc placeAbsoluteChild(nodes: seq[ElementNode]; natural: seq[NaturalSize];
                         rects: var seq[Rect]; sizes, bases, minimum, maximum,
                         factors: var seq[float32]; flexSlots: var seq[int];
-                        flexLines: var seq[FlexLine]; parentSlot,
+                        flexLines: var seq[FlexLine]; gridScratch: var GridScratch;
+                        parentSlot,
                         childSlot: int; bounds: Rect)
 
 proc placeNode(nodes: seq[ElementNode]; natural: seq[NaturalSize];
                rects: var seq[Rect]; sizes, bases, minimum, maximum,
                factors: var seq[float32]; flexSlots: var seq[int];
-               flexLines: var seq[FlexLine]; slot: int; bounds: Rect) =
+               flexLines: var seq[FlexLine]; gridScratch: var GridScratch;
+               slot: int; bounds: Rect)
+
+proc placeGridChildren(nodes: seq[ElementNode]; natural: seq[NaturalSize];
+                       rects: var seq[Rect]; sizes, bases, minimum, maximum,
+                       factors: var seq[float32]; flexSlots: var seq[int];
+                       flexLines: var seq[FlexLine];
+                       gridScratch: var GridScratch; parent: int;
+                       bounds: Rect)
+
+proc placeNode(nodes: seq[ElementNode]; natural: seq[NaturalSize];
+               rects: var seq[Rect]; sizes, bases, minimum, maximum,
+               factors: var seq[float32]; flexSlots: var seq[int];
+               flexLines: var seq[FlexLine]; gridScratch: var GridScratch;
+               slot: int; bounds: Rect) =
   rects[slot] = bounds
   let node = nodes[slot]
   var child = int(node.firstChild)
@@ -324,6 +766,11 @@ proc placeNode(nodes: seq[ElementNode]; natural: seq[NaturalSize];
     inc totalChildren
     child = int(nodes[child].nextSibling)
   if totalChildren == 0:
+    return
+
+  if node.grid:
+    placeGridChildren(nodes, natural, rects, sizes, bases, minimum, maximum,
+      factors, flexSlots, flexLines, gridScratch, slot, bounds)
     return
 
   let slotsBase = flexSlots.len
@@ -589,7 +1036,7 @@ proc placeNode(nodes: seq[ElementNode]; natural: seq[NaturalSize];
       elif bottom.ok:
         childRect.y -= bottom.value
       placeNode(nodes, natural, rects, sizes, bases, minimum, maximum,
-        factors, flexSlots, flexLines, childSlot, childRect)
+        factors, flexSlots, flexLines, gridScratch, childSlot, childRect)
       position += mainBefore + sizes[childSlot] + mainAfter + gap +
         offsets.between
       inc itemIndex
@@ -602,15 +1049,133 @@ proc placeNode(nodes: seq[ElementNode]; natural: seq[NaturalSize];
     let childNode = nodes[childSlot]
     if childNode.absolute:
       placeAbsoluteChild(nodes, natural, rects, sizes, bases, minimum,
-        maximum, factors, flexSlots, flexLines, slot, childSlot, bounds)
+        maximum, factors, flexSlots, flexLines, gridScratch, slot, childSlot,
+        bounds)
     child = int(childNode.nextSibling)
   flexSlots.setLen(slotsBase)
   flexLines.setLen(linesBase)
 
+proc placeGridChildren(nodes: seq[ElementNode]; natural: seq[NaturalSize];
+                       rects: var seq[Rect]; sizes, bases, minimum, maximum,
+                       factors: var seq[float32]; flexSlots: var seq[int];
+                       flexLines: var seq[FlexLine];
+                       gridScratch: var GridScratch; parent: int;
+                       bounds: Rect) =
+  let grid = nodes[parent]
+  let itemsBase = gridScratch.items.len
+  let valuesBase = gridScratch.values.len
+  let contributionsBase = gridScratch.contributions.len
+  let cellsBase = gridScratch.occupied.len
+  let innerX = bounds.x + grid.pad[3] + grid.border[3]
+  let innerY = bounds.y + grid.pad[0] + grid.border[0]
+  let innerW = max(bounds.w - grid.contentInsetX, 0'f32)
+  let innerH = max(bounds.h - grid.contentInsetY, 0'f32)
+  let placed = gridPlaceItems(nodes, parent, gridScratch)
+  let itemCount = placed.pastLast - placed.first
+
+  let columnsFirst = gridScratch.values.len
+  gridColumns(nodes, natural, parent, gridScratch, placed.first,
+    placed.pastLast, placed.columns, columnsFirst, innerW, innerW)
+  var usedW = grid.gapX * float32(max(placed.columns - 1, 0))
+  for index in 0 ..< placed.columns:
+    usedW += gridScratch.values[columnsFirst + index]
+  var xStart, xBetween, yStart, yBetween: float32
+  if grid.justify != Align.Auto:
+    let offsets = justifyOffsets(grid.justify, max(innerW - usedW, 0'f32),
+      placed.columns)
+    xStart = offsets.start
+    xBetween = offsets.between
+  let itemValues = gridScratch.values.len
+  gridScratch.values.setLen(itemValues + 2 * itemCount)
+  for itemIndex in placed.first ..< placed.pastLast:
+    let item = gridScratch.items[itemIndex]
+    let child = nodes[item.slot]
+    let area = gridScratch.values.gridArea(columnsFirst, item.col,
+      item.colSpan, grid.gapX + xBetween)
+    let itemSize = child.gridCellDimension(natural[item.slot], true,
+      area, innerW, 0'f32, grid.gridItemAlign(child, true))
+    let relativeIndex = itemIndex - placed.first
+    gridScratch.values[itemValues + relativeIndex] = itemSize.size
+    gridScratch.values[itemValues + itemCount + relativeIndex] =
+      itemSize.offset
+
+  let rowsFirst = gridScratch.values.len
+  gridRows(nodes, natural, parent, gridScratch, placed.first,
+    placed.pastLast, placed.columns, placed.rows, columnsFirst, rowsFirst,
+    innerH, innerW, innerH, grid.gapX + xBetween)
+
+  var usedH = grid.gapY * float32(max(placed.rows - 1, 0))
+  for index in 0 ..< placed.rows:
+    usedH += gridScratch.values[rowsFirst + index]
+  if grid.alignContent != Align.Auto:
+    let offsets = justifyOffsets(grid.alignContent,
+      max(innerH - usedH, 0'f32), placed.rows)
+    yStart = offsets.start
+    yBetween = offsets.between
+
+  let columnPositions = gridScratch.values.len
+  gridScratch.values.setLen(columnPositions + placed.columns + placed.rows)
+  let rowPositions = columnPositions + placed.columns
+  var position = xStart
+  for index in 0 ..< placed.columns:
+    gridScratch.values[columnPositions + index] = position
+    position += gridScratch.values[columnsFirst + index] + grid.gapX +
+      xBetween
+  position = yStart
+  for index in 0 ..< placed.rows:
+    gridScratch.values[rowPositions + index] = position
+    position += gridScratch.values[rowsFirst + index] + grid.gapY + yBetween
+
+  for itemIndex in placed.first ..< placed.pastLast:
+    let item = gridScratch.items[itemIndex]
+    let childSlot = item.slot
+    let child = nodes[childSlot]
+    let relativeIndex = itemIndex - placed.first
+    let width = gridScratch.values[itemValues + relativeIndex]
+    let offsetX = gridScratch.values[itemValues + itemCount + relativeIndex]
+    let area = gridScratch.values.gridArea(rowsFirst, item.row,
+      item.rowSpan, grid.gapY + yBetween)
+    let itemSize = child.gridCellDimension(natural[childSlot], false,
+      area, innerH, width, grid.gridItemAlign(child, false))
+    var childRect = Rect(
+      x: innerX + gridScratch.values[columnPositions + item.col] + offsetX,
+      y: innerY + gridScratch.values[rowPositions + item.row] + itemSize.offset,
+      w: width,
+      h: itemSize.size)
+    let left = child.inset[3].resolve(innerW)
+    let right = child.inset[1].resolve(innerW)
+    let top = child.inset[0].resolve(innerH)
+    let bottom = child.inset[2].resolve(innerH)
+    if left.ok:
+      childRect.x += left.value
+    elif right.ok:
+      childRect.x -= right.value
+    if top.ok:
+      childRect.y += top.value
+    elif bottom.ok:
+      childRect.y -= bottom.value
+    placeNode(nodes, natural, rects, sizes, bases, minimum, maximum,
+      factors, flexSlots, flexLines, gridScratch, childSlot, childRect)
+
+  var childSlot = int(grid.firstChild)
+  while childSlot >= 0:
+    let child = nodes[childSlot]
+    if child.absolute:
+      placeAbsoluteChild(nodes, natural, rects, sizes, bases, minimum,
+        maximum, factors, flexSlots, flexLines, gridScratch, parent,
+        childSlot, bounds)
+    childSlot = int(child.nextSibling)
+
+  gridScratch.items.setLen(itemsBase)
+  gridScratch.values.setLen(valuesBase)
+  gridScratch.contributions.setLen(contributionsBase)
+  gridScratch.occupied.setLen(cellsBase)
+
 proc placeAbsoluteChild(nodes: seq[ElementNode]; natural: seq[NaturalSize];
                         rects: var seq[Rect]; sizes, bases, minimum, maximum,
                         factors: var seq[float32]; flexSlots: var seq[int];
-                        flexLines: var seq[FlexLine]; parentSlot,
+                        flexLines: var seq[FlexLine]; gridScratch: var GridScratch;
+                        parentSlot,
                         childSlot: int; bounds: Rect) =
   let parent = nodes[parentSlot]
   let child = nodes[childSlot]
@@ -682,7 +1247,7 @@ proc placeAbsoluteChild(nodes: seq[ElementNode]; natural: seq[NaturalSize];
   let childRect = Rect(x: bounds.x + parent.border[3] + x,
     y: bounds.y + parent.border[0] + y, w: childW, h: childH)
   placeNode(nodes, natural, rects, sizes, bases, minimum, maximum,
-    factors, flexSlots, flexLines, childSlot, childRect)
+    factors, flexSlots, flexLines, gridScratch, childSlot, childRect)
 
 proc layout*(c: Context; bounds: Rect): LayoutResult =
   ## Lays out the latest completed build inside bounds.
@@ -708,18 +1273,22 @@ proc layout*(c: Context; bounds: Rect): LayoutResult =
   c.owner.flexFactors.setLen(c.owner.nodes.len)
   c.owner.flexSlots.setLen(0)
   c.owner.flexLines.setLen(0)
+  c.owner.gridScratch.items.setLen(0)
+  c.owner.gridScratch.occupied.setLen(0)
+  c.owner.gridScratch.contributions.setLen(0)
+  c.owner.gridScratch.values.setLen(0)
   shapeText(c.owner.nodes)
-  discard measureTree(c.owner.nodes, c.owner.natural)
+  discard measureTree(c.owner.nodes, c.owner.natural, c.owner.gridScratch)
   if c.owner.nodes.len > 0:
     var stable = false
     for attempt in 0..2:
       placeNode(c.owner.nodes, c.owner.natural, c.owner.rectScratch,
         c.owner.flexSizes, c.owner.flexBases, c.owner.flexMin,
         c.owner.flexMax, c.owner.flexFactors, c.owner.flexSlots,
-        c.owner.flexLines, 0, result.root)
+        c.owner.flexLines, c.owner.gridScratch, 0, result.root)
       let textChanged = shapeTextToBounds(c.owner.nodes, c.owner.rectScratch)
       let sizesChanged = measureTree(c.owner.nodes, c.owner.natural,
-        c.owner.rectScratch)
+        c.owner.gridScratch, c.owner.rectScratch)
       if not textChanged and not sizesChanged:
         stable = true
         break
@@ -727,7 +1296,7 @@ proc layout*(c: Context; bounds: Rect): LayoutResult =
       placeNode(c.owner.nodes, c.owner.natural, c.owner.rectScratch,
         c.owner.flexSizes, c.owner.flexBases, c.owner.flexMin,
         c.owner.flexMax, c.owner.flexFactors, c.owner.flexSlots,
-        c.owner.flexLines, 0, result.root)
+        c.owner.flexLines, c.owner.gridScratch, 0, result.root)
     for slot in 0..<result.rects.len:
       result.rects[slot] = c.owner.rectScratch[slot]
 
@@ -947,6 +1516,115 @@ proc justify*(e: Element; value: Align): Element =
   let n = e.node
   if n != nil:
     n.justify = value
+    n.justifySet = true
+
+proc fixed*(value: float32): Track =
+  ## Creates a grid track with a fixed size in device-independent pixels.
+  Track(kind: trackFixed, value: max(value, 0'f32))
+
+proc fr*(factor = 1'f32): Track =
+  ## Creates a grid track sized by its share of remaining space.
+  Track(kind: trackFr, value: max(factor, 0'f32))
+
+proc fitContent*(): Track =
+  ## Creates a grid track sized to fit its content, within available space.
+  Track(kind: trackFit)
+
+proc grid*(e: Element): Element =
+  ## Turns this element into a row-major grid container.
+  result = e
+  let n = e.node
+  if n != nil:
+    if n.row and n.align == Align.Center and not n.alignSet:
+      n.align = Align.Auto
+    n.grid = true
+    n.row = false
+    if not n.justifySet:
+      n.justify = Align.Auto
+
+proc grid*(c: Context): Element =
+  ## Adds a grid container to the current parent.
+  result = c.newElement(false).grid()
+
+proc columns*(e: Element; count: int): Element =
+  ## Sets equal fractional columns for a grid.
+  result = e
+  let n = e.node
+  if n != nil:
+    n.cols.setLen(0)
+    for _ in 0 ..< max(count, 0):
+      n.cols.add(fr())
+
+proc rows*(e: Element; count: int): Element =
+  ## Sets equal fractional rows for a grid.
+  result = e
+  let n = e.node
+  if n != nil:
+    n.rows.setLen(0)
+    for _ in 0 ..< max(count, 0):
+      n.rows.add(fr())
+
+proc columnTracks*(e: Element; tracks: varargs[Track]): Element =
+  ## Sets explicit column tracks; additional columns fit their content.
+  result = e
+  let n = e.node
+  if n != nil:
+    n.cols.setLen(0)
+    for track in tracks:
+      n.cols.add(track)
+
+proc rowTracks*(e: Element; tracks: varargs[Track]): Element =
+  ## Sets explicit row tracks; additional rows fit their content.
+  result = e
+  let n = e.node
+  if n != nil:
+    n.rows.setLen(0)
+    for track in tracks:
+      n.rows.add(track)
+
+proc justifyItems*(e: Element; value: Align): Element =
+  ## Aligns grid children horizontally in their cells.
+  result = e
+  let n = e.node
+  if n != nil:
+    n.justifyItems = value
+
+proc justifySelf*(e: Element; value: Align): Element =
+  ## Overrides the grid's horizontal item alignment for this element.
+  result = e
+  let n = e.node
+  if n != nil:
+    n.justifySelf = value
+
+proc columnStart*(e: Element; value: int): Element =
+  ## Places the element at a one-based grid column.
+  result = e
+  let n = e.node
+  if n != nil:
+    n.gridCol = min(max(value, 1), MaxGridTrackIndex)
+
+proc rowStart*(e: Element; value: int): Element =
+  ## Places the element at a one-based grid row.
+  result = e
+  let n = e.node
+  if n != nil:
+    n.gridRow = min(max(value, 1), MaxGridTrackIndex)
+
+proc columnSpan*(e: Element; value: int): Element =
+  ## Spans grid columns; a negative value reaches the grid's last column.
+  result = e
+  let n = e.node
+  if n != nil:
+    n.gridColSpan = if value > 0: min(value, MaxGridTrackIndex)
+      elif value < 0: -1 else: 0
+
+proc rowSpan*(e: Element; value: int): Element =
+  ## Spans grid rows; a negative value reaches the grid's last explicit row.
+  result = e
+  let n = e.node
+  if n != nil:
+    n.gridRowSpan = if value > 0: min(value, MaxGridTrackIndex)
+      elif value < 0: -1 else: 0
 
 proc wrap*(e: Element): Element =
   ## Places in-flow children on additional lines when they exceed the main axis.
@@ -983,6 +1661,7 @@ proc alignItems*(e: Element; value: Align): Element =
   let n = e.node
   if n != nil:
     n.align = value
+    n.alignSet = true
 
 proc alignSelf*(e: Element; value: Align): Element =
   result = e

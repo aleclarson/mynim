@@ -13,6 +13,7 @@ type
     paintSlots: seq[int]
     flexSlots: seq[int]
     flexLines: seq[FlexLine]
+    gridScratch: GridScratch
     flexSizes, flexBases, flexMin, flexMax, flexFactors: seq[float32]
     hoveredSlots, pressedSlots, clickedSlots: seq[int]
     generation: uint32
@@ -34,6 +35,19 @@ type
   FlexLine = object
     first, pastLast: int
     main, cross: float32
+
+  GridItem = object
+    slot, col, row, colSpan, rowSpan: int
+
+  GridContribution = object
+    start, span: int
+    minimum, maximum: float32
+
+  GridScratch = object
+    items: seq[GridItem]
+    occupied: seq[bool]
+    contributions: seq[GridContribution]
+    values: seq[float32]
 
   Element* = object
     ## A checked 16-byte handle on 64-bit targets; it expires after its build callback.
@@ -60,7 +74,9 @@ type
 
   ElementNode = object
     parent, firstChild, lastChild, nextSibling: int32
-    row, reverse, wrap, wrapReverse, absolute: bool
+    row, reverse, wrap, wrapReverse, grid, absolute, alignSet,
+      justifySet: bool
+    gridCol, gridRow, gridColSpan, gridRowSpan: int
     hasText: bool
     hovered, pressed, clicked: bool
     label: string
@@ -80,7 +96,9 @@ type
     pad, margin: array[4, float32]
     inset: array[4, UiLength]
     gapX, gapY: float32
-    justify, align, selfAlign, alignContent: Align
+    justify, align, selfAlign, alignContent, justifyItems,
+      justifySelf: Align
+    cols, rows: seq[Track]
     background, borderColor: Color
     radius, border: array[4, float32]
     borderStyle: BorderStyle
@@ -108,6 +126,7 @@ proc retire(owner: ElementOwner) =
   owner.paintSlots = @[]
   owner.flexSlots = @[]
   owner.flexLines = @[]
+  owner.gridScratch = GridScratch()
   owner.flexSizes = @[]
   owner.flexBases = @[]
   owner.flexMin = @[]
@@ -143,7 +162,9 @@ proc newElement(c: Context; row: bool): Element =
                          shrink: 1, justify: Align.Start,
                          align: if row: Align.Center else: Align.Auto,
                          selfAlign: Align.Auto,
-                         alignContent: Align.Auto)
+                         alignContent: Align.Auto,
+                         justifyItems: Align.Auto,
+                         justifySelf: Align.Auto)
   c.owner.nodes.add(node)
   let p = int(c.owner.parent)
   if c.owner.nodes[p].lastChild >= 0:
