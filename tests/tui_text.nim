@@ -23,7 +23,7 @@ app.handleReady()
 
 var clicks = 0
 
-let content = ui.newContent(proc(ctx: ui.Context) =
+let uiContent = ui.newContent(proc(ctx: ui.Context) =
   let panel = ctx.box().fill().background(ui.rgb(255, 255, 255))
   discard panel.children(proc() =
     discard ctx.text("Mygo").textSize(32).textColor(ui.rgb(0, 0, 0))
@@ -32,7 +32,7 @@ let content = ui.newContent(proc(ctx: ui.Context) =
   )
 )
 let win = newWindow(WindowOptions(width: 320, height: 120, hidden: true,
-  content: content))
+  content: uiContent))
 let native = fake.windows[^1].surface
 
 doAssert native.frame()

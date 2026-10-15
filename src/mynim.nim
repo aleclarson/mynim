@@ -49,6 +49,7 @@ include mynim/core/signals
 include mynim/core/clipboard
 include mynim/core/menu
 include mynim/core/recent_docs
+include mynim/core/documents
 include mynim/core/modules
 include mynim/core/paths
 include mynim/core/power

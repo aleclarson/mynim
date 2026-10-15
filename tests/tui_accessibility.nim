@@ -18,7 +18,7 @@ app.handleReady()
 
 var presses = 0
 var saveClicked = false
-let content = ui.newContent(proc(ctx: ui.Context) =
+let uiContent = ui.newContent(proc(ctx: ui.Context) =
   let panel = ctx.column().size(180, 120).label("Panel")
   discard panel.children(proc() =
     discard ctx.text("Status")
@@ -30,7 +30,7 @@ let content = ui.newContent(proc(ctx: ui.Context) =
   )
 )
 let win = newWindow(WindowOptions(width: 200, height: 140, hidden: true,
-  content: content))
+  content: uiContent))
 let native = fake.windows[^1].surface
 
 doAssert native.frame()

@@ -13,12 +13,12 @@ app.handleReady()
 
 var builds = 0
 var color = ui.rgb(12, 34, 56)
-let content = ui.newContent(proc(ctx: ui.Context) =
+let uiContent = ui.newContent(proc(ctx: ui.Context) =
   inc builds
   discard ctx.box().fill().background(color)
 )
 let win = newWindow(WindowOptions(width: 512, height: 512, hidden: true,
-  content: content))
+  content: uiContent))
 let native = fake.windows[^1].surface
 
 doAssert native.frame()

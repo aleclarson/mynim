@@ -15,7 +15,7 @@ var firstFocused, firstVisible, firstPressed, firstClicked: bool
 var secondFocused, secondVisible, secondPressed: bool
 var customFocused, customVisible: bool
 var firstActivations, secondActivations: int
-let content = ui.newContent(proc(ctx: ui.Context) =
+let uiContent = ui.newContent(proc(ctx: ui.Context) =
   discard ctx.column().size(80, 80).children(proc() =
     let first = ctx.box().size(60, 30).label("First")
       .onClick(proc() = inc firstActivations)
@@ -35,7 +35,7 @@ let content = ui.newContent(proc(ctx: ui.Context) =
   )
 )
 let win = newWindow(WindowOptions(width: 100, height: 100, hidden: true,
-  content: content))
+  content: uiContent))
 let native = fake.windows[^1].surface
 
 doAssert native.frame()

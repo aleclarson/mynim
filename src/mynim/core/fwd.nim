@@ -54,13 +54,13 @@ proc handleCall(w: Window; ctx: CancelCtx; raw: string; trusted: bool)
 proc goAsync(fn: proc() {.closure.})
 
 ## document.nim / document_menu.nim / content.nim — used by menu.nim.
-## Document-controller stubs remain until that subsystem is ported.
-proc hasDocuments(): bool = false
-proc documentRole(role: MenuRole; win: Window) =
-  discard role
-  discard win
+## The first document-controller slice lives in core/documents.nim.
+proc hasDocuments(): bool
+proc documentRole(role: MenuRole; win: Window)
+proc refreshDocumentMenus()
 proc recentMenuItems(): seq[MenuItem]
 proc updateRecentMenus()
+proc openDocumentPath(path: string)
 proc contentCommand(w: Window; cmd: string)
 
 ## app.nim / protocol.nim / modules.nim / menu.nim used by window.nim

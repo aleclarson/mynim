@@ -13,7 +13,7 @@ app.handleReady()
 
 var hoveredState, pressedState, clickedState: bool
 var activations = 0
-let content = ui.newContent(proc(ctx: ui.Context) =
+let uiContent = ui.newContent(proc(ctx: ui.Context) =
   let control = ctx.box().size(40, 40)
     .onClick(proc() = inc activations)
   hoveredState = control.hovered()
@@ -21,7 +21,7 @@ let content = ui.newContent(proc(ctx: ui.Context) =
   clickedState = control.clicked()
 )
 let win = newWindow(WindowOptions(width: 64, height: 64, hidden: true,
-  content: content))
+  content: uiContent))
 let native = fake.windows[^1].surface
 
 doAssert native.frame()

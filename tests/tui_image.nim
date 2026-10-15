@@ -47,14 +47,14 @@ var grayscale = false
 var tint = ui.transparent
 var sourceRegion = ui.Rect()
 var flipX, flipY = false
-let content = ui.newContent(proc(ctx: ui.Context) =
+let uiContent = ui.newContent(proc(ctx: ui.Context) =
   let image = ctx.imageRegion(bitmap, sourceRegion, flipX, flipY)
     .size(imageWidth, imageHeight).fit(fit).tint(tint)
   if grayscale:
     discard image.grayscale()
 )
 let win = newWindow(WindowOptions(width: 64, height: 64, hidden: true,
-  content: content))
+  content: uiContent))
 let native = fake.windows[^1].surface
 
 doAssert native.frame()

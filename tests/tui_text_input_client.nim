@@ -74,7 +74,7 @@ app.handleReady()
 let editor = Editor(value: "A😀B",
   selected: ui.TextSelection(`range`: ui.TextRange(start: 3, `end`: 3)))
 var editorFocused, otherFocused: bool
-let content = ui.newContent(proc(ctx: ui.Context) =
+let uiContent = ui.newContent(proc(ctx: ui.Context) =
   discard ctx.column().size(180, 100).padding(8).label("Panel").children(proc() =
     let input = ctx.box().size(100, 30).label("Editor").textInput(editor)
     editorFocused = input.focused()
@@ -84,7 +84,7 @@ let content = ui.newContent(proc(ctx: ui.Context) =
   )
 )
 let win = newWindow(WindowOptions(width: 200, height: 120, hidden: true,
-  content: content))
+  content: uiContent))
 let native = fake.windows[^1].surface
 
 doAssert native.frame()

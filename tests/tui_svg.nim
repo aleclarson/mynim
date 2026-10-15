@@ -34,13 +34,13 @@ var fit = ui.Fit.Contain
 var grayscale = false
 var tint = ui.transparent
 var vector = parsed.svg
-let content = ui.newContent(proc(ctx: ui.Context) =
+let uiContent = ui.newContent(proc(ctx: ui.Context) =
   let image = ctx.svg(vector).size(40, 40).fit(fit).svgColor(color).tint(tint)
   if grayscale:
     discard image.grayscale()
 )
 let win = newWindow(WindowOptions(width: 64, height: 64, hidden: true,
-  content: content))
+  content: uiContent))
 let native = fake.windows[^1].surface
 
 doAssert native.frame()

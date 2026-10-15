@@ -157,9 +157,9 @@ proc recentDocuments*(a: Application): seq[string] =
       result.add path
 
 proc openRecentDocument(path: string) =
-  ## Apps without a document controller receive recent selections as
-  ## ordinary open-file events.
-  fire1(app.onOpenFile, path)
+  ## Document apps open a recent path in its registered document kind;
+  ## apps without a controller receive an ordinary open-file event.
+  openDocumentPath(path)
 
 proc addRecent(path: string) =
   ## Records an opened or saved document and logs failures. The document
