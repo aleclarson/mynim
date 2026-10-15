@@ -31,9 +31,12 @@ app.handleReady()
 
 var color = ui.rgb(20, 80, 160)
 var fit = ui.Fit.Contain
+var grayscale = false
 var vector = parsed.svg
 let content = ui.newContent(proc(ctx: ui.Context) =
-  discard ctx.svg(vector).size(40, 40).fit(fit).svgColor(color)
+  let image = ctx.svg(vector).size(40, 40).fit(fit).svgColor(color)
+  if grayscale:
+    discard image.grayscale()
 )
 let win = newWindow(WindowOptions(width: 64, height: 64, hidden: true,
   content: content))
@@ -59,6 +62,13 @@ discard native.send(platform.SurfaceEvent(kind: platform.surfaceResize))
 doAssert native.frame()
 doAssert native.pixel(5, 20) == [0'u8, 0, 255, 255]
 doAssert native.pixel(35, 20) == [255'u8, 0, 0, 255]
+
+grayscale = true
+discard native.send(platform.SurfaceEvent(kind: platform.surfaceResize))
+doAssert native.frame()
+doAssert native.pixel(5, 20) == [54'u8, 54, 54, 255]
+doAssert native.pixel(35, 20) == [18'u8, 18, 18, 255]
+grayscale = false
 
 fit = ui.Fit.NaturalSize
 discard native.send(platform.SurfaceEvent(kind: platform.surfaceResize))

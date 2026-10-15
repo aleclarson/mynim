@@ -308,7 +308,7 @@ proc paintSvg(s: scene.Scene; node: ElementNode; rect, root: Rect;
     h: fitted.src.h * factorY)
   s.ops.add(scene.Op(kind: scene.opImage, rect: pixelRect,
     radii: node.radius.scaledEdges(scale), continuous: continuousCorners,
-    image: image, src: src))
+    image: image, src: src, grayscale: node.grayscale))
 
 proc paintBitmap(s: scene.Scene; node: ElementNode; rect, root: Rect;
                  scale: float32) =
@@ -329,7 +329,8 @@ proc paintBitmap(s: scene.Scene; node: ElementNode; rect, root: Rect;
   s.ops.add(scene.Op(kind: scene.opImage, rect: pixelRect,
     radii: node.radius.scaledEdges(scale), continuous: continuousCorners,
     image: node.bitmap.image, src: fitted.src,
-    pixelated: node.bitmap.pixelated and enlarged))
+    pixelated: node.bitmap.pixelated and enlarged,
+    grayscale: node.grayscale))
 
 proc paintScene*(layout: LayoutResult; scale = 1'f32;
                  clear = transparent): scene.Scene =

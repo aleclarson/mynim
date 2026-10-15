@@ -689,6 +689,13 @@ proc pixelated*(e: Element): Element =
   if n != nil and n.bitmap != nil:
     n.bitmap.pixelated = true
 
+proc grayscale*(e: Element): Element =
+  ## Draws bitmap or SVG pixels in shades of gray.
+  result = e
+  let n = e.node
+  if n != nil and (n.bitmap != nil or n.vector != nil):
+    n.grayscale = true
+
 proc svgColor*(e: Element; value: Color): Element =
   ## Sets the color SVG shapes use for `currentColor`.
   result = e

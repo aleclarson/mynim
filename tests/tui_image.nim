@@ -23,8 +23,11 @@ app.handleReady()
 
 var fit = ui.Fit.FillBox
 var imageWidth, imageHeight = 40'f32
+var grayscale = false
 let content = ui.newContent(proc(ctx: ui.Context) =
-  discard ctx.image(bitmap).size(imageWidth, imageHeight).fit(fit)
+  let image = ctx.image(bitmap).size(imageWidth, imageHeight).fit(fit)
+  if grayscale:
+    discard image.grayscale()
 )
 let win = newWindow(WindowOptions(width: 64, height: 64, hidden: true,
   content: content))
@@ -62,6 +65,13 @@ discard native.send(platform.SurfaceEvent(kind: platform.surfaceResize))
 doAssert native.frame()
 doAssert native.pixel(5, 5) == [0'u8, 0, 0, 0]
 doAssert native.pixel(19, 19)[3] == 255
+
+fit = ui.Fit.FillBox
+grayscale = true
+discard native.send(platform.SurfaceEvent(kind: platform.surfaceResize))
+doAssert native.frame()
+doAssert native.pixel(5, 5) == [54'u8, 54, 54, 255]
+doAssert native.pixel(35, 5) == [182'u8, 182, 182, 255]
 
 win.destroy()
 loop.shutdown()

@@ -62,6 +62,7 @@ type
     bitmap: Bitmap
     vector: Svg
     vectorColor: Color
+    grayscale: bool
     fit: Fit
     width, height, minW, minH, maxW, maxH, basis: UiLength
     grow, shrink: float32
