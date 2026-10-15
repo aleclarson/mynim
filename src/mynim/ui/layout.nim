@@ -1417,10 +1417,47 @@ proc layoutAt(c: Context; bounds: Rect; now: MonoTime;
         c.owner.flexLines, c.owner.gridScratch, 0, result.root)
     for slot in 0..<result.rects.len:
       result.rects[slot] = c.owner.rectScratch[slot]
+      let node = c.owner.nodes[slot]
+      if node.listState != nil and
+          node.listState.frameOwner == cast[pointer](c.owner) and
+          node.listState.frameSlot == int32(slot) and
+          node.listState.generation == c.owner.generation:
+        if node.listRowIndex >= 0:
+          result.animating = node.listState.observeListHeight(
+            node.listRowIndex, c.owner.rectScratch[slot].h) or
+            result.animating
+        else:
+          result.animating = node.listState.observeListViewport(
+            max(c.owner.rectScratch[slot].h - node.contentInsetY, 0'f32)) or
+            result.animating
     result.animating = updateScrollRanges(c.owner.nodes, c.owner.rectScratch,
-      now, reduceMotion)
+      now, reduceMotion) or result.animating
     revealInScrollContainers(c.owner.nodes, c.owner.rectScratch)
     shiftScrolledRects(c.owner.nodes, result.rects)
+    for slot in 0..<c.owner.nodes.len:
+      let node = c.owner.nodes[slot]
+      if node.listState == nil or node.listRowIndex != -1 or
+          node.listState.frameOwner != cast[pointer](c.owner) or
+          node.listState.frameSlot != int32(slot) or
+          node.listState.generation != c.owner.generation:
+        continue
+      let state = node.listState
+      var first = high(int)
+      var last = -1
+      let viewport = result.rects[slot]
+      let top = viewport.y + node.border[0] + node.pad[0]
+      let bottom = viewport.y + viewport.h - node.border[2] - node.pad[2]
+      for rowSlot in 1..<c.owner.nodes.len:
+        let row = c.owner.nodes[rowSlot]
+        if row.listState != state or row.listRowIndex < 0:
+          continue
+        let box = result.rects[rowSlot]
+        if box.y + box.h > top and box.y < bottom:
+          first = min(first, row.listRowIndex)
+          last = max(last, row.listRowIndex)
+      if first == high(int):
+        first = 0
+      result.animating = state.finishList(first, last) or result.animating
 
 proc layout*(c: Context; bounds: Rect): LayoutResult =
   ## Lays out the latest completed build inside bounds.

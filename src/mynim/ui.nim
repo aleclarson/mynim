@@ -22,6 +22,8 @@ elif (defined(linux) and (defined(amd64) or defined(arm64))) or
 include mynim/ui/color
 include mynim/ui/element
 include mynim/ui/context
+include mynim/ui/list_state
 include mynim/ui/layout
+include mynim/ui/list
 include mynim/ui/paint
 include mynim/ui/runtime

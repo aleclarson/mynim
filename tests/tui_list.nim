@@ -1,0 +1,105 @@
+import std/assertions
+import mynim/ui
+
+block list_virtualizes_and_tracks_scroll_requests:
+  let context = newContext()
+  let state = newListState(20, 2)
+  var built: seq[int]
+
+  proc buildList() =
+    context.build(proc(ctx: Context) =
+      discard ctx.list(state, 100, proc(row: int) =
+        built.add(row)
+        discard ctx.box().height(20).shrink(0)
+      ).size(120, 40)
+    )
+
+  buildList()
+  var layout = context.layout(120, 40)
+  doAssert built.len < 100
+  doAssert state.maxOffset().y == 2158
+
+  built.setLen(0)
+  buildList()
+  layout = context.layout(120, 40)
+  doAssert built.len == 4
+  doAssert state.visible() == (first: 0, last: 1)
+
+  state.scrollTo(50)
+  built.setLen(0)
+  buildList()
+  layout = context.layout(120, 40)
+  doAssert state.offset().y == 1100
+  doAssert 50 in built
+  doAssert state.visible() == (first: 50, last: 51)
+
+  state.scrollTo(50, Align.Center)
+  buildList()
+  layout = context.layout(120, 40)
+  doAssert state.offset().y == 1090
+
+  state.scrollTo(50, Align.End)
+  buildList()
+  layout = context.layout(120, 40)
+  doAssert state.offset().y == 1080
+
+  state.scrollIntoView(99)
+  buildList()
+  layout = context.layout(120, 40)
+  doAssert state.offset().y == state.maxOffset().y
+  doAssert state.visible().last == 99
+  doAssert state.atEnd()
+
+  state.scrollToEnd()
+  buildList()
+  layout = context.layout(120, 40)
+  doAssert state.offset().y == state.maxOffset().y
+
+block measured_variable_rows_refine_estimates:
+  let context = newContext()
+  let state = newListState(20)
+  var built: seq[int]
+  context.build(proc(ctx: Context) =
+    discard ctx.list(state, 1000, proc(row: int) =
+      built.add(row)
+      discard ctx.box().height(if row mod 2 == 0: 20 else: 40).shrink(0)
+    ).size(100, 60)
+  )
+  discard context.layout(100, 60)
+  doAssert built.len < 100
+  doAssert state.maxOffset().y > 0
+  let firstBuildCount = built.len
+  built.setLen(0)
+  context.build(proc(ctx: Context) =
+    discard ctx.list(state, 1000, proc(row: int) =
+      built.add(row)
+      discard ctx.box().height(if row mod 2 == 0: 20 else: 40).shrink(0)
+    ).size(100, 60)
+  )
+  discard context.layout(100, 60)
+  doAssert built.len < firstBuildCount
+
+block shrinking_list_clamps_scroll_before_selecting_rows:
+  let context = newContext()
+  let state = newListState(20, 2)
+  var count = 100
+  var built: seq[int]
+
+  proc buildList() =
+    context.build(proc(ctx: Context) =
+      discard ctx.list(state, count, proc(row: int) =
+        built.add(row)
+        discard ctx.box().height(20).shrink(0)
+      ).size(120, 40)
+    )
+
+  buildList()
+  discard context.layout(120, 40)
+  state.scrollTo(80)
+  count = 10
+  built.setLen(0)
+  buildList()
+  doAssert state.offset().y == state.maxOffset().y
+  doAssert state.maxOffset().y == 178
+  doAssert built.len > 0 and built[^1] == 9
+  discard context.layout(120, 40)

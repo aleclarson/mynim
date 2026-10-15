@@ -116,6 +116,8 @@ type
     opacity: float32
     opacitySet: bool
     scrollState: ScrollState
+    listState: ListState
+    listRowIndex: int
     hasGradient: bool
     gradient: LinearGradient
     shadows: seq[UiShadow]

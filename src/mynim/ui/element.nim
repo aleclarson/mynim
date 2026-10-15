@@ -79,6 +79,40 @@ type
     scrollbarDragging: bool
     motion: ScrollMotion
 
+  ListRequestKind = enum
+    listNoRequest, listRequestToRow, listRequestIntoView, listRequestToEnd
+
+  ListHeightBlock = ref object
+    heights: array[64, float32]
+    known: uint64
+    knownCount: int
+    sum: float64
+
+  ListHeights = object
+    count: int
+    blockIds: seq[int]
+    blocks: seq[ListHeightBlock]
+    defaultHeight: float64
+    prefixHeights: seq[float64]
+    prefixCounts: seq[int]
+    dirty: bool
+
+  ListState* = ref object
+    ## Persistent scroll and measured-height state for a virtualized list.
+    scrollState: ScrollState
+    heights: ListHeights
+    rowCount: int
+    viewportHeight: float32
+    first, last: int
+    laidOut, visibleRead, atEnd: bool
+    request: ListRequestKind
+    requestRow: int
+    requestAlign: Align
+    gap: float32
+    frameOwner: pointer
+    frameSlot: int32
+    generation: uint32
+
   ScrollbarDrag = object
     state: ScrollState
     horizontal: bool
