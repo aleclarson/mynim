@@ -17,6 +17,14 @@ proc background*(e: Element; color: Color): Element =
     n.background = color
     n.hasGradient = false
 
+proc opacity*(e: Element; value: float32): Element =
+  ## Multiplies the opacity of this element and all its descendants.
+  result = e
+  let n = e.node
+  if n != nil:
+    n.opacity = if value.finite: min(max(value, 0'f32), 1'f32) else: 0
+    n.opacitySet = true
+
 proc gradient*(e: Element; value: LinearGradient): Element =
   ## Fills the element with a two-color linear gradient.
   result = e
@@ -210,7 +218,7 @@ proc sceneGradient(rect: scene.Rect; value: LinearGradient):
   result.points = [sx, sy, ex, ey]
 
 proc paintShadow(s: scene.Scene; node: ElementNode; box, root: Rect;
-                 scale: float32; value: UiShadow) =
+                 scale, opacity: float32; value: UiShadow) =
   if value.color.a == 0:
     return
   let castRect = box.sceneRect(root, scale)
@@ -218,7 +226,8 @@ proc paintShadow(s: scene.Scene; node: ElementNode; box, root: Rect;
     return
   let castRadii = node.radius.scaledEdges(scale)
   var op = scene.Op(kind: scene.opShadow, color: sceneColor(value.color),
-    continuous: continuousCorners, blur: value.blur.scaled(scale))
+    continuous: continuousCorners, blur: value.blur.scaled(scale),
+    opacity: opacity)
   if value.inset:
     var pad = castRect
     var padRadii = scene.fitRadii(castRect, castRadii)
@@ -266,7 +275,7 @@ proc paintShadow(s: scene.Scene; node: ElementNode; box, root: Rect;
   s.ops.add(op)
 
 proc paintText(s: scene.Scene; node: ElementNode; rect, root: Rect;
-               scale: float32; system: textStack.System) =
+               scale, opacity: float32; system: textStack.System) =
   if not node.hasText or node.shapedText == nil or node.textColor.a == 0:
     return
   let originX = rect.x - root.x + node.pad[3] + node.border[3]
@@ -293,7 +302,7 @@ proc paintText(s: scene.Scene; node: ElementNode; rect, root: Rect;
         subpixel: image.subpixel, thin: image.thin))
   if s.glyphs.len > start:
     s.ops.add(scene.Op(kind: scene.opGlyphs, first: int32(start),
-                       last: int32(s.glyphs.len)))
+      last: int32(s.glyphs.len), opacity: opacity))
 
 proc fitImage(box, source: Rect; fit: Fit):
     tuple[rect: Rect, src: scene.Rect] =
@@ -402,7 +411,7 @@ proc picture(vector: Svg; width, height: int; color: Color;
     color: cacheColor, stretch: stretch, image: result))
 
 proc paintSvg(s: scene.Scene; node: ElementNode; rect, root: Rect;
-              scale: float32) =
+              scale, opacity: float32) =
   if node.vector == nil:
     return
   let box = Rect(x: rect.x + node.pad[3] + node.border[3],
@@ -432,10 +441,10 @@ proc paintSvg(s: scene.Scene; node: ElementNode; rect, root: Rect;
   s.ops.add(scene.Op(kind: scene.opImage, rect: pixelRect,
     radii: node.radius.scaledEdges(scale), continuous: continuousCorners,
     image: image, src: src, color: sceneColor(node.imageTint),
-    grayscale: node.grayscale))
+    grayscale: node.grayscale, opacity: opacity))
 
 proc paintBitmap(s: scene.Scene; node: ElementNode; rect, root: Rect;
-                 scale: float32) =
+                 scale, opacity: float32) =
   if node.bitmap == nil or node.bitmap.image == nil:
     return
   let box = Rect(x: rect.x + node.pad[3] + node.border[3],
@@ -461,7 +470,19 @@ proc paintBitmap(s: scene.Scene; node: ElementNode; rect, root: Rect;
     radii: node.radius.scaledEdges(scale), continuous: continuousCorners,
     image: node.bitmap.image, src: src,
     pixelated: node.bitmap.pixelated and enlarged,
-    color: sceneColor(node.imageTint), grayscale: node.grayscale))
+    color: sceneColor(node.imageTint), grayscale: node.grayscale,
+    opacity: opacity))
+
+proc opacityOf(nodes: seq[ElementNode]; slot: int): float32 =
+  result = 1
+  var current = slot
+  while current >= 0:
+    let node = nodes[current]
+    if node.opacitySet:
+      result *= node.opacity
+      if result == 0:
+        return
+    current = int(node.parent)
 
 proc collectPaintOrder(nodes: seq[ElementNode]; slot: int;
                        order: var seq[int]) =
@@ -512,6 +533,9 @@ proc paintScene*(layout: LayoutResult; scale = 1'f32;
 
       for slot in layout.owner.paintSlots:
         let node = layout.owner.nodes[slot]
+        let opacity = opacityOf(layout.owner.nodes, slot)
+        if opacity == 0:
+          continue
         let fill = if node.hasGradient: node.gradient.fromColor else: node.background
         let fill2 = if node.hasGradient: node.gradient.toColor else: transparent
         let fillVisible = if node.hasGradient:
@@ -530,7 +554,7 @@ proc paintScene*(layout: LayoutResult; scale = 1'f32;
         for shadow in node.shadows:
           if not shadow.inset:
             result.paintShadow(node, layout.rects[slot], layout.root,
-                               scale, shadow)
+                               scale, opacity, shadow)
         if fillVisible or borderVisible:
           var op = scene.Op(kind: scene.opFill, rect: rect,
             color: sceneColor(fill), color2: sceneColor(fill2),
@@ -539,7 +563,8 @@ proc paintScene*(layout: LayoutResult; scale = 1'f32;
             border: node.border.scaledEdges(scale),
             continuous: continuousCorners,
             borderColor: sceneColor(node.borderColor),
-            dashed: node.borderStyle == BorderStyle.Dashed)
+            dashed: node.borderStyle == BorderStyle.Dashed,
+            opacity: opacity)
           if node.hasGradient:
             let gradient = sceneGradient(rect, node.gradient)
             op.paint = gradient.paint
@@ -558,10 +583,12 @@ proc paintScene*(layout: LayoutResult; scale = 1'f32;
         for shadow in node.shadows:
           if shadow.inset:
             result.paintShadow(node, layout.rects[slot], layout.root,
-                               scale, shadow)
-        result.paintText(node, layout.rects[slot], layout.root, scale, system)
-        result.paintBitmap(node, layout.rects[slot], layout.root, scale)
-        result.paintSvg(node, layout.rects[slot], layout.root, scale)
+                               scale, opacity, shadow)
+        result.paintText(node, layout.rects[slot], layout.root, scale,
+                         opacity, system)
+        result.paintBitmap(node, layout.rects[slot], layout.root, scale,
+                           opacity)
+        result.paintSvg(node, layout.rects[slot], layout.root, scale, opacity)
 
       if not system.full() or attempt == 2:
         break

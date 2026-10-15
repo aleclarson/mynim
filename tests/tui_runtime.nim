@@ -16,6 +16,7 @@ var color = ui.rgb(12, 34, 56)
 var showGradient = false
 var showShadow = false
 var showInsetShadow = false
+var showOpacity = false
 let uiContent = ui.newContent(proc(ctx: ui.Context) =
   inc builds
   if showGradient:
@@ -26,6 +27,11 @@ let uiContent = ui.newContent(proc(ctx: ui.Context) =
   elif showInsetShadow:
     discard ctx.box().size(40, 40).background(ui.rgb(255, 255, 255))
       .insetShadow(8, 0, 0, 0, ui.rgb(0, 0, 0))
+  elif showOpacity:
+    let parent = ctx.box().size(40, 40).opacity(0.5)
+    discard parent.children(proc() =
+      discard ctx.box().fill().background(ui.rgb(255, 255, 255)).opacity(0.5)
+    )
   else:
     discard ctx.box().fill().background(color)
 )
@@ -68,6 +74,13 @@ doAssert native.frame()
 doAssert builds == 5
 doAssert native.pixel(2, 20) == [0'u8, 0, 0, 255]
 doAssert native.pixel(20, 20) == [255'u8, 255, 255, 255]
+
+showInsetShadow = false
+showOpacity = true
+discard native.send(platform.SurfaceEvent(kind: platform.surfaceResize))
+doAssert native.frame()
+doAssert builds == 6
+doAssert native.pixel(20, 20) == [64'u8, 64, 64, 64]
 
 let (png, captureError) = win.capturePage()
 doAssert captureError == nil

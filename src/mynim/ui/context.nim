@@ -110,6 +110,8 @@ type
       justifySelf: Align
     cols, rows: seq[Track]
     background, borderColor: Color
+    opacity: float32
+    opacitySet: bool
     hasGradient: bool
     gradient: LinearGradient
     shadows: seq[UiShadow]

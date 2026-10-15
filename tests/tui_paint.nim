@@ -112,6 +112,26 @@ block outer_and_inset_shadows:
     abs(inner.castRadii[2]) == 4 and abs(inner.castRadii[3]) == 4
   doAssert inner.blur == 3
 
+block opacity_inherits_and_clamps:
+  let c = newContext()
+  var parent: Element
+  c.build(proc(ctx: Context) =
+    parent = ctx.box().size(40, 20).opacity(0.5)
+    discard parent.children(proc() =
+      discard ctx.box().size(20, 20).background(rgb(255, 255, 255))
+        .opacity(0.5)
+      discard ctx.box().size(20, 20).background(rgb(255, 0, 0)).opacity(0)
+    )
+  )
+  let frame = c.layout(40, 20).paintScene()
+  doAssert frame.ops.len == 1
+  doAssert abs(frame.ops[0].opacity - 0.25) < 0.001
+
+  c.build(proc(ctx: Context) =
+    discard ctx.box().size(10, 10).background(rgb(255, 255, 255)).opacity(2)
+  )
+  doAssert c.layout(10, 10).paintScene().ops[0].opacity == 1
+
 block absolute_children_paint_above_flow:
   let c = newContext()
   c.build(proc(ctx: Context) =
