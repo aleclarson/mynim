@@ -30,6 +30,7 @@ include mynim/ui/layout
 include mynim/ui/direction
 include mynim/ui/list
 include mynim/ui/paint
+include mynim/ui/widgets
 include mynim/ui/table
 include mynim/ui/outline
 include mynim/ui/tree
