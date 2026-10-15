@@ -2320,6 +2320,7 @@ proc textColor*(e: Element; value: Color): Element =
   let n = e.node
   if n != nil and n.hasText:
     n.textColor = value
+    n.textColorSet = true
 
 proc textFamily*(e: Element; value: string): Element =
   ## Selects a font family for the text.

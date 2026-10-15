@@ -11,6 +11,8 @@ type
     conn: surface.Conn
     view: View
     context: Context
+    systemTheme: Theme
+    systemPreferences: platform.Preferences
     frameLayout: LayoutResult
     pressTarget: Element
     pressMods: platform.Modifiers
@@ -27,7 +29,7 @@ type
     hasScene: bool
     accessibilityOn: bool
     keyboardFocusVisible, surfaceFocused, hasTextInputState,
-      inFrame, closed, ready, gpuTried: bool
+      inFrame, closed, ready, gpuTried, themeDirty: bool
     gpuError: string
     software: raster.Renderer
     when defined(macosx):
@@ -46,6 +48,25 @@ type
 proc newContent*(view: View): Content =
   ## Creates native UI content for WindowOptions.content.
   Content(view: view)
+
+proc updateSystemTheme(rt: Runtime) =
+  var dark = false
+  if rt.conn.isDark != nil:
+    dark = rt.conn.isDark()
+  rt.systemPreferences = platform.Preferences(textScale: 1)
+  if rt.conn.preferences != nil:
+    rt.systemPreferences = rt.conn.preferences()
+  rt.systemTheme = if dark: darkTheme() else: lightTheme()
+  rt.systemTheme.followPreferences(rt.systemPreferences)
+  let text = textStack.shared()
+  if rt.conn.uiFont != nil:
+    rt.systemTheme.font = rt.conn.uiFont()
+    text.setUIFamily(rt.systemTheme.font)
+  if rt.conn.fontRendering != nil:
+    let rendering = rt.conn.fontRendering()
+    text.setFontRendering(rendering.antialias, rendering.hinting,
+                          rendering.subpixels)
+  rt.themeDirty = false
 
 proc frameDimension(value: float64; name: string): float32 =
   if classify(value) in {fcNan, fcInf, fcNegInf} or
@@ -496,6 +517,12 @@ proc renderFrame(rt: Runtime; presentFrame = true) =
   else:
     float32(size.scale)
 
+  if rt.themeDirty:
+    rt.updateSystemTheme()
+  rt.context.theme = rt.systemTheme
+  rt.context.themeEnabled = true
+  rt.context.themeBackground = false
+
   rt.refreshPointer()
   rt.context.owner.hoveredSlots = rt.hoverSlots
   rt.context.owner.pressedSlots = rt.pressedSlots
@@ -508,15 +535,8 @@ proc renderFrame(rt: Runtime; presentFrame = true) =
       rt.context.owner.focusVisibleSlots.add(rt.focusSlot)
   rt.clickedSlots.setLen(0)
   rt.context.build(rt.view)
-  var reduceMotion = false
-  if rt.conn.preferences != nil:
-    for slot in 1..<rt.context.owner.nodes.len:
-      let state = rt.context.owner.nodes[slot].scrollState
-      if state != nil and state.motion != nil:
-        reduceMotion = rt.conn.preferences().reduceMotion
-        break
   let layout = rt.context.layoutAt(Rect(w: width, h: height),
-    getMonoTime(), reduceMotion)
+    getMonoTime(), rt.systemPreferences.reduceMotion)
   if rt.focusSlot >= 0 and not layout.focusableSlot(rt.focusSlot):
     rt.focusSlot = -1
     rt.keyboardFocusVisible = false
@@ -890,10 +910,13 @@ proc close(rt: Runtime) =
 
 method attachContent*(content: Content; conn: surface.Conn) =
   let rt = Runtime(conn: conn, view: content.view, context: newContext(),
-                   focusSlot: -1, keyPressSlot: -1, surfaceFocused: true)
+                   focusSlot: -1, keyPressSlot: -1, surfaceFocused: true,
+                   themeDirty: true)
   conn.event = proc(ev: platform.SurfaceEvent): bool = rt.event(ev)
   conn.changed = proc() = rt.requestFrame()
-  conn.themeChanged = proc() = rt.requestFrame()
+  conn.themeChanged = proc() =
+    rt.themeDirty = true
+    rt.requestFrame()
   conn.titleBarChanged = proc() = rt.requestFrame()
   conn.localeChanged = proc() = rt.requestFrame()
   conn.capture = proc(): tuple[width, height: int, rgba: seq[byte]] =

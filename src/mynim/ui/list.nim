@@ -43,6 +43,14 @@ proc list*(c: Context; state: ListState; count: Natural;
       if rowNode != nil:
         rowNode.listState = state
         rowNode.listRowIndex = rowIndex
+        let selected = if state.multiSelectionEnabled:
+            state.isSelected(rowIndex)
+          else:
+            state.selected() == rowIndex
+        rowNode.listRowSelected = selected
+        if selected:
+          rowNode.background = c.theme.accent
+          rowNode.listSelectedTextColor = c.theme.accentText
       if state.selectionEnabled:
         discard row.focusable().onClick(rowSelectionHandler(state, rowIndex))
       discard row.children(proc() =

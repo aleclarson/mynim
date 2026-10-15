@@ -5,6 +5,8 @@ type
 
   ContextObj = object
     owner: ElementOwner
+    theme: Theme
+    themeEnabled, themeBackground: bool
 
   ElementOwner = ref object
     nodes: seq[ElementNode]
@@ -86,7 +88,7 @@ type
     clipX, clipY, hasFollowScroll: bool
     followScrollSlot: int32
     gridCol, gridRow, gridColSpan, gridRowSpan: int
-    hasText: bool
+    hasText, textColorSet, listRowSelected: bool
     hovered, pressed, clicked: bool
     label: string
     textValue: string
@@ -112,7 +114,7 @@ type
     justify, align, selfAlign, alignContent, justifyItems,
       justifySelf: Align
     cols, rows: seq[Track]
-    background, borderColor: Color
+    background, borderColor, listSelectedTextColor: Color
     opacity: float32
     opacitySet: bool
     scrollState: ScrollState
@@ -166,6 +168,24 @@ proc newContext*(): Context =
   ## Creates a stable context. Call close when its owner shuts down.
   new(result)
   new(result.owner)
+  result.theme = lightTheme()
+
+proc theme*(c: Context): Theme =
+  ## Returns the theme used by the current frame.
+  if c == nil: lightTheme() else: c.theme
+
+proc setTheme*(c: Context; value: Theme) =
+  ## Sets the theme for the rest of this frame and fills the root background.
+  if c == nil or c.owner == nil or c.owner.closed:
+    raise newException(ValueError, "ui: cannot set the theme on a closed context")
+  var resolved = value
+  if resolved.font.len == 0:
+    resolved.font = c.theme.font
+  c.theme = resolved
+  c.themeEnabled = true
+  c.themeBackground = true
+  if c.owner.inBuild and c.owner.nodes.len > 0:
+    c.owner.nodes[0].background = resolved.background
 
 proc retire(owner: ElementOwner) =
   owner.closed = true
@@ -328,7 +348,11 @@ proc text*(c: Context; value: string): Element =
   if n != nil:
     n.hasText = true
     n.textValue = value
-    n.textColor = rgb(0, 0, 0)
+    n.textColor = if c.themeEnabled: c.theme.text else: rgb(0, 0, 0)
+    if c.themeEnabled:
+      if c.theme.font.len > 0:
+        n.textStyle.family = c.theme.font
+      n.textStyle.size = c.theme.fontSize
 
 proc children*(e: Element; build: proc() {.closure.}): Element =
   ## Builds children with e as their parent for the duration of build.
@@ -357,6 +381,10 @@ proc build*(c: Context; view: proc(c: Context) {.closure.}) =
   c.owner.paintSlots.setLen(0)
   c.owner.nodes.add(ElementNode(parent: -1, firstChild: -1,
                                 lastChild: -1, nextSibling: -1,
+                                background: if c.themeBackground:
+                                    c.theme.background
+                                  else:
+                                    transparent,
                                 shrink: 1, justify: Align.Start,
                                 align: Align.Auto, selfAlign: Align.Auto))
   c.owner.parent = 0
@@ -374,6 +402,7 @@ proc build*(c: Context; view: proc(c: Context) {.closure.}) =
     c.owner.hoveredSlots.setLen(0)
     c.owner.pressedSlots.setLen(0)
     c.owner.clickedSlots.setLen(0)
+    c.themeBackground = false
 
 proc close*(c: Context) =
   ## Detaches saved handles and releases frame storage when the context closes.

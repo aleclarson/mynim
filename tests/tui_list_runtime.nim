@@ -4,6 +4,10 @@ include "../src/mynim.nim"
 import mynim/internal/fake as fakeBackend
 import mynim/ui as ui
 
+doAssert ui.lightTheme().accent == ui.rgb(37, 99, 235)
+doAssert ui.darkTheme().dark
+doAssert ui.lightTheme().space(2) == 8
+
 let fake = fakeBackend.newFakeBackend()
 theBackend = platform.Backend(fake)
 backendMade = true
@@ -154,13 +158,19 @@ doAssert animatedFollowState.offset().y == animatedFollowInterrupted
 doAssert animatedFollowState.offset().y < animatedFollowState.maxOffset().y
 
 let multiState = ui.newListState(20, multiSelectable = true)
+var multiTheme = ui.lightTheme()
+multiTheme.accent = ui.rgb(255, 0, 0)
+multiTheme.accentText = ui.rgb(255, 255, 255)
 when defined(macosx):
   const selectionCommand = platform.modSuper
 else:
   const selectionCommand = platform.modCtrl
 let multiContent = ui.newContent(proc(ctx: ui.Context) =
+  ctx.setTheme(multiTheme)
   discard ctx.list(multiState, 100, proc(row: int) =
-    discard ctx.box().size(20, 20).shrink(0)
+    let label = ctx.text($row).size(20, 20).shrink(0)
+    if row == 1:
+      discard label.textColor(ui.rgb(0, 255, 0))
   ).size(20, 40)
 )
 discard newWindow(WindowOptions(width: 20, height: 40, hidden: true,
@@ -169,12 +179,20 @@ let multiSurface = fake.windows[^1].surface
 
 doAssert multiSurface.frame()
 doAssert multiSurface.frame()
+doAssert multiSurface.pixel(19, 19) == [255'u8, 255, 255, 255]
 doAssert multiSurface.send(platform.SurfaceEvent(kind: platform.pointerDown,
   x: 5, y: 5))
 doAssert multiSurface.send(platform.SurfaceEvent(kind: platform.pointerUp,
   x: 5, y: 5))
 doAssert multiSurface.frame()
 doAssert multiState.selectedRows() == @[0]
+doAssert multiSurface.pixel(19, 19) == [0'u8, 0, 255, 255]
+var selectedDefaultTextIsWhite = false
+for y in 0..<20:
+  for x in 0..<20:
+    if multiSurface.pixel(x, y) == [255'u8, 255, 255, 255]:
+      selectedDefaultTextIsWhite = true
+doAssert selectedDefaultTextIsWhite
 
 doAssert multiSurface.send(platform.SurfaceEvent(kind: platform.pointerDown,
   x: 5, y: 25, mods: selectionCommand))
@@ -183,6 +201,13 @@ doAssert multiSurface.send(platform.SurfaceEvent(kind: platform.pointerUp,
 doAssert multiSurface.frame()
 doAssert multiState.selected() == 1
 doAssert multiState.selectedRows() == @[0, 1]
+doAssert multiSurface.pixel(19, 39) == [0'u8, 0, 255, 255]
+var selectedExplicitTextIsGreen = false
+for y in 20..<40:
+  for x in 0..<20:
+    if multiSurface.pixel(x, y) == [0'u8, 255, 0, 255]:
+      selectedExplicitTextIsGreen = true
+doAssert selectedExplicitTextIsGreen
 
 doAssert multiSurface.send(platform.SurfaceEvent(kind: platform.keyPressed,
   key: platform.keyDown, mods: platform.modShift))
@@ -231,6 +256,43 @@ for accessible in multiAccessTree.nodes:
       platform.AccessStates(0)
     foundMultiItem = true
 doAssert foundMultiList and foundMultiItem
+
+let systemThemeState = ui.newListState(20, selectable = true)
+let systemThemeContent = ui.newContent(proc(ctx: ui.Context) =
+  discard ctx.list(systemThemeState, 1, proc(row: int) =
+    discard ctx.text($row).size(20, 20).shrink(0)
+  ).size(20, 20)
+)
+discard newWindow(WindowOptions(width: 20, height: 20, hidden: true,
+  content: systemThemeContent))
+let systemThemeSurface = fake.windows[^1].surface
+fake.setPreferences(platform.Preferences(
+  accent: platform.Color(r: 255, a: 255), textScale: 1))
+doAssert systemThemeSurface.frame()
+doAssert systemThemeSurface.send(platform.SurfaceEvent(
+  kind: platform.pointerDown, x: 5, y: 5))
+doAssert systemThemeSurface.send(platform.SurfaceEvent(
+  kind: platform.pointerUp, x: 5, y: 5))
+doAssert systemThemeSurface.frame()
+doAssert systemThemeState.selected() == 0
+doAssert systemThemeSurface.pixel(19, 19) == [0'u8, 0, 255, 255]
+var systemAccentTextIsWhite = false
+for y in 0..<20:
+  for x in 0..<20:
+    if systemThemeSurface.pixel(x, y) == [255'u8, 255, 255, 255]:
+      systemAccentTextIsWhite = true
+doAssert systemAccentTextIsWhite
+
+fake.setPreferences(platform.Preferences(
+  accent: platform.Color(r: 255, g: 255, a: 255), textScale: 1))
+doAssert systemThemeSurface.frame()
+doAssert systemThemeSurface.pixel(19, 19) == [0'u8, 255, 255, 255]
+var systemAccentTextIsDark = false
+for y in 0..<20:
+  for x in 0..<20:
+    if systemThemeSurface.pixel(x, y) == [27'u8, 24, 24, 255]:
+      systemAccentTextIsDark = true
+doAssert systemAccentTextIsDark
 
 let searchState = ui.newListState(20, rowLabel = proc(row: int): string =
   case row

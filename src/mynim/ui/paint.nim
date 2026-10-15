@@ -274,18 +274,30 @@ proc paintShadow(s: scene.Scene; node: ElementNode; box, root: Rect;
   op.wide = s.addWide(wideColors(value.color, transparent, transparent))
   s.ops.add(op)
 
-proc paintText(s: scene.Scene; node: ElementNode; rect, root: Rect;
-               scale, opacity: float32; system: textStack.System) =
-  if not node.hasText or node.shapedText == nil or node.textColor.a == 0:
+proc effectiveTextColor(nodes: seq[ElementNode]; slot: int): Color =
+  let node = nodes[slot]
+  if node.textColorSet:
+    return node.textColor
+  var parent = int(node.parent)
+  while parent > 0:
+    let ancestor = nodes[parent]
+    if ancestor.listRowSelected:
+      return ancestor.listSelectedTextColor
+    parent = int(ancestor.parent)
+  node.textColor
+
+proc paintText(s: scene.Scene; node: ElementNode; textColor: Color;
+               rect, root: Rect; scale, opacity: float32;
+               system: textStack.System) =
+  if not node.hasText or node.shapedText == nil or textColor.a == 0:
     return
   let originX = rect.x - root.x + node.pad[3] + node.border[3]
   let originY = rect.y - root.y + node.pad[0] + node.border[0]
-  let color = sceneColor(node.textColor)
-  let wide = wideColors(node.textColor, transparent, transparent)
+  let color = sceneColor(textColor)
+  let wide = wideColors(textColor, transparent, transparent)
   let wideIndex = s.addWide(wide)
   let start = s.glyphs.len
-  let shade = textStack.shadeOf(node.textColor.r, node.textColor.g,
-                                node.textColor.b)
+  let shade = textStack.shadeOf(textColor.r, textColor.g, textColor.b)
   for line in node.shapedText.lines:
     let baseline = system.baseline((originY + line.baseline) * scale)
     for glyph in line.glyphs:
@@ -637,8 +649,8 @@ proc paintScene*(layout: LayoutResult; scale = 1'f32;
           if shadow.inset:
             result.paintShadow(node, layout.rects[slot], layout.root,
                                scale, opacity, shadow)
-        result.paintText(node, layout.rects[slot], layout.root, scale,
-                         opacity, system)
+        result.paintText(node, layout.owner.nodes.effectiveTextColor(slot),
+          layout.rects[slot], layout.root, scale, opacity, system)
         result.paintBitmap(node, layout.rects[slot], layout.root, scale,
                            opacity)
         result.paintSvg(node, layout.rects[slot], layout.root, scale, opacity)

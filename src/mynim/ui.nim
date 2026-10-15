@@ -20,6 +20,7 @@ elif (defined(linux) and (defined(amd64) or defined(arm64))) or
   import mynim/internal/gpu/gl as glGpu
 
 include mynim/ui/color
+include mynim/ui/theme
 include mynim/ui/element
 include mynim/ui/context
 include mynim/ui/list_state
