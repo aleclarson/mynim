@@ -73,6 +73,11 @@ type
     stretch: bool
     image: scene.Image
 
+  UiShadow = object
+    x, y, blur, spread: float32
+    color: Color
+    inset: bool
+
   ElementNode = object
     parent, firstChild, lastChild, nextSibling: int32
     row, reverse, wrap, wrapReverse, grid, absolute, alignSet,
@@ -107,6 +112,7 @@ type
     background, borderColor: Color
     hasGradient: bool
     gradient: LinearGradient
+    shadows: seq[UiShadow]
     radius, border: array[4, float32]
     borderStyle: BorderStyle
 

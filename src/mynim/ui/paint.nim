@@ -31,6 +31,24 @@ proc gradient*(e: Element; fromColor, toColor: Color;
   e.gradient(LinearGradient(fromColor: fromColor, toColor: toColor,
                             angle: angle))
 
+proc shadow*(e: Element; x, y, blur, spread: float32;
+             color: Color): Element =
+  ## Adds a blurred shadow outside the element's rounded box.
+  result = e
+  let n = e.node
+  if n != nil:
+    n.shadows.add(UiShadow(x: x, y: y, blur: blur, spread: spread,
+                           color: color))
+
+proc insetShadow*(e: Element; x, y, blur, spread: float32;
+                  color: Color): Element =
+  ## Adds a blurred shadow inside the element's padding edge.
+  result = e
+  let n = e.node
+  if n != nil:
+    n.shadows.add(UiShadow(x: x, y: y, blur: blur, spread: spread,
+                           color: color, inset: true))
+
 proc radius*(e: Element; all: float32): Element =
   ## Rounds all four corners by the same radius in DIPs.
   result = e
@@ -190,6 +208,62 @@ proc sceneGradient(rect: scene.Rect; value: LinearGradient):
       raise newException(ValueError, "ui: gradient exceeds the float range")
   result.paint = if value.oklab: scene.paintOklab else: scene.paintLinear
   result.points = [sx, sy, ex, ey]
+
+proc paintShadow(s: scene.Scene; node: ElementNode; box, root: Rect;
+                 scale: float32; value: UiShadow) =
+  if value.color.a == 0:
+    return
+  let castRect = box.sceneRect(root, scale)
+  if castRect.empty:
+    return
+  let castRadii = node.radius.scaledEdges(scale)
+  var op = scene.Op(kind: scene.opShadow, color: sceneColor(value.color),
+    continuous: continuousCorners, blur: value.blur.scaled(scale))
+  if value.inset:
+    var pad = castRect
+    var padRadii = scene.fitRadii(castRect, castRadii)
+    if scene.hasBorder(node.border):
+      let inner = scene.innerRadii(castRect, padRadii,
+        node.border.scaledEdges(scale))
+      pad = inner.inner
+      padRadii = inner.radii
+    if pad.empty:
+      return
+    let spread = value.spread.scaled(scale)
+    let dx = snapPixel(value.x.scaled(scale).float64)
+    let dy = snapPixel(value.y.scaled(scale).float64)
+    var holeRadii = padRadii
+    for i, radius in holeRadii:
+      holeRadii[i] = max(radius - spread, 0'f32)
+    op.inset = true
+    op.rect = scene.Rect(x: pad.x + dx + spread, y: pad.y + dy + spread,
+      w: max(pad.w - 2 * spread, 0'f32),
+      h: max(pad.h - 2 * spread, 0'f32))
+    op.radii = holeRadii
+    op.`cast` = pad
+    op.castRadii = padRadii
+  else:
+    let spread = value.spread
+    let shadowBox = Rect(x: box.x + value.x - spread,
+      y: box.y + value.y - spread,
+      w: box.w + 2 * spread, h: box.h + 2 * spread)
+    op.rect = shadowBox.sceneRect(root, scale)
+    for i, radius in node.radius:
+      if radius > 0:
+        op.radii[i] = max(radius + spread, 0'f32).scaled(scale)
+    op.`cast` = castRect
+    op.castRadii = castRadii
+  for point in [op.rect.x, op.rect.y, op.rect.w, op.rect.h,
+      op.blur, op.`cast`.x, op.`cast`.y, op.`cast`.w, op.`cast`.h]:
+    if not point.finite:
+      raise newException(ValueError, "ui: shadow exceeds the float range")
+  for radii in [op.radii, op.castRadii]:
+    for radius in radii:
+      if not radius.finite:
+        raise newException(ValueError,
+          "ui: shadow radius exceeds the float range")
+  op.wide = s.addWide(wideColors(value.color, transparent, transparent))
+  s.ops.add(op)
 
 proc paintText(s: scene.Scene; node: ElementNode; rect, root: Rect;
                scale: float32; system: textStack.System) =
@@ -445,13 +519,18 @@ proc paintScene*(layout: LayoutResult; scale = 1'f32;
           else:
             fill.a > 0
         let borderVisible = node.borderColor.a > 0 and scene.hasBorder(node.border)
-        if not fillVisible and not borderVisible and not node.hasText and
+        if not fillVisible and not borderVisible and node.shadows.len == 0 and
+            not node.hasText and
             node.bitmap == nil and node.vector == nil:
           continue
 
         let rect = layout.rects[slot].sceneRect(layout.root, scale)
         if rect.empty:
           continue
+        for shadow in node.shadows:
+          if not shadow.inset:
+            result.paintShadow(node, layout.rects[slot], layout.root,
+                               scale, shadow)
         if fillVisible or borderVisible:
           var op = scene.Op(kind: scene.opFill, rect: rect,
             color: sceneColor(fill), color2: sceneColor(fill2),
@@ -476,6 +555,10 @@ proc paintScene*(layout: LayoutResult; scale = 1'f32;
               not scene.wideColor2
           op.wide = result.addWide(wide)
           result.ops.add(op)
+        for shadow in node.shadows:
+          if shadow.inset:
+            result.paintShadow(node, layout.rects[slot], layout.root,
+                               scale, shadow)
         result.paintText(node, layout.rects[slot], layout.root, scale, system)
         result.paintBitmap(node, layout.rects[slot], layout.root, scale)
         result.paintSvg(node, layout.rects[slot], layout.root, scale)

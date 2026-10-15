@@ -14,10 +14,18 @@ app.handleReady()
 var builds = 0
 var color = ui.rgb(12, 34, 56)
 var showGradient = false
+var showShadow = false
+var showInsetShadow = false
 let uiContent = ui.newContent(proc(ctx: ui.Context) =
   inc builds
   if showGradient:
     discard ctx.box().fill().gradient(ui.rgb(0, 0, 0), ui.rgb(255, 255, 255), 90)
+  elif showShadow:
+    discard ctx.box().size(40, 40).background(ui.rgb(255, 255, 255))
+      .shadow(8, 8, 0, 0, ui.rgb(0, 0, 0))
+  elif showInsetShadow:
+    discard ctx.box().size(40, 40).background(ui.rgb(255, 255, 255))
+      .insetShadow(8, 0, 0, 0, ui.rgb(0, 0, 0))
   else:
     discard ctx.box().fill().background(color)
 )
@@ -44,6 +52,22 @@ doAssert builds == 3
 doAssert native.pixel(0, 256) == [0'u8, 0, 0, 255]
 doAssert native.pixel(256, 256) == [128'u8, 128, 128, 255]
 doAssert native.pixel(511, 256) == [255'u8, 255, 255, 255]
+
+showGradient = false
+showShadow = true
+discard native.send(platform.SurfaceEvent(kind: platform.surfaceResize))
+doAssert native.frame()
+doAssert builds == 4
+doAssert native.pixel(20, 20) == [255'u8, 255, 255, 255]
+doAssert native.pixel(45, 20) == [0'u8, 0, 0, 255]
+
+showShadow = false
+showInsetShadow = true
+discard native.send(platform.SurfaceEvent(kind: platform.surfaceResize))
+doAssert native.frame()
+doAssert builds == 5
+doAssert native.pixel(2, 20) == [0'u8, 0, 0, 255]
+doAssert native.pixel(20, 20) == [255'u8, 255, 255, 255]
 
 let (png, captureError) = win.capturePage()
 doAssert captureError == nil

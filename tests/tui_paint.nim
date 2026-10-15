@@ -84,6 +84,34 @@ block linear_gradient_scene:
   doAssertRaises ValueError:
     discard c.layout(100, 20).paintScene()
 
+block outer_and_inset_shadows:
+  let c = newContext()
+  c.build(proc(ctx: Context) =
+    discard ctx.box().size(40, 20).radius(4)
+      .shadow(1, 2, 3, 4, rgb(0, 0, 0))
+      .background(rgb(255, 255, 255))
+      .insetShadow(1, 2, 3, 1, rgb(0, 0, 0))
+  )
+  let frame = c.layout(40, 20).paintScene()
+  doAssert frame.ops.len == 3
+  let outer = frame.ops[0]
+  doAssert outer.kind == scene.opShadow
+  doAssert outer.rect == scene.Rect(x: -3, y: -2, w: 48, h: 28)
+  doAssert outer.radii == [8'f32, 8, 8, 8]
+  doAssert outer.`cast` == scene.Rect(x: 0, y: 0, w: 40, h: 20)
+  doAssert outer.castRadii == [4'f32, 4, 4, 4]
+  doAssert outer.blur == 3
+  doAssert frame.ops[1].kind == scene.opFill
+  let inner = frame.ops[2]
+  doAssert inner.kind == scene.opShadow and inner.inset
+  doAssert inner.rect == scene.Rect(x: 2, y: 3, w: 38, h: 18)
+  doAssert abs(inner.radii[0]) == 3 and abs(inner.radii[1]) == 3 and
+    abs(inner.radii[2]) == 3 and abs(inner.radii[3]) == 3
+  doAssert inner.`cast` == scene.Rect(x: 0, y: 0, w: 40, h: 20)
+  doAssert abs(inner.castRadii[0]) == 4 and abs(inner.castRadii[1]) == 4 and
+    abs(inner.castRadii[2]) == 4 and abs(inner.castRadii[3]) == 4
+  doAssert inner.blur == 3
+
 block absolute_children_paint_above_flow:
   let c = newContext()
   c.build(proc(ctx: Context) =
