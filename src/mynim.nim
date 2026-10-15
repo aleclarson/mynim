@@ -43,6 +43,7 @@ include mynim/core/window
 include mynim/core/protocol
 include mynim/core/app
 include mynim/core/deeplink
+include mynim/core/updater
 include mynim/core/clipboard
 include mynim/core/menu
 include mynim/core/modules

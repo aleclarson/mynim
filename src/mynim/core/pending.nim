@@ -21,13 +21,7 @@ proc quitOnSignals() =
   ## pending: signals.go — quits the app on SIGINT/SIGTERM.
   discard
 
-proc cleanUpdateLeftovers() {.gcsafe.} =
-  ## pending: updater.go — removes files a previous update left.
-  discard
 
-proc relaunchNow() =
-  ## pending: updater.go — relaunches the app after an update.
-  discard
 
 proc writeTypeScript*(outPath: string) =
   ## pending: tsgen.go — generates the TypeScript client for bound
