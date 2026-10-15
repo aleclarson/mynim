@@ -501,6 +501,26 @@ proc opacityOf(nodes: seq[ElementNode]; slot: int): float32 =
         return
     current = int(node.parent)
 
+proc paintScrollbar(sceneFrame: scene.Scene; layout: LayoutResult;
+                    slot: int; rect: Rect; scale, opacity: float32) =
+  if rect.w <= 0 or rect.h <= 0:
+    return
+  var clips = 0
+  var parent = int(layout.owner.nodes[slot].parent)
+  while parent >= 0:
+    if layout.owner.nodes[parent].scrollState != nil:
+      sceneFrame.ops.add(layout.scrollClipOp(parent, scale))
+      inc clips
+    parent = int(layout.owner.nodes[parent].parent)
+  let radius = min(rect.w, rect.h) / 2 * scale
+  sceneFrame.ops.add(scene.Op(kind: scene.opFill,
+    rect: rect.sceneRect(layout.root, scale),
+    color: sceneColor(rgba(0, 0, 0, 0.32)), paint: scene.paintSolid,
+    radii: [radius, radius, radius, radius],
+    continuous: continuousCorners, opacity: opacity))
+  for _ in 0..<clips:
+    sceneFrame.ops.add(scene.Op(kind: scene.opPopClip))
+
 proc collectPaintOrder(nodes: seq[ElementNode]; slot: int;
                        order: var seq[int]) =
   order.add(slot)
@@ -615,6 +635,22 @@ proc paintScene*(layout: LayoutResult; scale = 1'f32;
         result.paintSvg(node, layout.rects[slot], layout.root, scale, opacity)
         for _ in 0..<clipCount:
           result.ops.add(scene.Op(kind: scene.opPopClip))
+
+      for slot in layout.owner.paintSlots:
+        let node = layout.owner.nodes[slot]
+        let state = node.scrollState
+        if state == nil or
+            (not state.scrollbarDragging and
+              slot notin layout.owner.hoveredSlots):
+          continue
+        let bars = layout.scrollbars(slot)
+        let opacity = opacityOf(layout.owner.nodes, slot)
+        if bars.vertical:
+          paintScrollbar(result, layout, slot, bars.verticalThumb, scale,
+            opacity)
+        if bars.horizontal:
+          paintScrollbar(result, layout, slot, bars.horizontalThumb, scale,
+            opacity)
 
       if not system.full() or attempt == 2:
         break

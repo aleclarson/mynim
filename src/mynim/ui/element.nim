@@ -41,6 +41,12 @@ type
   ScrollState* = ref object ## Persistent offset for one scroll container.
     offsetX, offsetY: float32
     maxX, maxY: float32
+    scrollbarDragging: bool
+
+  ScrollbarDrag = object
+    state: ScrollState
+    horizontal: bool
+    pointerStart, offsetStart, rangeStart, travel: float32
 
 const
   Auto* = Inf.float32 ## Automatic length, used by margins.

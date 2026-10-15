@@ -13,6 +13,7 @@ type
     context: Context
     frameLayout: LayoutResult
     pressTarget: Element
+    scrollbarDrag: ScrollbarDrag
     focusSlot, keyPressSlot: int
     keyPressKey: platform.Key
     textInputAdapter: TextInputAdapter
@@ -645,6 +646,14 @@ proc event(rt: Runtime; ev: platform.SurfaceEvent): bool =
         platform.TextRange(start: caret, `end`: caret))
     true
   of platform.pointerMove:
+    if rt.scrollbarDrag.state != nil:
+      rt.pointerX = float32(ev.x)
+      rt.pointerY = float32(ev.y)
+      rt.hasPointer = true
+      discard rt.scrollbarDrag.dragScrollbar(rt.pointerX, rt.pointerY)
+      rt.refreshPointer()
+      rt.requestFrame()
+      return false
     let previousHover = rt.hoverSlots
     let previousPressed = rt.pressedSlots
     rt.pointerX = float32(ev.x)
@@ -665,6 +674,13 @@ proc event(rt: Runtime; ev: platform.SurfaceEvent): bool =
     rt.pointerX = float32(ev.x)
     rt.pointerY = float32(ev.y)
     rt.hasPointer = true
+    if rt.frameLayout.scrollbarPress(rt.pointerX, rt.pointerY,
+        rt.scrollbarDrag):
+      rt.pressTarget = Element()
+      rt.pressHoverSlots.setLen(0)
+      rt.refreshPointer()
+      rt.requestFrame()
+      return true
     rt.pressTarget = rt.frameLayout.targetAt(rt.pointerX, rt.pointerY)
     rt.pressHoverSlots = rt.frameLayout.slotsAt(rt.pointerX, rt.pointerY)
     if rt.pressTarget.owner != nil:
@@ -687,6 +703,12 @@ proc event(rt: Runtime; ev: platform.SurfaceEvent): bool =
     rt.pointerX = float32(ev.x)
     rt.pointerY = float32(ev.y)
     rt.hasPointer = true
+    if rt.scrollbarDrag.state != nil:
+      rt.scrollbarDrag.state.scrollbarDragging = false
+      rt.scrollbarDrag = ScrollbarDrag()
+      rt.refreshPointer()
+      rt.requestFrame()
+      return true
     var clickedSlot = -1
     result = rt.frameLayout.dispatchClick(rt.pressTarget,
       rt.pointerX, rt.pointerY, clickedSlot)
@@ -704,6 +726,10 @@ proc event(rt: Runtime; ev: platform.SurfaceEvent): bool =
     let previousPressed = rt.pressedSlots
     let previousFocusVisible = rt.keyboardFocusVisible
     let hadTextInput = rt.hasTextInputState and rt.lastTextInput.active
+    let hadScrollbarDrag = rt.scrollbarDrag.state != nil
+    if hadScrollbarDrag:
+      rt.scrollbarDrag.state.scrollbarDragging = false
+      rt.scrollbarDrag = ScrollbarDrag()
     rt.cancelKeyPress()
     rt.keyboardFocusVisible = false
     rt.surfaceFocused = false
@@ -712,7 +738,7 @@ proc event(rt: Runtime; ev: platform.SurfaceEvent): bool =
     rt.refreshPointer()
     rt.updateTextInput()
     if rt.pressedSlots != previousPressed or previousFocusVisible or
-        hadTextInput:
+        hadTextInput or hadScrollbarDrag:
       rt.requestFrame()
     false
   of platform.pointerLeave:

@@ -155,7 +155,59 @@ doAssert nestedSurface.send(platform.SurfaceEvent(kind: platform.keyPressed,
 doAssert outerState.offset().y == 30
 doAssert nestedSurface.frame()
 
+let barsState = ui.newScrollState()
+let barsContent = ui.newContent(proc(ctx: ui.Context) =
+  let viewport = ctx.scrollBoth(barsState).size(100, 100)
+  discard viewport.children(proc() =
+    discard ctx.box().size(300, 300).shrink(0)
+  )
+)
+let barsWindow = newWindow(WindowOptions(width: 100, height: 100, hidden: true,
+  content: barsContent))
+let barsSurface = fake.windows[^1].surface
+doAssert barsSurface.frame()
+doAssert barsState.maxOffset() == (x: 200'f32, y: 200'f32)
+
+discard barsSurface.send(platform.SurfaceEvent(kind: platform.pointerMove,
+  x: 93, y: 10))
+doAssert barsSurface.frame()
+doAssert barsSurface.send(platform.SurfaceEvent(kind: platform.pointerDown,
+  x: 93, y: 10, button: 0))
+discard barsSurface.send(platform.SurfaceEvent(kind: platform.pointerMove,
+  x: 93, y: 68))
+doAssert barsState.offset().y == 200
+doAssert barsSurface.send(platform.SurfaceEvent(kind: platform.pointerUp,
+  x: 93, y: 68, button: 0))
+doAssert barsSurface.frame()
+
+barsState.scrollTo(0, 0)
+discard barsSurface.send(platform.SurfaceEvent(kind: platform.surfaceResize))
+doAssert barsSurface.frame()
+discard barsSurface.send(platform.SurfaceEvent(kind: platform.pointerMove,
+  x: 10, y: 94))
+doAssert barsSurface.send(platform.SurfaceEvent(kind: platform.pointerDown,
+  x: 10, y: 94, button: 0))
+discard barsSurface.send(platform.SurfaceEvent(kind: platform.pointerMove,
+  x: 68, y: 94))
+doAssert barsState.offset().x == 200
+doAssert barsSurface.send(platform.SurfaceEvent(kind: platform.pointerUp,
+  x: 68, y: 94, button: 0))
+doAssert barsSurface.frame()
+
+barsState.scrollTo(0, 0)
+discard barsSurface.send(platform.SurfaceEvent(kind: platform.surfaceResize))
+doAssert barsSurface.frame()
+discard barsSurface.send(platform.SurfaceEvent(kind: platform.pointerMove,
+  x: 93, y: 45))
+doAssert barsSurface.send(platform.SurfaceEvent(kind: platform.pointerDown,
+  x: 93, y: 45, button: 0))
+doAssert barsState.offset().y == 90
+discard barsSurface.send(platform.SurfaceEvent(kind: platform.pointerUp,
+  x: 93, y: 45, button: 0))
+doAssert barsSurface.frame()
+
 win.destroy()
 focusWindow.destroy()
 nestedWindow.destroy()
+barsWindow.destroy()
 loop.shutdown()

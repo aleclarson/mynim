@@ -1512,6 +1512,127 @@ proc revealSlot(layout: LayoutResult; slot: int): bool =
     parent = int(node.parent)
   moved
 
+type ScrollbarGeometry = object
+  vertical, horizontal: bool
+  verticalTrack, verticalThumb, horizontalTrack, horizontalThumb: Rect
+
+proc scrollbarThumb(start, track, view, content,
+                    offset: float32): tuple[position, length: float32] =
+  let inner = max(track - 4'f32, 0'f32)
+  if inner == 0 or content <= 0:
+    return
+  result.length = min(max(inner * view / content, 24'f32), inner)
+  let travel = max(inner - result.length, 0'f32)
+  let range = max(content - view, 0'f32)
+  let along = if range > 0:
+      min(max(travel * offset / range, 0'f32), travel)
+    else:
+      0'f32
+  result.position = start + 2 + along
+
+proc scrollbars(layout: LayoutResult; slot: int): ScrollbarGeometry =
+  if layout.owner == nil or slot <= 0 or slot >= layout.owner.nodes.len:
+    return
+  let node = layout.owner.nodes[slot]
+  let state = node.scrollState
+  if state == nil:
+    return
+  let box = layout.rects[slot]
+  let width = 6'f32
+  let top = node.border[0]
+  let right = node.border[1]
+  let bottom = node.border[2]
+  let left = node.border[3]
+  let viewWidth = max(box.w - left - right, 0'f32)
+  let viewHeight = max(box.h - top - bottom, 0'f32)
+  let contentWidth = viewWidth + state.maxX
+  let contentHeight = viewHeight + state.maxY
+  result.vertical = node.scrollY and state.maxY > 0.5
+  result.horizontal = node.scrollX and state.maxX > 0.5
+  let corner = if result.vertical and result.horizontal:
+      width + 3
+    else:
+      0'f32
+  if result.vertical:
+    let trackHeight = max(box.h - top - bottom - corner, 0'f32)
+    let trackX = box.x + box.w - right - width - 6
+    let trackY = box.y + top
+    result.verticalTrack = Rect(x: trackX, y: trackY,
+      w: width + 6, h: trackHeight)
+    let thumb = scrollbarThumb(trackY, trackHeight, viewHeight,
+      contentHeight, state.offsetY)
+    result.verticalThumb = Rect(x: box.x + box.w - right - width - 3,
+      y: thumb.position, w: width, h: thumb.length)
+  if result.horizontal:
+    let trackWidth = max(box.w - left - right - corner, 0'f32)
+    let trackX = box.x + left
+    let trackY = box.y + box.h - bottom - width - 6
+    result.horizontalTrack = Rect(x: trackX, y: trackY,
+      w: trackWidth, h: width + 6)
+    let thumb = scrollbarThumb(trackX, trackWidth, viewWidth,
+      contentWidth, state.offsetX)
+    result.horizontalThumb = Rect(x: thumb.position,
+      y: box.y + box.h - bottom - width - 3,
+      w: thumb.length, h: width)
+
+proc scrollbarPress(layout: LayoutResult; x, y: float32;
+                    drag: var ScrollbarDrag): bool =
+  let target = layout.targetAt(x, y)
+  if target.owner == nil:
+    return false
+  var slot = int(target.slot)
+  while slot > 0:
+    let node = layout.owner.nodes[slot]
+    let state = node.scrollState
+    if state != nil:
+      let geometry = layout.scrollbars(slot)
+      if geometry.vertical and geometry.verticalTrack.contains(x, y):
+        if geometry.verticalThumb.contains(x, y):
+          drag = ScrollbarDrag(state: state, pointerStart: y,
+            offsetStart: state.offsetY, rangeStart: state.maxY,
+            travel: max(geometry.verticalTrack.h - 4 -
+              geometry.verticalThumb.h, 0'f32))
+          state.scrollbarDragging = true
+        elif y < geometry.verticalThumb.y:
+          state.offsetY = max(0'f32, state.offsetY -
+            layout.rects[slot].h * 0.9'f32)
+        else:
+          state.offsetY = min(state.maxY, state.offsetY +
+            layout.rects[slot].h * 0.9'f32)
+        return true
+      if geometry.horizontal and geometry.horizontalTrack.contains(x, y):
+        if geometry.horizontalThumb.contains(x, y):
+          drag = ScrollbarDrag(state: state, horizontal: true,
+            pointerStart: x, offsetStart: state.offsetX,
+            rangeStart: state.maxX,
+            travel: max(geometry.horizontalTrack.w - 4 -
+              geometry.horizontalThumb.w, 0'f32))
+          state.scrollbarDragging = true
+        elif x < geometry.horizontalThumb.x:
+          state.offsetX = max(0'f32, state.offsetX -
+            layout.rects[slot].w * 0.9'f32)
+        else:
+          state.offsetX = min(state.maxX, state.offsetX +
+            layout.rects[slot].w * 0.9'f32)
+        return true
+    slot = int(node.parent)
+  false
+
+proc dragScrollbar(drag: ScrollbarDrag; x, y: float32): bool =
+  let state = drag.state
+  if state == nil or drag.travel <= 0 or drag.rangeStart <= 0:
+    return false
+  let maxOffset = if drag.horizontal: state.maxX else: state.maxY
+  let coordinate = if drag.horizontal: x else: y
+  let offset = min(max(drag.offsetStart / drag.rangeStart +
+    (coordinate - drag.pointerStart) / drag.travel, 0'f32), 1'f32) * maxOffset
+  if drag.horizontal:
+    result = state.offsetX != offset
+    state.offsetX = offset
+  else:
+    result = state.offsetY != offset
+    state.offsetY = offset
+
 proc slotsAt(layout: LayoutResult; x, y: float32): seq[int] =
   if layout.owner == nil or layout.owner.closed or layout.owner.inBuild or
       not layout.owner.hasFrame or
