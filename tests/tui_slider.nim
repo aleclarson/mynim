@@ -19,7 +19,7 @@ let uiContent = ui.newContent(proc(ctx: ui.Context) =
   let panel = ctx.column().size(180, 140)
     .direction(ui.Direction.RightToLeft)
   discard panel.children(proc() =
-    let slider = ctx.slider(horizontal, 0, 100, 5).size(120, 24)
+    let slider = ctx.stepSlider(horizontal, 0, 100, 5).size(120, 28)
       .label("Horizontal")
     horizontalChanged = slider.changed()
     discard slider.onChange(proc() = inc horizontalChanges)

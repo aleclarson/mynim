@@ -39,16 +39,32 @@ proc primaryButton*(c: Context; label: string): Element =
   ## Creates an accent-colored button for the primary action.
   c.themedButton(label, primary = true)
 
+proc sliderTickCount(low, high, step: float64): int =
+  if classify(step) in {fcNan, fcInf, fcNegInf} or step <= 0 or
+      high <= low:
+    return 0
+  let intervals = (high - low) / step
+  if intervals > 61:
+    return 0
+  result = int(floor(intervals + 1e-9)) + 1
+  if result > 61:
+    result = 0
+
 proc slider*(c: Context; value: var float64; low, high: float64;
              stepSize = 0'f64): Element =
   ## Creates a themed horizontal slider. Set its label and observe edits with
   ## changed() or onChange(); stepSize snaps pointer and keyboard input.
   let theme = c.theme
-  let diameter = theme.space(5)
-  let height = theme.space(5)
+  result = c.sliderBase(value, low, high)
+  let ticks = sliderTickCount(low, high, stepSize)
+  let knobWidth = theme.space(5)
+  let knobHeight = theme.space(4)
+  let height = theme.space(if ticks > 0: 7 else: 5)
+  let centerY = theme.space(2.5)
   let trackHeight = theme.space(1.5)
-  result = c.sliderBase(value, low, high).height(height)
-    .minWidth(theme.space(20)).paddingX(diameter / 2)
+  let tickHeight = theme.space(1.5)
+  result = result.height(height)
+    .minWidth(theme.space(20)).paddingX(knobWidth / 2)
   if stepSize > 0:
     result = result.step(stepSize)
   let amount = if high > low:
@@ -65,23 +81,32 @@ proc slider*(c: Context; value: var float64; low, high: float64;
     let area = c.box().fill().shrink(0)
     discard area.children(proc() =
       discard c.box().absolute().left(0).right(0)
-        .topPercent(50).height(trackHeight)
-        .margin(-trackHeight / 2, 0, 0, 0)
+        .top(centerY - trackHeight / 2).height(trackHeight)
         .radius(trackHeight / 2).background(theme.border)
+      for index in 0..<ticks:
+        let fraction = float32(index) / float32(max(ticks - 1, 1))
+        discard c.box().absolute().leftPercent(fraction * 100)
+          .top(centerY + knobHeight / 2 + theme.space(1))
+          .size(1, tickHeight).margin(0, 0, 0, -0.5'f32)
+          .background(theme.textMuted.alpha(0.6'f32))
       discard c.box().absolute()
         .leftPercent((if rtl: position else: 0'f32) * 100)
-        .topPercent(50).widthPercent(amount * 100).height(trackHeight)
-        .margin(-trackHeight / 2, 0, 0, 0)
+        .top(centerY - trackHeight / 2).widthPercent(amount * 100)
+        .height(trackHeight)
         .radius(trackHeight / 2)
         .background(theme.accent)
       discard c.box().absolute().leftPercent(position * 100)
-        .topPercent(50).size(diameter, diameter)
-        .margin(-diameter / 2, 0, 0, -diameter / 2)
-        .radius(diameter / 2)
+        .top(centerY - knobHeight / 2).size(knobWidth, knobHeight)
+        .margin(0, 0, 0, -knobWidth / 2)
+        .radius(knobHeight / 2)
         .background(knobColor).border(2, theme.background)
         .shadow(0, 1, 2, 0, rgba(0, 0, 0, 0.18'f32))
     )
   )
+
+proc stepSlider*(c: Context; value: var float64; low, high, step: float64): Element =
+  ## Creates a themed slider with step snapping and ticks for its range.
+  c.slider(value, low, high, step)
 
 proc checkboxIndicator(c: Context; theme: Theme; checked, mixed,
                        hovered: bool): Element =
