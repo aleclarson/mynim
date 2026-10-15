@@ -30,6 +30,8 @@ type
     software: raster.Renderer
     when defined(macosx):
       metalRenderer: metalGpu.Renderer
+    elif defined(windows):
+      d3d11Renderer: d3d11Gpu.Renderer
     elif (defined(linux) and (defined(amd64) or defined(arm64))) or
         defined(emscripten):
       glRenderer: glGpu.Renderer
@@ -54,6 +56,10 @@ proc releaseGpu(rt: Runtime) =
     if rt.metalRenderer != nil:
       rt.metalRenderer.release()
       rt.metalRenderer = nil
+  elif defined(windows):
+    if rt.d3d11Renderer != nil:
+      rt.d3d11Renderer.release()
+      rt.d3d11Renderer = nil
   elif (defined(linux) and (defined(amd64) or defined(arm64))) or
       defined(emscripten):
     if rt.glRenderer != nil:
@@ -97,6 +103,25 @@ proc tryGpu(rt: Runtime; frame: scene.Scene): bool =
     if error == nil:
       return true
     rt.gpuError = error.msg
+    rt.releaseGpu()
+    false
+  elif defined(windows):
+    let native = rt.conn.surface.native()
+    if native.hwnd == 0:
+      return false
+    if not rt.gpuTried:
+      rt.gpuTried = true
+      let (renderer, error) = d3d11Gpu.new(native.hwnd, native.composed)
+      if error.len == 0:
+        rt.d3d11Renderer = renderer
+      else:
+        rt.gpuError = error
+    if rt.d3d11Renderer == nil:
+      return false
+    let error = rt.d3d11Renderer.render(frame)
+    if error.len == 0:
+      return true
+    rt.gpuError = error
     rt.releaseGpu()
     false
   elif defined(emscripten):

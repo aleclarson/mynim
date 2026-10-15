@@ -13,6 +13,8 @@ export platform.TextInputClient, platform.TextRange, platform.TextSelection,
   platform.RectF
 when defined(macosx):
   import mynim/internal/gpu/metal as metalGpu
+elif defined(windows):
+  import mynim/internal/gpu/d3d11/renderer as d3d11Gpu
 elif (defined(linux) and (defined(amd64) or defined(arm64))) or
     defined(emscripten):
   import mynim/internal/gpu/gl as glGpu
