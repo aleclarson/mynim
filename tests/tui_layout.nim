@@ -126,6 +126,59 @@ block reverse_direction:
   doAssert layout.bounds(endFirst) == Rect(x: 20, y: 125, w: 20, h: 10)
   doAssert layout.bounds(endSecond) == Rect(x: 0, y: 125, w: 20, h: 10)
 
+block absolute_and_relative_positioning:
+  let c = newContext()
+  var parent, flow, overlay, next, start, endAnchor, half, otherHalf: Element
+  var stretched, centered, moved, following, percentage: Element
+  var rightBottom, relativePercent: Element
+  c.build(proc(ctx: Context) =
+    parent = ctx.column().width(30)
+    discard parent.children(proc() =
+      flow = ctx.box().size(20, 10)
+      overlay = ctx.box().absolute().size(60, 60)
+      next = ctx.box().size(20, 10)
+    )
+    let padded = ctx.box().size(36, 20).borderWidth(1).padding(5)
+    discard padded.children(proc() =
+      start = ctx.box().absolute().left(3).top(3).size(14, 14)
+      endAnchor = ctx.box().absolute().right(3).bottom(3).size(4, 4)
+      half = ctx.box().absolute().leftPercent(50).topPercent(50).size(2, 2)
+      otherHalf = ctx.box().absolute().rightPercent(50).bottomPercent(50)
+        .size(2, 2)
+    )
+    let anchors = ctx.box().size(100, 80).borderWidth(2)
+    discard anchors.children(proc() =
+      stretched = ctx.box().absolute().left(10).right(20).top(5).bottom(15)
+      centered = ctx.box().absolute().left(0).right(0).top(0).bottom(0)
+        .size(40, 30).margin(Auto)
+    )
+    let row = ctx.row().size(100, 40)
+    discard row.children(proc() =
+      moved = ctx.box().size(20, 20).top(5).left(3)
+      following = ctx.box().size(20, 20)
+      percentage = ctx.box().size(20, 20).leftPercent(50).topPercent(25)
+      rightBottom = ctx.box().size(20, 20).right(5).bottom(3)
+      relativePercent = ctx.box().size(10, 10).rightPercent(10)
+        .bottomPercent(10)
+    )
+  )
+  let layout = c.layout(200, 300)
+  doAssert layout.bounds(parent).h == 20
+  doAssert layout.bounds(flow).y == 0
+  doAssert layout.bounds(next).y == 10
+  doAssert layout.bounds(overlay) == Rect(x: 0, y: 0, w: 60, h: 60)
+  doAssert layout.bounds(start) == Rect(x: 4, y: 24, w: 14, h: 14)
+  doAssert layout.bounds(endAnchor) == Rect(x: 28, y: 32, w: 4, h: 4)
+  doAssert layout.bounds(half) == Rect(x: 18, y: 30, w: 2, h: 2)
+  doAssert layout.bounds(otherHalf) == Rect(x: 16, y: 28, w: 2, h: 2)
+  doAssert layout.bounds(stretched) == Rect(x: 12, y: 47, w: 66, h: 56)
+  doAssert layout.bounds(centered) == Rect(x: 30, y: 65, w: 40, h: 30)
+  doAssert layout.bounds(moved) == Rect(x: 3, y: 135, w: 20, h: 20)
+  doAssert layout.bounds(following) == Rect(x: 20, y: 130, w: 20, h: 20)
+  doAssert layout.bounds(percentage) == Rect(x: 90, y: 140, w: 20, h: 20)
+  doAssert layout.bounds(rightBottom) == Rect(x: 55, y: 127, w: 20, h: 20)
+  doAssert layout.bounds(relativePercent) == Rect(x: 70, y: 131, w: 10, h: 10)
+
 block percentages_and_limits:
   let c = newContext()
   var row, child: Element

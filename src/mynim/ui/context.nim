@@ -10,6 +10,7 @@ type
     nodes: seq[ElementNode]
     natural: seq[NaturalSize]
     rectScratch: seq[Rect]
+    paintSlots: seq[int]
     flexSizes, flexBases, flexMin, flexMax, flexFactors: seq[float32]
     hoveredSlots, pressedSlots, clickedSlots: seq[int]
     generation: uint32
@@ -53,7 +54,7 @@ type
 
   ElementNode = object
     parent, firstChild, lastChild, nextSibling: int32
-    row, reverse: bool
+    row, reverse, absolute: bool
     hasText: bool
     hovered, pressed, clicked: bool
     label: string
@@ -71,6 +72,7 @@ type
     aspectRatio: float32
     grow, shrink: float32
     pad, margin: array[4, float32]
+    inset: array[4, UiLength]
     gapX, gapY: float32
     justify, align, selfAlign: Align
     background, borderColor: Color
@@ -97,6 +99,7 @@ proc retire(owner: ElementOwner) =
   owner.nodes = @[]
   owner.natural = @[]
   owner.rectScratch = @[]
+  owner.paintSlots = @[]
   owner.flexSizes = @[]
   owner.flexBases = @[]
   owner.flexMin = @[]
@@ -253,6 +256,7 @@ proc build*(c: Context; view: proc(c: Context) {.closure.}) =
     new(c.owner)
   inc c.owner.generation
   c.owner.nodes.setLen(0)
+  c.owner.paintSlots.setLen(0)
   c.owner.nodes.add(ElementNode(parent: -1, firstChild: -1,
                                 lastChild: -1, nextSibling: -1,
                                 shrink: 1, justify: Align.Start,

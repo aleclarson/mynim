@@ -62,4 +62,29 @@ doAssert native.frame()
 doAssert not hoveredState and not pressedState
 
 win.destroy()
+
+var overlayActivations, flowActivations: int
+var overlayClicked, flowClicked: bool
+let overlapContent = ui.newContent(proc(ctx: ui.Context) =
+  let overlay = ctx.box().absolute().size(40, 40)
+    .onClick(proc() = inc overlayActivations)
+  overlayClicked = overlay.clicked()
+  let flow = ctx.box().size(40, 40)
+    .onClick(proc() = inc flowActivations)
+  flowClicked = flow.clicked()
+)
+let overlapWin = newWindow(WindowOptions(width: 64, height: 64, hidden: true,
+  content: overlapContent))
+let overlapNative = fake.windows[^1].surface
+doAssert overlapNative.frame()
+doAssert overlapNative.send(platform.SurfaceEvent(kind: platform.pointerDown,
+  x: 10, y: 10))
+doAssert overlapNative.frame()
+doAssert overlapNative.send(platform.SurfaceEvent(kind: platform.pointerUp,
+  x: 10, y: 10))
+doAssert overlapNative.frame()
+doAssert overlayActivations == 1 and flowActivations == 0
+doAssert overlayClicked and not flowClicked
+
+overlapWin.destroy()
 loop.shutdown()

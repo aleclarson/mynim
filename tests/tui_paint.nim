@@ -39,6 +39,20 @@ block solid_background_border_and_pixel_snap:
   doAssert childOp.color == scene.Color(r: 10, g: 20, b: 30, a: 128)
   doAssert not childOp.dashed
 
+block absolute_children_paint_above_flow:
+  let c = newContext()
+  c.build(proc(ctx: Context) =
+    let parent = ctx.box().size(20, 20)
+    discard parent.children(proc() =
+      discard ctx.box().absolute().size(20, 20).background(rgb(0, 0, 255))
+      discard ctx.box().size(20, 20).background(rgb(255, 0, 0))
+    )
+  )
+  let frame = c.layout(20, 20).paintScene()
+  doAssert frame.ops.len == 2
+  doAssert frame.ops[0].color == scene.Color(r: 255, g: 0, b: 0, a: 255)
+  doAssert frame.ops[1].color == scene.Color(r: 0, g: 0, b: 255, a: 255)
+
 block wide_color_reaches_scene_and_deduplicates:
   let c = newContext()
   let green = oklch(0.85, 0.3, 145).alpha(0.5)

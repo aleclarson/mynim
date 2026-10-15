@@ -94,23 +94,24 @@ proc measureTree(nodes: seq[ElementNode]; natural: var seq[NaturalSize]) =
     while child >= 0:
       let childNode = nodes[child]
       let childSize = natural[child]
-      if node.row:
-        let basis = childNode.basis.resolve(-1)
-        let mainW = if basis.ok:
-            childNode.clampWidth(basis.value, -1)
-          else:
-            childSize.w
-        contentW += mainW + childNode.marginX
-        contentH = max(contentH, childSize.h + childNode.marginY)
-      else:
-        contentW = max(contentW, childSize.w + childNode.marginX)
-        let basis = childNode.basis.resolve(-1)
-        let mainH = if basis.ok:
-            childNode.clampHeight(basis.value, -1)
-          else:
-            childSize.h
-        contentH += mainH + childNode.marginY
-      inc childCount
+      if not childNode.absolute:
+        if node.row:
+          let basis = childNode.basis.resolve(-1)
+          let mainW = if basis.ok:
+              childNode.clampWidth(basis.value, -1)
+            else:
+              childSize.w
+          contentW += mainW + childNode.marginX
+          contentH = max(contentH, childSize.h + childNode.marginY)
+        else:
+          contentW = max(contentW, childSize.w + childNode.marginX)
+          let basis = childNode.basis.resolve(-1)
+          let mainH = if basis.ok:
+              childNode.clampHeight(basis.value, -1)
+            else:
+              childSize.h
+          contentH += mainH + childNode.marginY
+        inc childCount
       child = int(childNode.nextSibling)
 
     if childCount > 1:
@@ -230,6 +231,11 @@ proc crossSize(node: ElementNode; natural: NaturalSize; row: bool;
     value = max(available - margins, 0'f32)
   clampSize(value, minimum, maximum, base)
 
+proc placeAbsoluteChild(nodes: seq[ElementNode]; natural: seq[NaturalSize];
+                        rects: var seq[Rect]; sizes, bases, minimum, maximum,
+                        factors: var seq[float32]; parentSlot,
+                        childSlot: int; bounds: Rect)
+
 proc placeNode(nodes: seq[ElementNode]; natural: seq[NaturalSize];
                rects: var seq[Rect]; sizes, bases, minimum, maximum,
                factors: var seq[float32]; slot: int; bounds: Rect) =
@@ -237,10 +243,13 @@ proc placeNode(nodes: seq[ElementNode]; natural: seq[NaturalSize];
   let node = nodes[slot]
   var child = int(node.firstChild)
   var childCount = 0
+  var totalChildren = 0
   while child >= 0:
-    inc childCount
+    inc totalChildren
+    if not nodes[child].absolute:
+      inc childCount
     child = int(nodes[child].nextSibling)
-  if childCount == 0:
+  if totalChildren == 0:
     return
 
   let row = node.row
@@ -270,52 +279,55 @@ proc placeNode(nodes: seq[ElementNode]; natural: seq[NaturalSize];
   while child >= 0:
     let childSlot = child
     let childNode = nodes[childSlot]
-    let childNatural = natural[childSlot]
-    let mainBase = childNode.basis.resolve(mainSize)
-    let fallback = childNode.preferredMain(childNatural, row,
-      if row: innerW else: innerH)
-    bases[childSlot] = if mainBase.ok: mainBase.value else: fallback
-    let minLength = if row: childNode.minW else: childNode.minH
-    let maxLength = if row: childNode.maxW else: childNode.maxH
-    let dimensionBase = if row: innerW else: innerH
-    let minValue = minLength.resolve(dimensionBase)
-    let maxValue = maxLength.resolve(dimensionBase)
-    var autoMin: float32
-    if row:
-      autoMin = childNatural.w
-    elif childNode.grow == 0:
-      autoMin = childNatural.h
-    let preferred = if row:
-        childNode.width.resolve(dimensionBase)
-      else:
-        childNode.height.resolve(dimensionBase)
-    if preferred.ok:
-      autoMin = min(autoMin, preferred.value)
-    minimum[childSlot] = if minValue.ok:
-        max(minValue.value, 0'f32)
-      else:
-        max(autoMin, 0'f32)
-    maximum[childSlot] = if maxValue.ok:
-        max(maxValue.value, minimum[childSlot])
-      else:
-        Inf.float32
-    sizes[childSlot] = min(max(bases[childSlot], minimum[childSlot]),
-      maximum[childSlot])
-    let marginMain = if row: childNode.marginX else: childNode.marginY
-    outerMain += sizes[childSlot] + marginMain
+    if not childNode.absolute:
+      let childNatural = natural[childSlot]
+      let mainBase = childNode.basis.resolve(mainSize)
+      let fallback = childNode.preferredMain(childNatural, row,
+        if row: innerW else: innerH)
+      bases[childSlot] = if mainBase.ok: mainBase.value else: fallback
+      let minLength = if row: childNode.minW else: childNode.minH
+      let maxLength = if row: childNode.maxW else: childNode.maxH
+      let dimensionBase = if row: innerW else: innerH
+      let minValue = minLength.resolve(dimensionBase)
+      let maxValue = maxLength.resolve(dimensionBase)
+      var autoMin: float32
+      if row:
+        autoMin = childNatural.w
+      elif childNode.grow == 0:
+        autoMin = childNatural.h
+      let preferred = if row:
+          childNode.width.resolve(dimensionBase)
+        else:
+          childNode.height.resolve(dimensionBase)
+      if preferred.ok:
+        autoMin = min(autoMin, preferred.value)
+      minimum[childSlot] = if minValue.ok:
+          max(minValue.value, 0'f32)
+        else:
+          max(autoMin, 0'f32)
+      maximum[childSlot] = if maxValue.ok:
+          max(maxValue.value, minimum[childSlot])
+        else:
+          Inf.float32
+      sizes[childSlot] = min(max(bases[childSlot], minimum[childSlot]),
+        maximum[childSlot])
+      let marginMain = if row: childNode.marginX else: childNode.marginY
+      outerMain += sizes[childSlot] + marginMain
     child = int(childNode.nextSibling)
 
   var free = mainSize - gaps - outerMain
   if free > 0:
     child = int(node.firstChild)
     while child >= 0:
-      factors[child] = nodes[child].grow
+      factors[child] = if nodes[child].absolute: 0'f32 else:
+        nodes[child].grow
       child = int(nodes[child].nextSibling)
     distribute(nodes, slot, sizes, minimum, maximum, factors, free, true)
   elif free < 0:
     child = int(node.firstChild)
     while child >= 0:
-      factors[child] = nodes[child].shrink * max(bases[child], 0'f32)
+      factors[child] = if nodes[child].absolute: 0'f32 else:
+        nodes[child].shrink * max(bases[child], 0'f32)
       child = int(nodes[child].nextSibling)
     distribute(nodes, slot, sizes, minimum, maximum, factors, -free, false)
 
@@ -324,12 +336,13 @@ proc placeNode(nodes: seq[ElementNode]; natural: seq[NaturalSize];
   child = int(node.firstChild)
   while child >= 0:
     let childNode = nodes[child]
-    outerMain += sizes[child] +
-      (if row: childNode.marginX else: childNode.marginY)
-    if childNode.margin[mainStart] == Auto:
-      inc autoMainMargins
-    if childNode.margin[mainEnd] == Auto:
-      inc autoMainMargins
+    if not childNode.absolute:
+      outerMain += sizes[child] +
+        (if row: childNode.marginX else: childNode.marginY)
+      if childNode.margin[mainStart] == Auto:
+        inc autoMainMargins
+      if childNode.margin[mainEnd] == Auto:
+        inc autoMainMargins
     child = int(childNode.nextSibling)
   free = max(mainSize - outerMain, 0'f32)
   let autoMain = if autoMainMargins > 0:
@@ -346,64 +359,162 @@ proc placeNode(nodes: seq[ElementNode]; natural: seq[NaturalSize];
   while child >= 0:
     let childSlot = child
     let childNode = nodes[childSlot]
-    let childNatural = natural[childSlot]
-    let mainBefore = if childNode.margin[mainStart] == Auto:
-        autoMain
-      else:
-        childNode.margin[mainStart]
-    let mainAfter = if childNode.margin[mainEnd] == Auto:
-        autoMain
-      else:
-        childNode.margin[mainEnd]
-    let crossBefore = if childNode.margin[crossStart] == Auto:
-        0'f32
-      else:
-        childNode.margin[crossStart]
-    let crossAfter = if childNode.margin[crossEnd] == Auto:
-        0'f32
-      else:
-        childNode.margin[crossEnd]
-    let crossMargins = crossBefore + crossAfter
-    let childAlign = if childNode.selfAlign == Align.Auto:
-        defaultAlign
-      else:
-        childNode.selfAlign
-    let crossBase = if row: innerH else: innerW
-    let crossExtent = childNode.crossSize(childNatural, row,
-      crossBase, sizes[childSlot], crossSize, crossMargins, childAlign)
-    let crossFree = crossSize - crossExtent - crossMargins
-    var crossOffset: float32
-    if childNode.margin[crossStart] == Auto and
-        childNode.margin[crossEnd] == Auto:
-      crossOffset = max(crossFree, 0'f32) / 2
-    elif childNode.margin[crossStart] == Auto:
-      crossOffset = max(crossFree, 0'f32)
-    elif childNode.margin[crossEnd] != Auto:
-      case childAlign
-      of Align.Center:
-        crossOffset = crossFree / 2
-      of Align.End:
-        crossOffset = crossFree
-      else:
-        discard
-    crossOffset += crossBefore
+    if not childNode.absolute:
+      let childNatural = natural[childSlot]
+      let mainBefore = if childNode.margin[mainStart] == Auto:
+          autoMain
+        else:
+          childNode.margin[mainStart]
+      let mainAfter = if childNode.margin[mainEnd] == Auto:
+          autoMain
+        else:
+          childNode.margin[mainEnd]
+      let crossBefore = if childNode.margin[crossStart] == Auto:
+          0'f32
+        else:
+          childNode.margin[crossStart]
+      let crossAfter = if childNode.margin[crossEnd] == Auto:
+          0'f32
+        else:
+          childNode.margin[crossEnd]
+      let crossMargins = crossBefore + crossAfter
+      let childAlign = if childNode.selfAlign == Align.Auto:
+          defaultAlign
+        else:
+          childNode.selfAlign
+      let crossBase = if row: innerH else: innerW
+      let crossExtent = childNode.crossSize(childNatural, row,
+        crossBase, sizes[childSlot], crossSize, crossMargins, childAlign)
+      let crossFree = crossSize - crossExtent - crossMargins
+      var crossOffset: float32
+      if childNode.margin[crossStart] == Auto and
+          childNode.margin[crossEnd] == Auto:
+        crossOffset = max(crossFree, 0'f32) / 2
+      elif childNode.margin[crossStart] == Auto:
+        crossOffset = max(crossFree, 0'f32)
+      elif childNode.margin[crossEnd] != Auto:
+        case childAlign
+        of Align.Center:
+          crossOffset = crossFree / 2
+        of Align.End:
+          crossOffset = crossFree
+        else:
+          discard
+      crossOffset += crossBefore
 
-    let mainPosition = position + mainBefore
-    let mainOffset = if node.reverse:
-        mainSize - mainPosition - sizes[childSlot]
+      let mainPosition = position + mainBefore
+      let mainOffset = if node.reverse:
+          mainSize - mainPosition - sizes[childSlot]
+        else:
+          mainPosition
+      var childRect: Rect
+      if row:
+        childRect = Rect(x: innerX + mainOffset, y: innerY + crossOffset,
+          w: sizes[childSlot], h: crossExtent)
       else:
-        mainPosition
-    var childRect: Rect
-    if row:
-      childRect = Rect(x: innerX + mainOffset, y: innerY + crossOffset,
-        w: sizes[childSlot], h: crossExtent)
-    else:
-      childRect = Rect(x: innerX + crossOffset, y: innerY + mainOffset,
-        w: crossExtent, h: sizes[childSlot])
-    placeNode(nodes, natural, rects, sizes, bases, minimum, maximum,
-      factors, childSlot, childRect)
-    position += mainBefore + sizes[childSlot] + mainAfter + gap + between
+        childRect = Rect(x: innerX + crossOffset, y: innerY + mainOffset,
+          w: crossExtent, h: sizes[childSlot])
+      let left = childNode.inset[3].resolve(innerW)
+      let right = childNode.inset[1].resolve(innerW)
+      let top = childNode.inset[0].resolve(innerH)
+      let bottom = childNode.inset[2].resolve(innerH)
+      if left.ok:
+        childRect.x += left.value
+      elif right.ok:
+        childRect.x -= right.value
+      if top.ok:
+        childRect.y += top.value
+      elif bottom.ok:
+        childRect.y -= bottom.value
+      placeNode(nodes, natural, rects, sizes, bases, minimum, maximum,
+        factors, childSlot, childRect)
+      position += mainBefore + sizes[childSlot] + mainAfter + gap + between
     child = int(childNode.nextSibling)
+
+  child = int(node.firstChild)
+  while child >= 0:
+    let childSlot = child
+    let childNode = nodes[childSlot]
+    if childNode.absolute:
+      placeAbsoluteChild(nodes, natural, rects, sizes, bases, minimum,
+        maximum, factors, slot, childSlot, bounds)
+    child = int(childNode.nextSibling)
+
+proc placeAbsoluteChild(nodes: seq[ElementNode]; natural: seq[NaturalSize];
+                        rects: var seq[Rect]; sizes, bases, minimum, maximum,
+                        factors: var seq[float32]; parentSlot,
+                        childSlot: int; bounds: Rect) =
+  let parent = nodes[parentSlot]
+  let child = nodes[childSlot]
+  let paddingW = max(bounds.w - parent.border[1] - parent.border[3], 0'f32)
+  let paddingH = max(bounds.h - parent.border[0] - parent.border[2], 0'f32)
+  let top = child.inset[0].resolve(paddingH)
+  let right = child.inset[1].resolve(paddingW)
+  let bottom = child.inset[2].resolve(paddingH)
+  let left = child.inset[3].resolve(paddingW)
+  let width = child.width.resolve(paddingW)
+  let height = child.height.resolve(paddingH)
+
+  var childW: float32
+  if width.ok:
+    childW = child.clampWidth(width.value, paddingW)
+  elif left.ok and right.ok:
+    childW = child.clampWidth(
+      paddingW - left.value - right.value - child.marginX, paddingW)
+  elif child.aspectRatio > 0 and height.ok:
+    childW = child.clampWidth(
+      max(height.value - child.contentInsetY, 0'f32) *
+        child.aspectRatio + child.contentInsetX, paddingW)
+  else:
+    childW = child.clampWidth(
+      min(natural[childSlot].w,
+        max(paddingW - child.marginX, 0'f32)), paddingW)
+
+  var childH: float32
+  if height.ok:
+    childH = child.clampHeight(height.value, paddingH)
+  elif top.ok and bottom.ok:
+    childH = child.clampHeight(
+      paddingH - top.value - bottom.value - child.marginY, paddingH)
+  elif child.aspectRatio > 0:
+    childH = child.clampHeight(
+      max(childW - child.contentInsetX, 0'f32) /
+        child.aspectRatio + child.contentInsetY, paddingH)
+  else:
+    childH = child.clampHeight(natural[childSlot].h, paddingH)
+
+  var x = marginValue(child.margin[3])
+  if left.ok:
+    x += left.value
+  elif right.ok:
+    x = paddingW - right.value - childW - marginValue(child.margin[1])
+  if left.ok and right.ok:
+    let free = paddingW - left.value - right.value - childW - child.marginX
+    let autoLeft = child.margin[3] == Auto
+    let autoRight = child.margin[1] == Auto
+    if autoLeft and autoRight:
+      x += max(free, 0'f32) / 2
+    elif autoLeft:
+      x += max(free, 0'f32)
+
+  var y = marginValue(child.margin[0])
+  if top.ok:
+    y += top.value
+  elif bottom.ok:
+    y = paddingH - bottom.value - childH - marginValue(child.margin[2])
+  if top.ok and bottom.ok:
+    let free = paddingH - top.value - bottom.value - childH - child.marginY
+    let autoTop = child.margin[0] == Auto
+    let autoBottom = child.margin[2] == Auto
+    if autoTop and autoBottom:
+      y += max(free, 0'f32) / 2
+    elif autoTop:
+      y += max(free, 0'f32)
+
+  let childRect = Rect(x: bounds.x + parent.border[3] + x,
+    y: bounds.y + parent.border[0] + y, w: childW, h: childH)
+  placeNode(nodes, natural, rects, sizes, bases, minimum, maximum,
+    factors, childSlot, childRect)
 
 proc layout*(c: Context; bounds: Rect): LayoutResult =
   ## Lays out the latest completed build inside bounds.
@@ -466,16 +577,25 @@ proc targetAt(layout: LayoutResult; x, y: float32): Element =
       layout.generation != layout.owner.generation or
       layout.rects.len != layout.owner.nodes.len:
     return
+  let usePaintOrder = layout.owner.paintSlots.len == layout.rects.len
   var topmost: Element
-  for slot in countdown(layout.rects.high, 1):
-    if not layout.rects[slot].contains(x, y):
-      continue
-    let target = Element(owner: layout.owner, slot: uint32(slot),
-                         generation: layout.generation)
-    if topmost.owner == nil:
-      topmost = target
-    if layout.owner.nodes[slot].clickHandler != nil:
-      return target
+  var orderIndex = if usePaintOrder:
+      layout.owner.paintSlots.high
+    else:
+      layout.rects.high
+  while orderIndex >= 1:
+    let slot = if usePaintOrder:
+        layout.owner.paintSlots[orderIndex]
+      else:
+        orderIndex
+    if slot > 0 and layout.rects[slot].contains(x, y):
+      let target = Element(owner: layout.owner, slot: uint32(slot),
+                           generation: layout.generation)
+      if topmost.owner == nil:
+        topmost = target
+      if layout.owner.nodes[slot].clickHandler != nil:
+        return target
+    dec orderIndex
   topmost
 
 proc slotsAt(layout: LayoutResult; x, y: float32): seq[int] =
@@ -673,6 +793,51 @@ proc alignSelf*(e: Element; value: Align): Element =
   let n = e.node
   if n != nil:
     n.selfAlign = value
+
+proc absolute*(e: Element): Element =
+  ## Removes this element from its parent's flow and positions it by its insets.
+  result = e
+  let n = e.node
+  if n != nil:
+    n.absolute = true
+
+proc updateInset(e: Element; side: int; value: UiLength): Element =
+  result = e
+  let n = e.node
+  if n != nil:
+    n.inset[side] = value
+
+proc top*(e: Element; value: float32): Element =
+  ## Sets the top inset, or moves an in-flow element down.
+  e.updateInset(0, pixels(value))
+
+proc right*(e: Element; value: float32): Element =
+  ## Sets the right inset, or moves an in-flow element left.
+  e.updateInset(1, pixels(value))
+
+proc bottom*(e: Element; value: float32): Element =
+  ## Sets the bottom inset, or moves an in-flow element up.
+  e.updateInset(2, pixels(value))
+
+proc left*(e: Element; value: float32): Element =
+  ## Sets the left inset, or moves an in-flow element right.
+  e.updateInset(3, pixels(value))
+
+proc topPercent*(e: Element; value: float32): Element =
+  ## Sets the top inset as a percentage of its parent's height.
+  e.updateInset(0, percent(value))
+
+proc rightPercent*(e: Element; value: float32): Element =
+  ## Sets the right inset as a percentage of its parent's width.
+  e.updateInset(1, percent(value))
+
+proc bottomPercent*(e: Element; value: float32): Element =
+  ## Sets the bottom inset as a percentage of its parent's height.
+  e.updateInset(2, percent(value))
+
+proc leftPercent*(e: Element; value: float32): Element =
+  ## Sets the left inset as a percentage of its parent's width.
+  e.updateInset(3, percent(value))
 
 proc center*(e: Element): Element =
   discard e.justify(Align.Center)

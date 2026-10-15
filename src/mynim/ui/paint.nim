@@ -332,6 +332,20 @@ proc paintBitmap(s: scene.Scene; node: ElementNode; rect, root: Rect;
     pixelated: node.bitmap.pixelated and enlarged,
     grayscale: node.grayscale))
 
+proc collectPaintOrder(nodes: seq[ElementNode]; slot: int;
+                       order: var seq[int]) =
+  order.add(slot)
+  var child = int(nodes[slot].firstChild)
+  while child >= 0:
+    if not nodes[child].absolute:
+      collectPaintOrder(nodes, child, order)
+    child = int(nodes[child].nextSibling)
+  child = int(nodes[slot].firstChild)
+  while child >= 0:
+    if nodes[child].absolute:
+      collectPaintOrder(nodes, child, order)
+    child = int(nodes[child].nextSibling)
+
 proc paintScene*(layout: LayoutResult; scale = 1'f32;
                  clear = transparent): scene.Scene =
   ## Converts a current layout into a device-pixel scene for Mygo's renderers.
@@ -343,6 +357,10 @@ proc paintScene*(layout: LayoutResult; scale = 1'f32;
     raise newException(ValueError, "ui: cannot paint a stale layout")
   if not scale.finite or scale <= 0:
     raise newException(ValueError, "ui: scene scale must be finite and positive")
+
+  layout.owner.paintSlots.setLen(0)
+  if layout.owner.nodes.len > 0:
+    collectPaintOrder(layout.owner.nodes, 0, layout.owner.paintSlots)
 
   let width = layout.root.w.pixelDimension(scale)
   let height = layout.root.h.pixelDimension(scale)
@@ -361,7 +379,8 @@ proc paintScene*(layout: LayoutResult; scale = 1'f32;
       result.maskAtlas = system.maskAtlas
       result.colorAtlas = system.colorAtlas
 
-      for slot, node in layout.owner.nodes:
+      for slot in layout.owner.paintSlots:
+        let node = layout.owner.nodes[slot]
         let fillVisible = node.background.a > 0
         let borderVisible = node.borderColor.a > 0 and scene.hasBorder(node.border)
         if not fillVisible and not borderVisible and not node.hasText and
