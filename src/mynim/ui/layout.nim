@@ -1445,6 +1445,11 @@ proc layoutAt(c: Context; bounds: Rect; now: MonoTime;
       var first = high(int)
       var last = -1
       let viewport = result.rects[slot]
+      result.animating = state.applyListFollowAnimation(
+        c.owner.nodes, result.rects, slot,
+        max(viewport.w - node.contentInsetX, 0'f32),
+        max(viewport.h - node.contentInsetY, 0'f32), now, reduceMotion) or
+        result.animating
       let top = viewport.y + node.border[0] + node.pad[0]
       let bottom = viewport.y + viewport.h - node.border[2] - node.pad[2]
       for rowSlot in 1..<c.owner.nodes.len:

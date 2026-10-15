@@ -103,6 +103,56 @@ discard followSurface.send(platform.SurfaceEvent(kind: platform.surfaceResize))
 doAssert followSurface.frame()
 doAssert followState.offset().y == followState.maxOffset().y
 
+var animatedFollowCount = 100
+let animatedFollowState = ui.newListState(20, followEnd = true)
+animatedFollowState.setFollowEndAnimation(ui.Animation(
+  duration: initDuration(milliseconds = 100), ease: ui.linear))
+let animatedFollowContent = ui.newContent(proc(ctx: ui.Context) =
+  discard ctx.list(animatedFollowState, animatedFollowCount, proc(row: int) =
+    discard ctx.box().size(20, 20).shrink(0)
+  ).size(20, 40)
+)
+discard newWindow(WindowOptions(width: 20, height: 40, hidden: true,
+  content: animatedFollowContent))
+let animatedFollowSurface = fake.windows[^1].surface
+
+doAssert animatedFollowSurface.frame()
+doAssert animatedFollowSurface.frame()
+doAssert animatedFollowState.offset().y == animatedFollowState.maxOffset().y
+animatedFollowCount = 110
+discard animatedFollowSurface.send(platform.SurfaceEvent(
+  kind: platform.surfaceResize))
+doAssert animatedFollowSurface.frame()
+doAssert animatedFollowState.offset().y == animatedFollowState.maxOffset().y
+doAssert not animatedFollowState.atEnd()
+os.sleep(130)
+doAssert animatedFollowSurface.frame()
+doAssert animatedFollowState.atEnd()
+
+animatedFollowCount = 120
+discard animatedFollowSurface.send(platform.SurfaceEvent(
+  kind: platform.surfaceResize))
+doAssert animatedFollowSurface.frame()
+doAssert not animatedFollowState.atEnd()
+doAssert animatedFollowState.offset().y == animatedFollowState.maxOffset().y
+
+discard animatedFollowSurface.send(platform.SurfaceEvent(
+  kind: platform.pointerScroll, x: 5, y: 5, dy: -10))
+doAssert animatedFollowSurface.frame()
+let animatedFollowInterrupted = animatedFollowState.offset().y
+doAssert animatedFollowInterrupted < animatedFollowState.maxOffset().y
+os.sleep(130)
+doAssert animatedFollowSurface.frame()
+doAssert animatedFollowState.offset().y == animatedFollowInterrupted
+doAssert not animatedFollowState.atEnd()
+
+animatedFollowCount = 130
+discard animatedFollowSurface.send(platform.SurfaceEvent(
+  kind: platform.surfaceResize))
+doAssert animatedFollowSurface.frame()
+doAssert animatedFollowState.offset().y == animatedFollowInterrupted
+doAssert animatedFollowState.offset().y < animatedFollowState.maxOffset().y
+
 let multiState = ui.newListState(20, multiSelectable = true)
 when defined(macosx):
   const selectionCommand = platform.modSuper

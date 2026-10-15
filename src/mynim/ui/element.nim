@@ -131,10 +131,17 @@ type
     anchorInset: float64
     anchorScrollY: float32
     followOffsetY, followMaxY: float32
+    followEndAnimation: Animation
+    followLag: ScrollMotionChannel
+    followRow: int
+    followKey: string
+    followBelow: float64
+    followWidth: float32
     laidOut, visibleRead, atEnd: bool
     anchorValid, selectedKeyValid, selectionEnabled: bool
     multiSelectionEnabled: bool
-    followEnd, following, followStarted: bool
+    followEnd, following, followStarted, followRequest: bool
+    followEndAnimated, followSeen, followKeyValid: bool
     request: ListRequestKind
     requestRow: int
     requestAlign: Align

@@ -196,6 +196,7 @@ proc syncListSelection(state: ListState) =
     state.clearListSelection()
 
 proc prepareListFollow(state: ListState) =
+  state.followRequest = false
   if not state.followEnd:
     return
   if not state.followStarted:
@@ -204,6 +205,7 @@ proc prepareListFollow(state: ListState) =
     state.following = state.scrollState.offsetY >= state.followMaxY - 0.5'f32
   if state.following and state.request == listNoRequest:
     state.request = listRequestToEnd
+    state.followRequest = true
 
 proc blockPosition(heights: ListHeights; id: int): tuple[index: int, found: bool] =
   var low = 0
@@ -385,6 +387,15 @@ proc newListState*(estimatedRowHeight = 28'f32; rowGap = 0'f32;
   result.selectedRow = -1
   result.selectionPivot = -1
   result.last = -1
+
+proc setFollowEndAnimation*(state: ListState; animation: Animation) =
+  ## Enables follow-end and animates rows added while the list stays at its end.
+  if state == nil:
+    raise newException(ValueError, "ui: list state cannot be nil")
+  validateAnimation(animation)
+  state.followEnd = true
+  state.followEndAnimation = animation
+  state.followEndAnimated = true
 
 func selected*(state: ListState): int =
   ## Returns the chosen row index, or -1 when no row is chosen.
@@ -788,6 +799,76 @@ proc observeListViewport(state: ListState; height: float32): bool =
   result = abs(state.viewportHeight - height) >= 0.5'f32
   state.viewportHeight = height
 
+proc resetListFollowAnimation(state: ListState; now: MonoTime) =
+  state.followLag = ScrollMotionChannel(at: now)
+  state.followSeen = false
+  state.followRow = -1
+  state.followKey = ""
+  state.followKeyValid = false
+
+proc applyListFollowAnimation(state: ListState; nodes: seq[ElementNode];
+    rects: var seq[Rect]; listSlot: int; rowWidth, viewportHeight: float32;
+    now: MonoTime;
+    reduceMotion: bool): bool =
+  if state == nil or listSlot <= 0 or listSlot >= nodes.len or
+      rects.len != nodes.len:
+    return false
+  if not state.followEndAnimated or not state.followEnd or
+      not state.following or not state.followRequest or
+      state.rowCount == 0 or reduceMotion:
+    state.resetListFollowAnimation(now)
+    return false
+
+  if not state.followSeen or abs(rowWidth - state.followWidth) >= 0.5'f32:
+    state.resetListFollowAnimation(now)
+  else:
+    state.followLag.advance(now)
+    var previousRow = state.followRow
+    var previousFound = previousRow >= 0 and previousRow < state.rowCount
+    if previousFound and state.followKeyValid and state.rowKey != nil:
+      previousRow = state.findListKey(state.followKey, previousRow)
+      previousFound = previousRow >= 0
+    if previousFound:
+      let total = state.heights.listHeightTop(state.rowCount, state.gap)
+      let below = total - state.heights.listHeightTop(previousRow, state.gap)
+      let change = below - state.followBelow
+      if change > 0.5:
+        state.followLag.value = min(state.followLag.value + change,
+          float64(viewportHeight))
+        state.followLag.headFor(0, state.followEndAnimation, now)
+      elif change < -0.5:
+        state.followLag.value = max(state.followLag.value + change,
+          -float64(viewportHeight))
+        state.followLag.headFor(0, state.followEndAnimation, now)
+    else:
+      state.resetListFollowAnimation(now)
+
+  let total = state.heights.listHeightTop(state.rowCount, state.gap)
+  let last = state.rowCount - 1
+  state.followRow = last
+  state.followBelow = total - state.heights.listHeightTop(last, state.gap)
+  state.followWidth = rowWidth
+  state.followKeyValid = state.rowKey != nil
+  state.followKey = if state.rowKey != nil: state.rowKey(last) else: ""
+  state.followSeen = true
+
+  let lag = float32(state.followLag.value)
+  if abs(lag) > 0.01'f32:
+    for slot in 1..<nodes.len:
+      var followsRow = nodes[slot].listState == state and
+        nodes[slot].listRowIndex >= 0
+      var parent = int(nodes[slot].parent)
+      while not followsRow and parent > 0:
+        let ancestor = nodes[parent]
+        if ancestor.listState == state:
+          followsRow = ancestor.listRowIndex >= 0
+          break
+        parent = int(ancestor.parent)
+      if followsRow:
+        rects[slot].y += lag
+
+  state.followLag.moving or state.followLag.pending
+
 proc finishList(state: ListState; first, last: int): bool =
   if state == nil:
     return false
@@ -796,7 +877,9 @@ proc finishList(state: ListState; first, last: int): bool =
   state.first = first
   state.last = last
   state.atEnd = state.rowCount == 0 or
-    state.scrollState.offset().y >= state.scrollState.maxOffset().y - 0.5'f32
+    (state.scrollState.offset().y >= state.scrollState.maxOffset().y - 0.5'f32 and
+      abs(float32(state.followLag.value)) <= 0.5'f32 and
+      not state.followLag.pending)
   if state.followEnd:
     if state.atEnd:
       state.following = true
