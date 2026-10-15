@@ -12,6 +12,7 @@ import std/[os, strutils, strtabs, tables, sets, json, atomics, times,
             parseutils, base64, random, algorithm]
 import core/locks
 import mynim/transfer, mynim/image
+import mynim/ui as uiPackage
 import mynim/internal/platform, mynim/internal/callcontext,
        mynim/internal/accelerator, mynim/internal/bridge,
        mynim/internal/surface, mynim/internal/l10n, mynim/i18n
