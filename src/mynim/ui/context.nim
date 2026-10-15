@@ -81,7 +81,7 @@ type
   ElementNode = object
     parent, firstChild, lastChild, nextSibling: int32
     row, reverse, wrap, wrapReverse, grid, absolute, alignSet,
-      justifySet, focusable, focused, focusVisible: bool
+      justifySet, focusable, focused, focusVisible, scrollX, scrollY: bool
     gridCol, gridRow, gridColSpan, gridRowSpan: int
     hasText: bool
     hovered, pressed, clicked: bool
@@ -112,6 +112,7 @@ type
     background, borderColor: Color
     opacity: float32
     opacitySet: bool
+    scrollState: ScrollState
     hasGradient: bool
     gradient: LinearGradient
     shadows: seq[UiShadow]

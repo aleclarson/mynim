@@ -51,6 +51,13 @@ proc frameDimension(value: float64; name: string): float32 =
     raise newException(ValueError, "ui: surface " & name & " is out of range")
   float32(max(value, 0))
 
+proc scrollDelta(value: float64): float32 =
+  if classify(value) in {fcNan, fcInf, fcNegInf} or
+      abs(value) > float64(high(float32)):
+    0'f32
+  else:
+    float32(value)
+
 proc releaseGpu(rt: Runtime) =
   when defined(macosx):
     if rt.metalRenderer != nil:
@@ -564,6 +571,19 @@ proc event(rt: Runtime; ev: platform.SurfaceEvent): bool =
         handler()
         rt.clickedSlots = @[slot]
       rt.refreshPointer()
+      rt.requestFrame()
+      return true
+    false
+  of platform.pointerScroll:
+    rt.pointerX = scrollDelta(ev.x)
+    rt.pointerY = scrollDelta(ev.y)
+    rt.hasPointer = true
+    var dx = scrollDelta(ev.dx)
+    var dy = scrollDelta(ev.dy)
+    if (ev.mods and platform.modShift) != 0 and dx == 0:
+      dx = dy
+      dy = 0
+    if rt.frameLayout.scrollAt(rt.pointerX, rt.pointerY, dx, dy):
       rt.requestFrame()
       return true
     false

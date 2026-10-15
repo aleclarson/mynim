@@ -38,9 +38,37 @@ type
     start*, stop*: float32 ## Stop positions from 0 to 1; both zero mean 0 and 1.
     oklab*: bool ## Mixes the stops in Oklab when true, sRGB otherwise.
 
+  ScrollState* = ref object ## Persistent offset for one scroll container.
+    offsetX, offsetY: float32
+    maxX, maxY: float32
+
 const
   Auto* = Inf.float32 ## Automatic length, used by margins.
 
 proc contains*(r: Rect; x, y: float32): bool =
   ## Reports whether the point is inside r, including its top and left edges.
   x >= r.x and y >= r.y and x < r.x + r.w and y < r.y + r.h
+
+proc newScrollState*(): ScrollState =
+  ## Creates persistent state for a scroll container.
+  new(result)
+
+func offset*(state: ScrollState): tuple[x, y: float32] =
+  ## Returns the current horizontal and vertical offsets in DIPs.
+  if state == nil: return
+  (x: state.offsetX, y: state.offsetY)
+
+func maxOffset*(state: ScrollState): tuple[x, y: float32] =
+  ## Returns the greatest horizontal and vertical offsets in DIPs.
+  if state == nil: return
+  (x: state.maxX, y: state.maxY)
+
+proc scrollTo*(state: ScrollState; x, y: float32) =
+  ## Sets the requested offsets; layout clamps them to the content range.
+  if state == nil:
+    raise newException(ValueError, "ui: scroll state cannot be nil")
+  if classify(x) in {fcNan, fcInf, fcNegInf} or
+      classify(y) in {fcNan, fcInf, fcNegInf}:
+    raise newException(ValueError, "ui: scroll offsets must be finite")
+  state.offsetX = max(x, 0'f32)
+  state.offsetY = max(y, 0'f32)

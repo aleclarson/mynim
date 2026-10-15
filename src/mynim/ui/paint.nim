@@ -473,6 +473,23 @@ proc paintBitmap(s: scene.Scene; node: ElementNode; rect, root: Rect;
     color: sceneColor(node.imageTint), grayscale: node.grayscale,
     opacity: opacity))
 
+proc scrollClipOp(layout: LayoutResult; slot: int;
+                  scale: float32): scene.Op =
+  let node = layout.owner.nodes[slot]
+  let box = layout.rects[slot]
+  let clip = Rect(x: box.x + node.border[3],
+    y: box.y + node.border[0],
+    w: max(box.w - node.border[1] - node.border[3], 0'f32),
+    h: max(box.h - node.border[0] - node.border[2], 0'f32))
+  let radii = [
+    max(node.radius[0] - max(node.border[0], node.border[3]), 0'f32),
+    max(node.radius[1] - max(node.border[0], node.border[1]), 0'f32),
+    max(node.radius[2] - max(node.border[2], node.border[1]), 0'f32),
+    max(node.radius[3] - max(node.border[2], node.border[3]), 0'f32)]
+  scene.Op(kind: scene.opPushClip,
+    rect: clip.sceneRect(layout.root, scale),
+    radii: radii.scaledEdges(scale), continuous: continuousCorners)
+
 proc opacityOf(nodes: seq[ElementNode]; slot: int): float32 =
   result = 1
   var current = slot
@@ -551,6 +568,13 @@ proc paintScene*(layout: LayoutResult; scale = 1'f32;
         let rect = layout.rects[slot].sceneRect(layout.root, scale)
         if rect.empty:
           continue
+        var clipCount = 0
+        var parent = int(node.parent)
+        while parent >= 0:
+          if layout.owner.nodes[parent].scrollState != nil:
+            result.ops.add(layout.scrollClipOp(parent, scale))
+            inc clipCount
+          parent = int(layout.owner.nodes[parent].parent)
         for shadow in node.shadows:
           if not shadow.inset:
             result.paintShadow(node, layout.rects[slot], layout.root,
@@ -589,6 +613,8 @@ proc paintScene*(layout: LayoutResult; scale = 1'f32;
         result.paintBitmap(node, layout.rects[slot], layout.root, scale,
                            opacity)
         result.paintSvg(node, layout.rects[slot], layout.root, scale, opacity)
+        for _ in 0..<clipCount:
+          result.ops.add(scene.Op(kind: scene.opPopClip))
 
       if not system.full() or attempt == 2:
         break

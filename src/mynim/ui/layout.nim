@@ -1250,6 +1250,73 @@ proc placeAbsoluteChild(nodes: seq[ElementNode]; natural: seq[NaturalSize];
   placeNode(nodes, natural, rects, sizes, bases, minimum, maximum,
     factors, flexSlots, flexLines, gridScratch, childSlot, childRect)
 
+proc scrollExtent(nodes: seq[ElementNode]; rects: seq[Rect]; root: int;
+                  horizontal: bool): float32 =
+  let node = nodes[root]
+  let box = rects[root]
+  result = if horizontal:
+      box.x + node.border[3] + node.pad[3]
+    else:
+      box.y + node.border[0] + node.pad[0]
+  var pending: seq[int]
+  var child = int(node.firstChild)
+  while child >= 0:
+    pending.add(child)
+    child = int(nodes[child].nextSibling)
+  while pending.len > 0:
+    let slot = pending.pop()
+    let item = nodes[slot]
+    let itemBox = rects[slot]
+    if horizontal:
+      result = max(result, itemBox.x + itemBox.w +
+        marginValue(item.margin[1]))
+    else:
+      result = max(result, itemBox.y + itemBox.h +
+        marginValue(item.margin[2]))
+    if not (if horizontal: item.scrollX else: item.scrollY):
+      child = int(item.firstChild)
+      while child >= 0:
+        pending.add(child)
+        child = int(nodes[child].nextSibling)
+  if horizontal:
+    result = max(result + node.pad[1] -
+      (box.x + box.w - node.border[1]), 0'f32)
+  else:
+    result = max(result + node.pad[2] -
+      (box.y + box.h - node.border[2]), 0'f32)
+  if not result.finiteUi:
+    result = 0
+
+proc updateScrollRanges(nodes: seq[ElementNode]; rects: seq[Rect]) =
+  for slot in 1..<nodes.len:
+    let node = nodes[slot]
+    let state = node.scrollState
+    if state == nil:
+      continue
+    state.maxX = if node.scrollX:
+        scrollExtent(nodes, rects, slot, true)
+      else:
+        0'f32
+    state.maxY = if node.scrollY:
+        scrollExtent(nodes, rects, slot, false)
+      else:
+        0'f32
+    state.offsetX = min(max(state.offsetX, 0'f32), state.maxX)
+    state.offsetY = min(max(state.offsetY, 0'f32), state.maxY)
+
+proc shiftScrolledRects(nodes: seq[ElementNode]; rects: var seq[Rect]) =
+  for slot in 1..<nodes.len:
+    var parent = int(nodes[slot].parent)
+    while parent >= 0:
+      let ancestor = nodes[parent]
+      let state = ancestor.scrollState
+      if state != nil:
+        if ancestor.scrollX:
+          rects[slot].x -= state.offsetX
+        if ancestor.scrollY:
+          rects[slot].y -= state.offsetY
+      parent = int(ancestor.parent)
+
 proc layout*(c: Context; bounds: Rect): LayoutResult =
   ## Lays out the latest completed build inside bounds.
   if c == nil or c.owner.closed or not c.owner.hasFrame:
@@ -1300,6 +1367,8 @@ proc layout*(c: Context; bounds: Rect): LayoutResult =
         c.owner.flexLines, c.owner.gridScratch, 0, result.root)
     for slot in 0..<result.rects.len:
       result.rects[slot] = c.owner.rectScratch[slot]
+    updateScrollRanges(c.owner.nodes, c.owner.rectScratch)
+    shiftScrolledRects(c.owner.nodes, result.rects)
 
 proc layout*(c: Context; width, height: float32): LayoutResult =
   ## Lays out the latest completed build at the window origin.
@@ -1314,6 +1383,22 @@ proc bounds*(layout: LayoutResult; element: Element): Rect =
       int(element.slot) >= layout.rects.len:
     raise newException(ValueError, "ui: element is not part of this layout")
   layout.rects[int(element.slot)]
+
+proc insideScrollClips(layout: LayoutResult; slot: int;
+                       x, y: float32): bool =
+  var parent = int(layout.owner.nodes[slot].parent)
+  while parent >= 0:
+    let node = layout.owner.nodes[parent]
+    if node.scrollState != nil:
+      let box = layout.rects[parent]
+      let left = box.x + node.border[3]
+      let top = box.y + node.border[0]
+      let right = box.x + box.w - node.border[1]
+      let bottom = box.y + box.h - node.border[2]
+      if x < left or x >= right or y < top or y >= bottom:
+        return false
+    parent = int(node.parent)
+  true
 
 proc targetAt(layout: LayoutResult; x, y: float32): Element =
   if layout.owner == nil or layout.owner.closed or layout.owner.inBuild or
@@ -1332,7 +1417,8 @@ proc targetAt(layout: LayoutResult; x, y: float32): Element =
         layout.owner.paintSlots[orderIndex]
       else:
         orderIndex
-    if slot > 0 and layout.rects[slot].contains(x, y):
+    if slot > 0 and layout.rects[slot].contains(x, y) and
+        layout.insideScrollClips(slot, x, y):
       let target = Element(owner: layout.owner, slot: uint32(slot),
                            generation: layout.generation)
       if topmost.owner == nil:
@@ -1349,8 +1435,29 @@ proc slotsAt(layout: LayoutResult; x, y: float32): seq[int] =
       layout.rects.len != layout.owner.nodes.len:
     return
   for slot in 1..<layout.rects.len:
-    if layout.rects[slot].contains(x, y):
+    if layout.rects[slot].contains(x, y) and
+        layout.insideScrollClips(slot, x, y):
       result.add(slot)
+
+proc scrollAt(layout: LayoutResult; x, y, dx, dy: float32): bool =
+  let target = layout.targetAt(x, y)
+  if target.owner == nil:
+    return false
+  var slot = int(target.slot)
+  while slot > 0:
+    let node = layout.owner.nodes[slot]
+    let state = node.scrollState
+    if state != nil:
+      let oldX = state.offsetX
+      let oldY = state.offsetY
+      if node.scrollX:
+        state.offsetX = min(max(oldX + dx, 0'f32), state.maxX)
+      if node.scrollY:
+        state.offsetY = min(max(oldY + dy, 0'f32), state.maxY)
+      if state.offsetX != oldX or state.offsetY != oldY:
+        return true
+    slot = int(node.parent)
+  false
 
 proc dispatchClick(layout: LayoutResult; pressed: Element;
                    x, y: float32; clickedSlot: var int): bool =
@@ -1426,6 +1533,42 @@ proc textInput*(e: Element; client: platform.TextInputClient): Element =
     n.textClient = client
     if client != nil:
       n.focusable = true
+
+proc scrollX*(e: Element; state: ScrollState): Element =
+  ## Clips this element and scrolls its content horizontally with state.
+  if state == nil:
+    raise newException(ValueError, "ui: scroll state cannot be nil")
+  result = e
+  let n = e.node
+  if n != nil:
+    n.scrollX = true
+    n.scrollState = state
+
+proc scrollY*(e: Element; state: ScrollState): Element =
+  ## Clips this element and scrolls its content vertically with state.
+  if state == nil:
+    raise newException(ValueError, "ui: scroll state cannot be nil")
+  result = e
+  let n = e.node
+  if n != nil:
+    n.scrollY = true
+    n.scrollState = state
+
+proc scroll*(e: Element; state: ScrollState): Element =
+  ## Clips this element and scrolls its content on both axes with state.
+  result = e.scrollX(state).scrollY(state)
+
+proc scroll*(c: Context; state: ScrollState): Element =
+  ## Creates a vertically scrolling column with persistent state.
+  c.column().scrollY(state)
+
+proc scrollHorizontal*(c: Context; state: ScrollState): Element =
+  ## Creates a horizontally scrolling row with persistent state.
+  c.row().scrollX(state)
+
+proc scrollBoth*(c: Context; state: ScrollState): Element =
+  ## Creates a two-axis scrolling box with persistent state.
+  c.box().scroll(state)
 
 proc updateDimension(e: Element; dimension: LayoutDimension;
                      value: UiLength): Element =
