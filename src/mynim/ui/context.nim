@@ -89,6 +89,7 @@ type
     clickHandler: proc() {.closure.}
     bitmap: Bitmap
     imageRegion: Rect
+    flipX, flipY: bool
     vector: Svg
     vectorColor: Color
     imageTint: Color
@@ -279,14 +280,17 @@ proc image*(c: Context; bitmap: Bitmap): Element =
     n.bitmap = bitmap
     n.fit = Fit.Contain
 
-proc imageRegion*(c: Context; bitmap: Bitmap; source: Rect): Element =
+proc imageRegion*(c: Context; bitmap: Bitmap; source: Rect;
+                  flipX = false; flipY = false): Element =
   ## Adds an image element showing source pixels from a bitmap. An empty
   ## source rectangle shows the whole bitmap; an out-of-bounds rectangle
-  ## is clipped to the bitmap.
+  ## is clipped to the bitmap. flipX and flipY mirror that region.
   result = c.image(bitmap)
   let n = result.node
   if n != nil:
     n.imageRegion = source
+    n.flipX = flipX
+    n.flipY = flipY
 
 proc svg*(c: Context; vector: Svg): Element =
   ## Adds an SVG element with its intrinsic size in DIPs.

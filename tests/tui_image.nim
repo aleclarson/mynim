@@ -46,9 +46,10 @@ var imageWidth, imageHeight = 40'f32
 var grayscale = false
 var tint = ui.transparent
 var sourceRegion = ui.Rect()
+var flipX, flipY = false
 let content = ui.newContent(proc(ctx: ui.Context) =
-  let image = ctx.imageRegion(bitmap, sourceRegion).size(imageWidth, imageHeight)
-    .fit(fit).tint(tint)
+  let image = ctx.imageRegion(bitmap, sourceRegion, flipX, flipY)
+    .size(imageWidth, imageHeight).fit(fit).tint(tint)
   if grayscale:
     discard image.grayscale()
 )
@@ -122,6 +123,17 @@ doAssert native.pixel(5, 5) == [255'u8, 255, 255, 255]
 doAssert native.pixel(35, 35) == [255'u8, 255, 255, 255]
 
 sourceRegion = ui.Rect()
+flipX = true
+flipY = true
+discard native.send(platform.SurfaceEvent(kind: platform.surfaceResize))
+doAssert native.frame()
+doAssert native.pixel(5, 5) == [255'u8, 255, 255, 255]
+doAssert native.pixel(35, 5) == [255'u8, 0, 0, 255]
+doAssert native.pixel(5, 35) == [0'u8, 255, 0, 255]
+doAssert native.pixel(35, 35) == [0'u8, 0, 255, 255]
+
+flipX = false
+flipY = false
 let updatedPixels = sourceImage.newRgba(sourceImage.rect(0, 0, 2, 2))
 for y in 0..<2:
   for x in 0..<2:

@@ -326,9 +326,16 @@ proc paintBitmap(s: scene.Scene; node: ElementNode; rect, root: Rect;
     return
   let enlarged = fitted.rect.w * scale >= fitted.src.w or
     fitted.rect.h * scale >= fitted.src.h
+  var src = fitted.src
+  if node.flipX:
+    src.x += src.w
+    src.w = -src.w
+  if node.flipY:
+    src.y += src.h
+    src.h = -src.h
   s.ops.add(scene.Op(kind: scene.opImage, rect: pixelRect,
     radii: node.radius.scaledEdges(scale), continuous: continuousCorners,
-    image: node.bitmap.image, src: fitted.src,
+    image: node.bitmap.image, src: src,
     pixelated: node.bitmap.pixelated and enlarged,
     color: sceneColor(node.imageTint), grayscale: node.grayscale))
 
