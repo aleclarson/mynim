@@ -16,6 +16,8 @@ type
 proc estimatedHeight(heights: var ListHeights): float64
 proc listHeightTop(heights: var ListHeights; row: int;
                    gap: float32): float64
+proc isSelected*(state: ListState; row: int): bool
+proc selectedRows*(state: ListState): seq[int]
 
 proc listHeightFloat32(value: float64): float32 =
   if value <= 0:
@@ -41,6 +43,71 @@ proc findListKey(state: ListState; key: string; nearRow: int): int =
 proc isListHeader(state: ListState; row: int): bool =
   state != nil and state.rowHeader != nil and row >= 0 and
     row < state.rowCount and state.rowHeader(row)
+
+proc cancelListReorder(state: ListState) =
+  if state == nil:
+    return
+  state.reorderRows.setLen(0)
+  state.reorderOrigin = -1
+  state.reorderTarget = -1
+  state.reorderPressed = false
+  state.reorderDragging = false
+  state.reorderTargetValid = false
+
+proc beginListReorder(state: ListState; row: int; x, y: float32): bool =
+  if state == nil or state.rowReorder == nil or row < 0 or
+      row >= state.rowCount or state.isListHeader(row):
+    return false
+  state.cancelListReorder()
+  state.reorderOrigin = row
+  if state.multiSelectionEnabled and state.isSelected(row):
+    state.reorderRows = state.selectedRows()
+    state.reorderRows.sort()
+  else:
+    state.reorderRows.add(row)
+  state.reorderTarget = row
+  state.reorderStartX = x
+  state.reorderStartY = y
+  state.reorderPointerX = x
+  state.reorderPointerY = y
+  state.reorderPressed = true
+  true
+
+proc updateListReorder(state: ListState; x, y: float32): bool =
+  if state == nil or not state.reorderPressed:
+    return false
+  state.reorderPointerX = x
+  state.reorderPointerY = y
+  if not state.reorderDragging and
+      abs(x - state.reorderStartX) + abs(y - state.reorderStartY) >= 4'f32:
+    state.reorderDragging = true
+  state.reorderDragging
+
+proc finishListReorder(state: ListState; commit: bool): bool =
+  if state == nil or not state.reorderPressed:
+    return false
+  let handler = state.rowReorder
+  var rows = newSeq[int](state.reorderRows.len)
+  for index, row in state.reorderRows:
+    rows[index] = row
+  let target = state.reorderTarget
+  let valid = state.reorderDragging and state.reorderTargetValid and
+    target >= 0 and target <= state.rowCount
+  let samePosition = rows.len == 1 and
+    (target == rows[0] or target == rows[0] + 1)
+  state.cancelListReorder()
+  if commit and valid and not samePosition and handler != nil:
+    handler(rows, target)
+    return true
+
+proc setReorder*(state: ListState; handler: ListRowReorder): ListState =
+  ## Enables row dragging; handler moves rows before the target index.
+  if state == nil:
+    raise newException(ValueError, "ui: list state cannot be nil")
+  state.rowReorder = handler
+  if handler == nil:
+    state.cancelListReorder()
+  state
 
 proc listHeaderAbove(state: ListState; row: int): int =
   if state == nil or state.rowHeader == nil or row < 0:
@@ -420,7 +487,8 @@ proc newListState*(estimatedRowHeight = 28'f32; rowGap = 0'f32;
                    selectable = false; followEnd = false;
                    multiSelectable = false;
                    rowLabel: ListRowLabel = nil;
-                   rowHeader: ListRowHeader = nil): ListState =
+                   rowHeader: ListRowHeader = nil;
+                   reorder: ListRowReorder = nil): ListState =
   ## Creates persistent state for a virtualized list.
   ##
   ## rowKey should return a stable, unique key for each logical row. When a
@@ -434,6 +502,7 @@ proc newListState*(estimatedRowHeight = 28'f32; rowGap = 0'f32;
   ## rowLabel names rows for accessibility and enables type-to-select.
   ## rowHeader marks section headers, which stay pinned while their rows scroll
   ## under them and are omitted from selection and keyboard navigation.
+  ## reorder enables dragging rows to a new position in the list.
   if not estimatedRowHeight.finiteMotion or estimatedRowHeight <= 0 or
       not rowGap.finiteMotion or rowGap < 0:
     raise newException(ValueError,
@@ -448,6 +517,7 @@ proc newListState*(estimatedRowHeight = 28'f32; rowGap = 0'f32;
   result.rowKey = rowKey
   result.rowLabel = rowLabel
   result.rowHeader = rowHeader
+  result.rowReorder = reorder
   result.keepOffset = keepOffset
   result.selectionEnabled = selectable or multiSelectable or rowLabel != nil
   result.multiSelectionEnabled = multiSelectable

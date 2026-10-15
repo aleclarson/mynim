@@ -104,6 +104,8 @@ type
   ListRowKey* = proc(row: int): string {.closure.} ## Returns a stable, unique row key.
   ListRowLabel* = proc(row: int): string {.closure.} ## Names and searches a list row.
   ListRowHeader* = proc(row: int): bool {.closure.} ## Marks section header rows.
+  ListRowReorder* = proc(rows: seq[int]; beforeRow: int) {.closure.}
+    ## Receives ordered row indices and the insertion index; rowCount means end.
 
   ListSelectedRow = object
     row, nearRow: int
@@ -117,6 +119,7 @@ type
     rowKey: ListRowKey
     rowLabel: ListRowLabel
     rowHeader: ListRowHeader
+    rowReorder: ListRowReorder
     headerCacheRow, headerCacheFrom, headerCacheStop: int
     headerCacheValid: bool
     keepOffset: bool
@@ -154,6 +157,12 @@ type
     requestRow: int
     requestAlign: Align
     gap: float32
+    reorderRows: seq[int]
+    reorderOrigin, reorderTarget: int
+    reorderPointerX, reorderPointerY: float32
+    reorderStartX, reorderStartY, reorderIndicatorY: float32
+    reorderColor: Color
+    reorderPressed, reorderDragging, reorderTargetValid: bool
     frameOwner: pointer
     frameSlot: int32
     generation: uint32

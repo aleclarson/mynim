@@ -23,6 +23,9 @@ proc buildListRow(c: Context; state: ListState; rowIndex: int;
     rowNode.listRowSelected = selected
     rowNode.listRowFocusVisible = state.multiSelectionEnabled and
       listFocusVisible and state.selected() == rowIndex and not selected
+    if state.reorderDragging and rowIndex in state.reorderRows:
+      rowNode.opacity = 0.4'f32
+      rowNode.opacitySet = true
     if selected:
       rowNode.background = c.theme.accent
       rowNode.listSelectedTextColor = c.theme.accentText
@@ -58,6 +61,7 @@ proc list*(c: Context; state: ListState; count: Natural;
     return
   container.listState = state
   container.listRowIndex = -1
+  state.reorderColor = c.theme.accent
   state.frameOwner = cast[pointer](c.owner)
   state.frameSlot = int32(result.slot)
   state.generation = c.owner.generation

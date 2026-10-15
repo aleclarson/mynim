@@ -546,6 +546,49 @@ proc paintScrollbar(sceneFrame: scene.Scene; layout: LayoutResult;
   for _ in 0..<clips:
     sceneFrame.ops.add(scene.Op(kind: scene.opPopClip))
 
+proc paintListReorderIndicator(sceneFrame: scene.Scene; layout: LayoutResult;
+                               slot: int; scale: float32) =
+  let node = layout.owner.nodes[slot]
+  let state = node.listState
+  if state == nil or not state.reorderDragging or
+      not state.reorderTargetValid or state.reorderColor.a == 0:
+    return
+  let box = layout.rects[slot]
+  let left = box.x + node.border[3] + node.pad[3]
+  let right = box.x + box.w - node.border[1] - node.pad[1]
+  if right - left <= 8:
+    return
+  let rtl = node.rightToLeft
+  let lineX = if rtl: left else: left + 4
+  let lineW = max(right - left - 8, 0'f32)
+  let dotX = if rtl: right - 8 else: left
+  let y = state.reorderIndicatorY
+  let opacity = opacityOf(layout.owner.nodes, slot)
+  if opacity == 0:
+    return
+  var clips = 0
+  var parent = slot
+  while parent >= 0:
+    if layout.owner.nodes[parent].clipsChildren:
+      sceneFrame.ops.add(layout.clipOp(parent, scale))
+      inc clips
+    parent = int(layout.owner.nodes[parent].parent)
+  for item in [
+      Rect(x: lineX, y: y - 1, w: lineW, h: 2),
+      Rect(x: dotX, y: y - 4, w: 8, h: 8)]:
+    if item.w <= 0 or item.h <= 0:
+      continue
+    let radius = if item.w < item.h: item.w / 2 else: item.h / 2
+    sceneFrame.ops.add(scene.Op(kind: scene.opFill,
+      rect: item.sceneRect(layout.root, scale),
+      color: sceneColor(state.reorderColor), paint: scene.paintSolid,
+      radii: [radius * scale, radius * scale, radius * scale, radius * scale],
+      continuous: continuousCorners, opacity: opacity))
+    sceneFrame.ops[^1].wide = sceneFrame.addWide(
+      wideColors(state.reorderColor, transparent, transparent))
+  for _ in 0..<clips:
+    sceneFrame.ops.add(scene.Op(kind: scene.opPopClip))
+
 proc paintFocusRing(sceneFrame: scene.Scene; layout: LayoutResult;
                     slot: int; scale: float32; inset = false) =
   let node = layout.owner.nodes[slot]
@@ -722,6 +765,8 @@ proc paintScene*(layout: LayoutResult; scale = 1'f32;
 
       for slot in layout.owner.paintSlots:
         let node = layout.owner.nodes[slot]
+        if node.listState != nil and node.listRowIndex == -1:
+          result.paintListReorderIndicator(layout, slot, scale)
         if node.listRowFocusVisible:
           result.paintFocusRing(layout, slot, scale, inset = true)
         elif node.focusVisible and node.focusable and

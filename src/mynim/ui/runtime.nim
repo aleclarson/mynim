@@ -19,6 +19,7 @@ type
     scrollbarDrag: ScrollbarDrag
     focusSlot, keyPressSlot: int
     keyPressKey: platform.Key
+    listReorder: ListState
     textInputAdapter: TextInputAdapter
     lastTextInput: platform.TextInputState
     inputComposition: platform.InputComposition
@@ -504,6 +505,8 @@ proc refreshPointer(rt: Runtime) =
       rt.focusSlot == rt.keyPressSlot and rt.keyPressSlot notin rt.pressedSlots:
     rt.pressedSlots.add(rt.keyPressSlot)
 
+proc autoScrollListReorder(rt: Runtime; state: ListState): bool
+
 proc renderFrame(rt: Runtime; presentFrame = true) =
   if rt.closed or rt.inFrame:
     return
@@ -552,6 +555,9 @@ proc renderFrame(rt: Runtime; presentFrame = true) =
       layout.owner.nodes[slot].focusVisible = false
     rt.requestFrame()
   rt.frameLayout = layout
+  if presentFrame and rt.listReorder != nil and
+      rt.listReorder.reorderDragging and rt.autoScrollListReorder(rt.listReorder):
+    rt.requestFrame()
   rt.updateTextInput()
   rt.frameScene = layout.paintScene(scale)
   rt.hasScene = true
@@ -570,6 +576,73 @@ proc renderFrame(rt: Runtime; presentFrame = true) =
 proc requestFrame(rt: Runtime) =
   if not rt.closed and rt.conn.surface != nil:
     rt.conn.surface.requestFrame()
+
+proc cancelListReorder(rt: Runtime) =
+  if rt.listReorder != nil:
+    rt.listReorder.cancelListReorder()
+    rt.listReorder = nil
+
+proc beginListReorder(rt: Runtime; target: Element) =
+  rt.cancelListReorder()
+  if target.owner == nil or target.owner != rt.frameLayout.owner:
+    return
+  var slot = int(target.slot)
+  while slot > 0 and slot < target.owner.nodes.len:
+    let node = target.owner.nodes[slot]
+    if node.listState != nil and node.listRowIndex >= 0 and
+        node.listState.beginListReorder(node.listRowIndex,
+          rt.pointerX, rt.pointerY):
+      rt.listReorder = node.listState
+      return
+    slot = int(node.parent)
+
+proc listReorderTarget(rt: Runtime; state: ListState) =
+  if state == nil or rt.frameLayout.owner == nil:
+    return
+  let slot = int(state.frameSlot)
+  if slot <= 0 or slot >= rt.frameLayout.owner.nodes.len or
+      state.frameOwner != cast[pointer](rt.frameLayout.owner) or
+      state.generation != rt.frameLayout.generation:
+    state.reorderTargetValid = false
+    return
+  updateListReorderTarget(rt.frameLayout.owner.nodes,
+    rt.frameLayout.rects, state, slot)
+
+proc autoScrollListReorder(rt: Runtime; state: ListState): bool =
+  if state == nil or not state.reorderDragging or
+      not rt.hasPointer or rt.frameLayout.owner == nil:
+    return false
+  let slot = int(state.frameSlot)
+  if slot <= 0 or slot >= rt.frameLayout.owner.nodes.len or
+      state.frameOwner != cast[pointer](rt.frameLayout.owner) or
+      state.generation != rt.frameLayout.generation:
+    return false
+  let node = rt.frameLayout.owner.nodes[slot]
+  if not node.scrollY or node.scrollState == nil:
+    return false
+  let box = rt.frameLayout.rects[slot]
+  let left = box.x + node.border[3] + node.pad[3]
+  let right = box.x + box.w - node.border[1] - node.pad[1]
+  let top = box.y + node.border[0] + node.pad[0]
+  let bottom = box.y + box.h - node.border[2] - node.pad[2]
+  if state.reorderPointerX < left or state.reorderPointerX >= right or
+      not rt.frameLayout.insideClips(slot, state.reorderPointerX,
+        state.reorderPointerY):
+    return false
+  const edge = 32'f32
+  let y = state.reorderPointerY
+  var delta: float32
+  if y < top + edge:
+    delta = -min((top + edge - y) / 2, edge / 2)
+  elif y > bottom - edge:
+    delta = min((y - (bottom - edge)) / 2, edge / 2)
+  if delta == 0:
+    return false
+  let scroll = node.scrollState
+  let old = scroll.offsetY
+  scroll.stopScrollMotion()
+  scroll.offsetY = min(max(old + delta, 0'f32), scroll.maxY)
+  scroll.offsetY != old
 
 proc event(rt: Runtime; ev: platform.SurfaceEvent): bool =
   if rt.closed:
@@ -722,6 +795,12 @@ proc event(rt: Runtime; ev: platform.SurfaceEvent): bool =
     rt.pointerY = float32(ev.y)
     rt.hasPointer = true
     rt.refreshPointer()
+    if rt.listReorder != nil and
+        rt.listReorder.updateListReorder(rt.pointerX, rt.pointerY):
+      rt.listReorderTarget(rt.listReorder)
+      discard rt.autoScrollListReorder(rt.listReorder)
+      rt.requestFrame()
+      return false
     if rt.hoverSlots != previousHover or rt.pressedSlots != previousPressed:
       rt.requestFrame()
     false
@@ -746,6 +825,7 @@ proc event(rt: Runtime; ev: platform.SurfaceEvent): bool =
     rt.pressTarget = rt.frameLayout.targetAt(rt.pointerX, rt.pointerY)
     rt.pressMods = ev.mods
     rt.pressHoverSlots = rt.frameLayout.slotsAt(rt.pointerX, rt.pointerY)
+    rt.beginListReorder(rt.pressTarget)
     if rt.pressTarget.owner != nil:
       var slot = int(rt.pressTarget.slot)
       let targetNode = rt.frameLayout.owner.nodes[slot]
@@ -776,6 +856,27 @@ proc event(rt: Runtime; ev: platform.SurfaceEvent): bool =
       rt.refreshPointer()
       rt.requestFrame()
       return true
+    if rt.listReorder != nil:
+      let state = rt.listReorder
+      if state.updateListReorder(rt.pointerX, rt.pointerY):
+        rt.listReorderTarget(state)
+        let slot = int(state.frameSlot)
+        let owner = rt.frameLayout.owner
+        let canDrop = owner != nil and slot > 0 and
+          slot < owner.nodes.len and
+          state.frameOwner == cast[pointer](owner) and
+          state.generation == rt.frameLayout.generation and
+          rt.frameLayout.insideClips(slot, rt.pointerX, rt.pointerY)
+        discard state.finishListReorder(commit = canDrop)
+        rt.listReorder = nil
+        rt.pressTarget = Element()
+        rt.pressMods = 0
+        rt.pressHoverSlots.setLen(0)
+        rt.refreshPointer()
+        rt.requestFrame()
+        return true
+      discard state.finishListReorder(commit = false)
+      rt.listReorder = nil
     var clickedSlot = -1
     result = rt.frameLayout.dispatchClick(rt.pressTarget,
       rt.pointerX, rt.pointerY, rt.pressMods, clickedSlot)
@@ -795,9 +896,11 @@ proc event(rt: Runtime; ev: platform.SurfaceEvent): bool =
     let previousFocusVisible = rt.keyboardFocusVisible
     let hadTextInput = rt.hasTextInputState and rt.lastTextInput.active
     let hadScrollbarDrag = rt.scrollbarDrag.state != nil
+    let hadListReorder = rt.listReorder != nil
     if hadScrollbarDrag:
       rt.scrollbarDrag.state.scrollbarDragging = false
       rt.scrollbarDrag = ScrollbarDrag()
+    rt.cancelListReorder()
     rt.cancelKeyPress()
     rt.keyboardFocusVisible = false
     rt.surfaceFocused = false
@@ -807,7 +910,7 @@ proc event(rt: Runtime; ev: platform.SurfaceEvent): bool =
     rt.refreshPointer()
     rt.updateTextInput()
     if rt.pressedSlots != previousPressed or previousFocusVisible or
-        hadTextInput or hadScrollbarDrag:
+        hadTextInput or hadScrollbarDrag or hadListReorder:
       rt.requestFrame()
     false
   of platform.pointerLeave:
@@ -904,6 +1007,7 @@ proc close(rt: Runtime) =
   if rt.hasTextInputState and rt.conn.surface != nil:
     rt.conn.surface.setTextInput(platform.TextInputState())
     rt.hasTextInputState = false
+  rt.cancelListReorder()
   rt.closed = true
   rt.context.close()
   rt.releaseGpu()

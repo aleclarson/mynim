@@ -1463,6 +1463,50 @@ proc pinActiveListHeaders(nodes: seq[ElementNode]; rects: var seq[Rect];
     rects[slot].y = pinnedY
     shiftDescendantRectsY(nodes, rects, slot, shiftY)
 
+proc updateListReorderTarget(nodes: seq[ElementNode]; rects: seq[Rect];
+                             state: ListState; listSlot: int) =
+  if state == nil or not state.reorderDragging or listSlot <= 0 or
+      listSlot >= nodes.len or rects.len != nodes.len:
+    return
+  let list = nodes[listSlot]
+  let viewport = rects[listSlot]
+  let left = viewport.x + list.border[3] + list.pad[3]
+  let right = viewport.x + viewport.w - list.border[1] - list.pad[1]
+  let top = viewport.y + list.border[0] + list.pad[0]
+  let bottom = viewport.y + viewport.h - list.border[2] - list.pad[2]
+  let x = state.reorderPointerX
+  let y = state.reorderPointerY
+  state.reorderTargetValid = false
+  if x < left or x >= right or y < top or y >= bottom:
+    return
+
+  var before = high(int)
+  var after = -1
+  var beforeY, afterY: float32
+  for slot in 1..<nodes.len:
+    let row = nodes[slot]
+    if row.listState != state or row.listRowIndex < 0 or row.listRowHeader:
+      continue
+    let box = rects[slot]
+    if box.y + box.h <= top or box.y >= bottom:
+      continue
+    if y < box.y + box.h / 2:
+      if row.listRowIndex < before:
+        before = row.listRowIndex
+        beforeY = box.y - state.gap / 2
+    elif row.listRowIndex > after:
+      after = row.listRowIndex
+      afterY = box.y + box.h + state.gap / 2
+
+  if before != high(int):
+    state.reorderTarget = before
+    state.reorderIndicatorY = max(top, beforeY)
+    state.reorderTargetValid = true
+  elif after >= 0:
+    state.reorderTarget = min(after + 1, state.rowCount)
+    state.reorderIndicatorY = min(bottom, afterY)
+    state.reorderTargetValid = true
+
 proc layoutAt(c: Context; bounds: Rect; now: MonoTime;
               reduceMotion: bool): LayoutResult =
   ## Lays out the latest completed build inside bounds.
@@ -1561,6 +1605,7 @@ proc layoutAt(c: Context; bounds: Rect; now: MonoTime;
       if first == high(int):
         first = 0
       result.animating = state.finishList(first, last) or result.animating
+      updateListReorderTarget(c.owner.nodes, result.rects, state, slot)
 
 proc layout*(c: Context; bounds: Rect): LayoutResult =
   ## Lays out the latest completed build inside bounds.
