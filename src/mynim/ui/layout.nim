@@ -676,7 +676,7 @@ proc onClick*(e: Element; handler: proc() {.closure.}): Element =
     n.clickHandler = handler
 
 proc fit*(e: Element; value: Fit): Element =
-  ## Sets how a bitmap fills its element.
+  ## Sets how an image fills its element.
   result = e
   let n = e.node
   if n != nil and (n.bitmap != nil or n.vector != nil):
