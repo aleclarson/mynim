@@ -15,13 +15,17 @@ type
     pressTarget: Element
     focusSlot, keyPressSlot: int
     keyPressKey: platform.Key
+    textInputAdapter: TextInputAdapter
+    lastTextInput: platform.TextInputState
+    inputComposition: platform.InputComposition
     pointerX, pointerY: float32
     hasPointer: bool
     hoverSlots, pressHoverSlots, pressedSlots, clickedSlots: seq[int]
     frameScene: scene.Scene
     hasScene: bool
     accessibilityOn: bool
-    keyboardFocusVisible, inFrame, closed, ready, gpuTried: bool
+    keyboardFocusVisible, surfaceFocused, hasTextInputState,
+      inFrame, closed, ready, gpuTried: bool
     gpuError: string
     software: raster.Renderer
     when defined(macosx):
@@ -29,6 +33,11 @@ type
     elif (defined(linux) and (defined(amd64) or defined(arm64))) or
         defined(emscripten):
       glRenderer: glGpu.Renderer
+
+  TextInputAdapter = ref object of platform.TextInputClient
+    runtime: Runtime
+    slot: int
+    client: platform.TextInputClient
 
 proc newContent*(view: View): Content =
   ## Creates native UI content for WindowOptions.content.
@@ -178,13 +187,15 @@ proc accessibilityTree(layout: LayoutResult;
     let node = owner.nodes[slot]
     let image = node.bitmap != nil or node.vector != nil
     if image and node.label.len == 0 and node.clickHandler == nil and
-        not node.focusable:
+        not node.focusable and node.textClient == nil:
       continue
     if not image and not node.hasText and node.clickHandler == nil and
-        not node.focusable and node.label.len == 0:
+        not node.focusable and node.textClient == nil and node.label.len == 0:
       continue
 
-    let role = if node.clickHandler != nil:
+    let role = if node.textClient != nil:
+        platform.roleTextField
+      elif node.clickHandler != nil:
         platform.roleButton
       elif node.hasText:
         platform.roleText
@@ -202,9 +213,15 @@ proc accessibilityTree(layout: LayoutResult;
       parent: parent, role: role, label: label,
       bounds: platform.RectF(x: rect.x.float64, y: rect.y.float64,
         w: rect.w.float64, h: rect.h.float64))
-    if node.focusable or node.clickHandler != nil:
+    if node.textClient != nil:
+      let (value, _) = node.textClient.textForRange(platform.TextRange(
+        start: 0, `end`: high(int)))
+      accessible.value = value
+    if node.focusable or node.clickHandler != nil or node.textClient != nil:
       accessible.states = platform.accessFocusable
       accessible.actions = platform.actionFocus
+    if node.textClient != nil:
+      accessible.actions = accessible.actions or platform.actionSetValue
     if role == platform.roleButton:
       accessible.actions = accessible.actions or platform.actionPress
     result.nodes.add(accessible)
@@ -220,6 +237,176 @@ proc cancelKeyPress(rt: Runtime) =
   rt.keyPressKey = platform.keyUnknown
 
 proc requestFrame(rt: Runtime)
+proc updateTextInput(rt: Runtime)
+
+proc inputTarget(adapter: TextInputAdapter): platform.TextInputClient =
+  if adapter == nil or adapter.runtime == nil:
+    return nil
+  let rt = adapter.runtime
+  if rt.closed or not rt.surfaceFocused or rt.focusSlot != adapter.slot or
+      not rt.frameLayout.focusableSlot(adapter.slot):
+    return nil
+  let owner = rt.frameLayout.owner
+  if owner.nodes[adapter.slot].textClient != adapter.client:
+    return nil
+  adapter.client
+
+proc inputChanged(adapter: TextInputAdapter) =
+  if adapter.inputTarget() != nil:
+    adapter.runtime.requestFrame()
+    adapter.runtime.updateTextInput()
+
+method textForRange*(adapter: TextInputAdapter; r: platform.TextRange):
+    tuple[s: string, actual: platform.TextRange] =
+  let client = adapter.inputTarget()
+  if client != nil:
+    return client.textForRange(r)
+  ("", platform.TextRange())
+
+method selection*(adapter: TextInputAdapter): platform.TextSelection =
+  let client = adapter.inputTarget()
+  if client != nil:
+    return client.selection()
+  platform.TextSelection()
+
+method markedRange*(adapter: TextInputAdapter):
+    tuple[r: platform.TextRange, ok: bool] =
+  let client = adapter.inputTarget()
+  if client != nil:
+    return client.markedRange()
+  (platform.TextRange(), false)
+
+method replaceText*(adapter: TextInputAdapter; r: ref platform.TextRange;
+                    value: string) =
+  let client = adapter.inputTarget()
+  if client != nil:
+    client.replaceText(r, value)
+    adapter.inputChanged()
+
+method setMarkedText*(adapter: TextInputAdapter; r: ref platform.TextRange;
+                      value: string; selected: platform.TextRange) =
+  let client = adapter.inputTarget()
+  if client != nil:
+    client.setMarkedText(r, value, selected)
+    adapter.inputChanged()
+
+method unmarkText*(adapter: TextInputAdapter) =
+  let client = adapter.inputTarget()
+  if client != nil:
+    client.unmarkText()
+    adapter.inputChanged()
+
+method boundsForRange*(adapter: TextInputAdapter; r: platform.TextRange):
+    tuple[bounds: platform.RectF, actual: platform.TextRange, ok: bool] =
+  let client = adapter.inputTarget()
+  if client == nil:
+    return (platform.RectF(), platform.TextRange(), false)
+  result = client.boundsForRange(r)
+  if result.ok:
+    let rect = adapter.runtime.frameLayout.rects[adapter.slot]
+    result.bounds.x += float64(rect.x)
+    result.bounds.y += float64(rect.y)
+
+method indexForPoint*(adapter: TextInputAdapter; x, y: float64):
+    tuple[i: int, ok: bool] =
+  let client = adapter.inputTarget()
+  if client == nil:
+    return (0, false)
+  let rect = adapter.runtime.frameLayout.rects[adapter.slot]
+  client.indexForPoint(x - float64(rect.x), y - float64(rect.y))
+
+proc release(adapter: TextInputAdapter) =
+  if adapter == nil or adapter.client == nil:
+    return
+  let (_, marked) = adapter.client.markedRange()
+  if marked:
+    adapter.client.unmarkText()
+  adapter.client = nil
+
+proc sameTextInput(a, b: platform.TextInputState): bool =
+  a.active == b.active and a.caret.x == b.caret.x and
+    a.caret.y == b.caret.y and a.caret.w == b.caret.w and
+    a.caret.h == b.caret.h and a.text == b.text and
+    a.start == b.start and a.`end` == b.`end` and a.client == b.client
+
+proc utf16AtRune(value: string; offset: int): int =
+  var left = max(offset, 0)
+  for rune in value.runes:
+    if left <= 0:
+      break
+    result += (if ord(rune) > 0xFFFF: 2 else: 1)
+    dec left
+
+proc runeAtUtf16(value: string; offset: int): int =
+  let target = max(offset, 0)
+  var units = 0
+  for rune in value.runes:
+    let count = if ord(rune) > 0xFFFF: 2 else: 1
+    if units + count > target:
+      break
+    units += count
+    inc result
+
+proc inputRange(rt: Runtime; first, pastLast: int): platform.TextRange =
+  if rt.textInputAdapter == nil or
+      rt.textInputAdapter.inputTarget() == nil:
+    return
+  let context = platform.clientTextContext(rt.textInputAdapter)
+  context.range(platform.TextRange(start: utf16AtRune(context.text, first),
+    `end`: utf16AtRune(context.text, pastLast)))
+
+proc updateTextInput(rt: Runtime) =
+  if rt.closed or rt.conn.surface == nil:
+    return
+  var focusedClient: platform.TextInputClient
+  var focusedSlot = -1
+  if rt.surfaceFocused and rt.frameLayout.focusableSlot(rt.focusSlot):
+    let owner = rt.frameLayout.owner
+    focusedSlot = rt.focusSlot
+    focusedClient = owner.nodes[focusedSlot].textClient
+
+  if focusedClient == nil:
+    if rt.textInputAdapter != nil:
+      rt.textInputAdapter.release()
+      rt.textInputAdapter = nil
+      rt.inputComposition.reset()
+  elif rt.textInputAdapter == nil or
+      rt.textInputAdapter.slot != focusedSlot or
+      rt.textInputAdapter.client != focusedClient:
+    if rt.textInputAdapter != nil:
+      rt.textInputAdapter.release()
+      rt.inputComposition.reset()
+    rt.textInputAdapter = TextInputAdapter(runtime: rt, slot: focusedSlot,
+                                            client: focusedClient)
+
+  var state: platform.TextInputState
+  if rt.textInputAdapter != nil:
+    let adapter = rt.textInputAdapter
+    let context = platform.clientTextContext(adapter)
+    state.active = true
+    state.client = adapter
+    state.text = context.text
+    state.start = runeAtUtf16(context.text, context.start)
+    state.`end` = runeAtUtf16(context.text, context.`end`)
+    let selected = adapter.selection()
+    let selection = selected.`range`
+    let caret = if selected.reversed: selection.start else: selection.`end`
+    let (bounds, _, hasBounds) = adapter.boundsForRange(
+      platform.TextRange(start: caret, `end`: caret))
+    if hasBounds:
+      state.caret = bounds
+    else:
+      let rect = rt.frameLayout.rects[focusedSlot]
+      state.caret = platform.RectF(x: float64(rect.x), y: float64(rect.y),
+        w: 1, h: max(float64(rect.h), 1))
+
+  if not rt.hasTextInputState and not state.active:
+    return
+  if rt.hasTextInputState and rt.lastTextInput.sameTextInput(state):
+    return
+  rt.conn.surface.setTextInput(state)
+  rt.lastTextInput = state
+  rt.hasTextInputState = true
 
 proc refreshPointer(rt: Runtime) =
   rt.hoverSlots.setLen(0)
@@ -279,6 +466,7 @@ proc renderFrame(rt: Runtime; presentFrame = true) =
       layout.owner.nodes[slot].focusVisible = false
     rt.requestFrame()
   rt.frameLayout = layout
+  rt.updateTextInput()
   rt.frameScene = layout.paintScene(scale)
   rt.hasScene = true
   rt.updateAccessibility()
@@ -307,6 +495,11 @@ proc event(rt: Runtime; ev: platform.SurfaceEvent): bool =
   of platform.surfaceRenew:
     rt.releaseGpu()
     rt.gpuTried = false
+    rt.requestFrame()
+    false
+  of platform.surfaceFocus:
+    rt.surfaceFocused = true
+    rt.updateTextInput()
     rt.requestFrame()
     false
   of platform.keyPressed:
@@ -349,6 +542,31 @@ proc event(rt: Runtime; ev: platform.SurfaceEvent): bool =
       rt.requestFrame()
       return true
     false
+  of platform.textInput:
+    let adapter = rt.textInputAdapter
+    if adapter == nil or adapter.inputTarget() == nil:
+      return false
+    var replacement: ref platform.TextRange
+    if ev.replace:
+      replacement = new platform.TextRange
+      replacement[] = rt.inputRange(ev.`from`, ev.to)
+    rt.inputComposition.replace(adapter, replacement, ev.text)
+    true
+  of platform.textComposition:
+    let adapter = rt.textInputAdapter
+    if adapter == nil or adapter.inputTarget() == nil:
+      return false
+    if ev.text.len == 0:
+      rt.inputComposition.`end`(adapter)
+    else:
+      var replacement: ref platform.TextRange
+      if ev.replace:
+        replacement = new platform.TextRange
+        replacement[] = rt.inputRange(ev.`from`, ev.to)
+      let caret = utf16AtRune(ev.text, ev.caret)
+      adapter.setMarkedText(replacement, ev.text,
+        platform.TextRange(start: caret, `end`: caret))
+    true
   of platform.pointerMove:
     let previousHover = rt.hoverSlots
     let previousPressed = rt.pressedSlots
@@ -408,12 +626,16 @@ proc event(rt: Runtime; ev: platform.SurfaceEvent): bool =
   of platform.surfaceBlur:
     let previousPressed = rt.pressedSlots
     let previousFocusVisible = rt.keyboardFocusVisible
+    let hadTextInput = rt.hasTextInputState and rt.lastTextInput.active
     rt.cancelKeyPress()
     rt.keyboardFocusVisible = false
+    rt.surfaceFocused = false
     rt.pressTarget = Element()
     rt.pressHoverSlots.setLen(0)
     rt.refreshPointer()
-    if rt.pressedSlots != previousPressed or previousFocusVisible:
+    rt.updateTextInput()
+    if rt.pressedSlots != previousPressed or previousFocusVisible or
+        hadTextInput:
       rt.requestFrame()
     false
   of platform.pointerLeave:
@@ -448,6 +670,24 @@ proc event(rt: Runtime; ev: platform.SurfaceEvent): bool =
         if changed:
           rt.requestFrame()
         result = true
+    elif ev.action == platform.accessSetValue and ev.id > 0:
+      let slot = int(ev.id - 1)
+      let owner = rt.frameLayout.owner
+      if owner != nil and slot > 0 and slot < owner.nodes.len and
+          owner.nodes[slot].textClient != nil:
+        let client = owner.nodes[slot].textClient
+        let (_, actual) = client.textForRange(platform.TextRange(
+          start: 0, `end`: high(int)))
+        let replacement = new platform.TextRange
+        replacement.start = max(0, actual.start)
+        replacement.`end` = max(replacement.start, actual.`end`)
+        client.replaceText(replacement, ev.text)
+        rt.focusSlot = slot
+        rt.keyboardFocusVisible = false
+        rt.inputComposition.reset()
+        rt.updateTextInput()
+        rt.requestFrame()
+        result = true
     return result
   else:
     false
@@ -473,6 +713,13 @@ proc capture(rt: Runtime): tuple[width, height: int, rgba: seq[byte]] =
 proc close(rt: Runtime) =
   if rt.closed:
     return
+  if rt.textInputAdapter != nil:
+    rt.textInputAdapter.release()
+    rt.textInputAdapter = nil
+    rt.inputComposition.reset()
+  if rt.hasTextInputState and rt.conn.surface != nil:
+    rt.conn.surface.setTextInput(platform.TextInputState())
+    rt.hasTextInputState = false
   rt.closed = true
   rt.context.close()
   rt.releaseGpu()
@@ -485,7 +732,7 @@ proc close(rt: Runtime) =
 
 method attachContent*(content: Content; conn: surface.Conn) =
   let rt = Runtime(conn: conn, view: content.view, context: newContext(),
-                   focusSlot: -1, keyPressSlot: -1)
+                   focusSlot: -1, keyPressSlot: -1, surfaceFocused: true)
   conn.event = proc(ev: platform.SurfaceEvent): bool = rt.event(ev)
   conn.changed = proc() = rt.requestFrame()
   conn.themeChanged = proc() = rt.requestFrame()

@@ -1,6 +1,6 @@
 ## Package ui builds native, GPU-rendered user interfaces.
 
-import std/[math, parseutils, sequtils, strutils]
+import std/[math, parseutils, sequtils, strutils, unicode]
 import mynim/internal/gamut
 import mynim/internal/scene as scene
 import mynim/internal/platform
@@ -9,6 +9,8 @@ import mynim/internal/raster as raster
 import mynim/internal/text as textStack
 import mynim/internal/svg as svgRenderer
 import mynim/image as sourceImage
+export platform.TextInputClient, platform.TextRange, platform.TextSelection,
+  platform.RectF
 when defined(macosx):
   import mynim/internal/gpu/metal as metalGpu
 elif (defined(linux) and (defined(amd64) or defined(arm64))) or

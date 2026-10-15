@@ -85,6 +85,7 @@ type
     textStyle: textStack.Style
     textColor: Color
     shapedText: textStack.Layout
+    textClient: platform.TextInputClient
     clickHandler: proc() {.closure.}
     bitmap: Bitmap
     vector: Svg

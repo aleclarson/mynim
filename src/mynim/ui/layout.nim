@@ -1415,6 +1415,17 @@ proc focusVisible*(e: Element): bool =
   let n = e.node
   n != nil and n.focusVisible
 
+proc textInput*(e: Element; client: platform.TextInputClient): Element =
+  ## Connects this element to an application-owned native text input client.
+  ## Client text ranges use UTF-16 document offsets; caret bounds are relative
+  ## to this element. Keep the client alive and stable across frame builds.
+  result = e
+  let n = e.node
+  if n != nil:
+    n.textClient = client
+    if client != nil:
+      n.focusable = true
+
 proc updateDimension(e: Element; dimension: LayoutDimension;
                      value: UiLength): Element =
   result = e
