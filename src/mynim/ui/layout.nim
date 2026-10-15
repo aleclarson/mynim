@@ -2335,7 +2335,7 @@ proc grid*(e: Element): Element =
 
 proc grid*(c: Context): Element =
   ## Adds a grid container to the current parent.
-  result = c.newElement(false).grid()
+  result = c.newElement(false, identityKindGrid).grid()
 
 proc columns*(e: Element; count: int): Element =
   ## Sets equal fractional columns for a grid.

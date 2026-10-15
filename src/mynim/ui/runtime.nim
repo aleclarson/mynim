@@ -324,6 +324,28 @@ proc cancelKeyPress(rt: Runtime) =
   rt.keyPressSlot = -1
   rt.keyPressKey = platform.keyUnknown
 
+proc rememberInteraction(owner: ElementOwner; identities: seq[uint64];
+                         slots: openArray[int]; flag: uint8) =
+  for slot in slots:
+    if slot > 0 and slot < identities.len:
+      let identity = identities[slot]
+      if identity != 0:
+        owner.previousInteraction[identity] =
+          owner.previousInteraction.getOrDefault(identity) or flag
+
+proc remapSlot(identities: seq[uint64]; owner: ElementOwner;
+               oldSlot: int): int =
+  if oldSlot > 0 and oldSlot < identities.len and owner != nil:
+    return owner.idSlots.getOrDefault(identities[oldSlot], -1)
+  -1
+
+proc remapSlots(identities: seq[uint64]; owner: ElementOwner;
+                oldSlots: seq[int]): seq[int] =
+  for oldSlot in oldSlots:
+    let slot = remapSlot(identities, owner, oldSlot)
+    if slot > 0:
+      result.add(slot)
+
 proc requestFrame(rt: Runtime)
 proc updateTextInput(rt: Runtime)
 
@@ -554,17 +576,66 @@ proc renderFrame(rt: Runtime; presentFrame = true) =
   rt.context.themeBackground = false
 
   rt.refreshPointer()
-  rt.context.owner.hoveredSlots = rt.hoverSlots
-  rt.context.owner.pressedSlots = rt.pressedSlots
-  rt.context.owner.clickedSlots = rt.clickedSlots
-  rt.context.owner.focusedSlots.setLen(0)
-  rt.context.owner.focusVisibleSlots.setLen(0)
-  if rt.focusSlot > 0:
-    rt.context.owner.focusedSlots.add(rt.focusSlot)
+  let previousOwner = rt.context.owner
+  var previousIdentities = newSeq[uint64](previousOwner.nodes.len)
+  for slot, node in previousOwner.nodes:
+    previousIdentities[slot] = node.identity
+  previousOwner.previousInteraction.clear()
+  previousOwner.rememberInteraction(previousIdentities, rt.hoverSlots,
+    identityHovered)
+  previousOwner.rememberInteraction(previousIdentities, rt.pressedSlots,
+    identityPressed)
+  previousOwner.rememberInteraction(previousIdentities, rt.clickedSlots,
+    identityClicked)
+  if rt.focusSlot > 0 and rt.focusSlot < previousIdentities.len:
+    let identity = previousIdentities[rt.focusSlot]
+    previousOwner.previousInteraction[identity] =
+      previousOwner.previousInteraction.getOrDefault(identity) or
+        identityFocused
     if rt.keyboardFocusVisible:
-      rt.context.owner.focusVisibleSlots.add(rt.focusSlot)
+      previousOwner.previousInteraction[identity] =
+        previousOwner.previousInteraction[identity] or identityFocusVisible
+  let previousPressTargetIdentity =
+    if rt.pressTarget.owner == previousOwner and
+        int(rt.pressTarget.slot) < previousIdentities.len:
+      previousIdentities[int(rt.pressTarget.slot)]
+    else:
+      0'u64
+  let previousTextInputSlot =
+    if rt.textInputAdapter == nil: -1 else: rt.textInputAdapter.slot
+  previousOwner.hoveredSlots.setLen(0)
+  previousOwner.pressedSlots.setLen(0)
+  previousOwner.clickedSlots.setLen(0)
+  previousOwner.focusedSlots.setLen(0)
+  previousOwner.focusVisibleSlots.setLen(0)
   rt.clickedSlots.setLen(0)
   rt.context.build(rt.view)
+  let currentOwner = rt.context.owner
+  rt.hoverSlots = remapSlots(previousIdentities, currentOwner, rt.hoverSlots)
+  rt.pressedSlots = remapSlots(previousIdentities, currentOwner, rt.pressedSlots)
+  rt.pressHoverSlots = remapSlots(previousIdentities, currentOwner,
+    rt.pressHoverSlots)
+  rt.focusSlot = remapSlot(previousIdentities, currentOwner, rt.focusSlot)
+  rt.keyPressSlot = remapSlot(previousIdentities, currentOwner, rt.keyPressSlot)
+  if rt.focusSlot < 0:
+    rt.keyboardFocusVisible = false
+  if rt.keyPressSlot < 0:
+    rt.cancelKeyPress()
+  if previousPressTargetIdentity != 0 and
+      currentOwner.idSlots.hasKey(previousPressTargetIdentity):
+    rt.pressTarget = Element(owner: currentOwner,
+      slot: uint32(currentOwner.idSlots[previousPressTargetIdentity]),
+      generation: currentOwner.generation)
+  else:
+    rt.pressTarget = Element()
+    rt.pressHoverSlots.setLen(0)
+  if rt.textInputAdapter != nil:
+    rt.textInputAdapter.slot = remapSlot(previousIdentities, currentOwner,
+      previousTextInputSlot)
+  if rt.focusSlot > 0:
+    currentOwner.focusedSlots.add(rt.focusSlot)
+    if rt.keyboardFocusVisible:
+      currentOwner.focusVisibleSlots.add(rt.focusSlot)
   let layout = rt.context.layoutAt(Rect(w: width, h: height),
     getMonoTime(), rt.systemPreferences.reduceMotion)
   if rt.focusSlot >= 0 and not layout.focusableSlot(rt.focusSlot):

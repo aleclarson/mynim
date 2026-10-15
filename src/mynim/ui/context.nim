@@ -7,11 +7,16 @@ type
     owner: ElementOwner
     theme: Theme
     treeState: TreeState
+    pendingKey: string
     rightToLeft: bool
+    hasPendingKey: bool
     themeEnabled, themeBackground: bool
 
   ElementOwner = ref object
     nodes: seq[ElementNode]
+    idSlots: Table[uint64, int]
+    previousInteraction: Table[uint64, uint8]
+    keyedSeen: HashSet[string]
     natural: seq[NaturalSize]
     rectScratch: seq[Rect]
     paintSlots: seq[int]
@@ -84,6 +89,10 @@ type
 
   ElementNode = object
     parent, firstChild, lastChild, nextSibling: int32
+    identity: uint64
+    childCount: uint64
+    keyed: bool
+    keyScope: string
     row, reverse, wrap, wrapReverse, grid, absolute, alignSet,
       justifySet, focusable, focused, focusVisible, focusRingDisabled,
       scrollX, scrollY,
@@ -161,6 +170,22 @@ type
     animating: bool
 
 const
+  identityHovered = 1'u8 shl 0
+  identityPressed = 1'u8 shl 1
+  identityClicked = 1'u8 shl 2
+  identityFocused = 1'u8 shl 3
+  identityFocusVisible = 1'u8 shl 4
+  rootIdentity = 0x6A09E667F3BCC909'u64
+  identitySalt = 0xA5A5A5A5A5A5A5A5'u64
+  identityGolden = 0x9E3779B97F4A7C15'u64
+  identityKindGeneric = 0'u8
+  identityKindBox = 1'u8
+  identityKindRow = 2'u8
+  identityKindColumn = 3'u8
+  identityKindImage = 4'u8
+  identityKindSvg = 5'u8
+  identityKindText = 6'u8
+  identityKindGrid = 7'u8
   logPadStart = 1'u8 shl 0
   logPadEnd = 1'u8 shl 1
   logMarginStart = 1'u8 shl 2
@@ -233,7 +258,82 @@ proc newContext*(): Context =
   ## Creates a stable context. Call close when its owner shuts down.
   new(result)
   new(result.owner)
+  result.owner.idSlots = initTable[uint64, int]()
+  result.owner.previousInteraction = initTable[uint64, uint8]()
+  result.owner.keyedSeen = initHashSet[string]()
   result.theme = lightTheme()
+
+proc multiplyWrap(a, b: uint64): uint64 {.inline.} =
+  cast[uint64](cast[int64](a) *% cast[int64](b))
+
+proc addWrap(a, b: uint64): uint64 {.inline.} =
+  cast[uint64](cast[int64](a) +% cast[int64](b))
+
+proc mixIdentity(a, b: uint64): uint64 {.inline.} =
+  var hash = multiplyWrap(a, identityGolden) xor
+    addWrap(b, 0x632BE59BD9B4E019'u64)
+  hash = multiplyWrap(hash xor (hash shr 30), 0xBF58476D1CE4E5B9'u64)
+  hash = multiplyWrap(hash xor (hash shr 27), 0x94D049BB133111EB'u64)
+  hash xor (hash shr 31)
+
+proc keyHash(token: string): uint64 =
+  result = 14695981039346656037'u64
+  for character in token:
+    result = multiplyWrap(result xor uint64(ord(character)),
+      1099511628211'u64)
+
+proc childIdentity(parent: uint64; child: uint64; kind: uint8): uint64 =
+  mixIdentity(parent, multiplyWrap(child, identityGolden) xor uint64(kind))
+
+proc keyedIdentity(parent: uint64; token: string): uint64 =
+  mixIdentity(parent, keyHash(token) xor identitySalt)
+
+proc keyToken(value: string): string =
+  "s:" & $value.len & ":" & value
+
+proc keyToken[T: SomeInteger](value: T): string =
+  "i:" & $value
+
+proc keyScope(parent: uint64; token: string): string =
+  $parent & "\0" & token
+
+proc applyPreviousInteraction(owner: ElementOwner; node: var ElementNode) =
+  if owner == nil:
+    return
+  let state = owner.previousInteraction.getOrDefault(node.identity)
+  node.hovered = (state and identityHovered) != 0
+  node.pressed = (state and identityPressed) != 0
+  node.clicked = (state and identityClicked) != 0
+  node.focused = (state and identityFocused) != 0
+  node.focusVisible = (state and identityFocusVisible) != 0
+
+proc assignKey(owner: ElementOwner; node: var ElementNode; parent: uint64;
+               token: string) =
+  let scope = keyScope(parent, token)
+  if node.keyed and node.keyScope != scope:
+    owner.keyedSeen.excl(node.keyScope)
+  if scope in owner.keyedSeen and
+      (not node.keyed or node.keyScope != scope):
+    raise newException(ValueError, "ui: duplicate key " & token)
+  owner.keyedSeen.incl(scope)
+  node.identity = keyedIdentity(parent, token)
+  node.keyed = true
+  node.keyScope = scope
+  owner.applyPreviousInteraction(node)
+
+proc key*(c: Context; value: string): Context =
+  ## Gives the next element a stable identity before it reads interaction state.
+  result = c
+  if c != nil and c.owner != nil and c.owner.inBuild and not c.owner.closed:
+    c.pendingKey = keyToken(value)
+    c.hasPendingKey = true
+
+proc key*[T: SomeInteger](c: Context; value: T): Context =
+  ## Gives the next element a stable integer identity before state is read.
+  result = c
+  if c != nil and c.owner != nil and c.owner.inBuild and not c.owner.closed:
+    c.pendingKey = keyToken(value)
+    c.hasPendingKey = true
 
 proc theme*(c: Context): Theme =
   ## Returns the theme used by the current frame.
@@ -258,6 +358,9 @@ proc retire(owner: ElementOwner) =
   owner.hasFrame = false
   owner.parent = -1
   owner.nodes = @[]
+  owner.idSlots.clear()
+  owner.previousInteraction.clear()
+  owner.keyedSeen.clear()
   owner.natural = @[]
   owner.rectScratch = @[]
   owner.paintSlots = @[]
@@ -285,7 +388,30 @@ proc valid*(e: Element): bool =
   ## Reports whether e belongs to the active build callback.
   e.node != nil
 
-proc newElement(c: Context; row: bool): Element =
+proc key*(e: Element; value: string): Element =
+  ## Keys a container before its children; use Context.key for stateful controls.
+  result = e
+  let node = e.node
+  if node != nil:
+    let parentIdentity = if node[].parent >= 0:
+        e.owner.nodes[int(node[].parent)].identity
+      else:
+        rootIdentity
+    e.owner.assignKey(node[], parentIdentity, keyToken(value))
+
+proc key*[T: SomeInteger](e: Element; value: T): Element =
+  ## Keys a container before its children; use Context.key for stateful controls.
+  result = e
+  let node = e.node
+  if node != nil:
+    let parentIdentity = if node[].parent >= 0:
+        e.owner.nodes[int(node[].parent)].identity
+      else:
+        rootIdentity
+    e.owner.assignKey(node[], parentIdentity, keyToken(value))
+
+proc newElement(c: Context; row: bool;
+                identityKind = identityKindGeneric): Element =
   if c == nil or c.owner.closed or not c.owner.inBuild or c.owner.parent < 0:
     raise newException(ValueError, "ui: element created outside a frame build")
   if int64(c.owner.nodes.len) > int64(high(int32)):
@@ -293,10 +419,17 @@ proc newElement(c: Context; row: bool): Element =
 
   let slot = uint32(c.owner.nodes.len)
   let index = int(slot)
-  let node = ElementNode(parent: c.owner.parent, firstChild: -1,
-                         lastChild: -1, nextSibling: -1, row: row,
+  let parentSlot = int(c.owner.parent)
+  let parentIdentity = c.owner.nodes[parentSlot].identity
+  let childOrdinal = c.owner.nodes[parentSlot].childCount
+  inc c.owner.nodes[parentSlot].childCount
+  var node = ElementNode(parent: c.owner.parent, firstChild: -1,
+                         lastChild: -1, nextSibling: -1,
+                         identity: childIdentity(parentIdentity,
+                           childOrdinal, identityKind),
+                         row: row,
                          rightToLeft:
-                           c.owner.nodes[int(c.owner.parent)].rightToLeft,
+                           c.owner.nodes[parentSlot].rightToLeft,
                          hovered: index in c.owner.hoveredSlots,
                          pressed: index in c.owner.pressedSlots,
                          clicked: index in c.owner.clickedSlots,
@@ -311,8 +444,14 @@ proc newElement(c: Context; row: bool): Element =
                          alignContent: Align.Auto,
                          justifyItems: Align.Auto,
                          justifySelf: Align.Auto)
+  if c.hasPendingKey:
+    c.owner.assignKey(node, parentIdentity, c.pendingKey)
+    c.pendingKey.setLen(0)
+    c.hasPendingKey = false
+  else:
+    c.owner.applyPreviousInteraction(node)
   c.owner.nodes.add(node)
-  let p = int(c.owner.parent)
+  let p = parentSlot
   if c.owner.nodes[p].lastChild >= 0:
     c.owner.nodes[int(c.owner.nodes[p].lastChild)].nextSibling = int32(slot)
   else:
@@ -323,15 +462,15 @@ proc newElement(c: Context; row: bool): Element =
 
 proc box*(c: Context): Element =
   ## Adds a box container to the current parent.
-  c.newElement(false)
+  c.newElement(false, identityKindBox)
 
 proc row*(c: Context): Element =
   ## Adds a row container to the current parent.
-  c.newElement(true)
+  c.newElement(true, identityKindRow)
 
 proc column*(c: Context): Element =
   ## Adds a column container to the current parent.
-  c.newElement(false)
+  c.newElement(false, identityKindColumn)
 
 proc newBitmap*(source: sourceImage.Image): Bitmap =
   ## Converts an image.Image to a reusable premultiplied scene bitmap.
@@ -384,7 +523,7 @@ proc size*(vector: Svg): tuple[width, height: float32] =
 
 proc image*(c: Context; bitmap: Bitmap): Element =
   ## Adds a bitmap element with its natural pixel size in DIPs.
-  result = c.newElement(false)
+  result = c.newElement(false, identityKindImage)
   let n = result.node
   if n != nil:
     n.bitmap = bitmap
@@ -404,7 +543,7 @@ proc imageRegion*(c: Context; bitmap: Bitmap; source: Rect;
 
 proc svg*(c: Context; vector: Svg): Element =
   ## Adds an SVG element with its intrinsic size in DIPs.
-  result = c.newElement(false)
+  result = c.newElement(false, identityKindSvg)
   let n = result.node
   if n != nil:
     n.vector = vector
@@ -413,7 +552,7 @@ proc svg*(c: Context; vector: Svg): Element =
 
 proc text*(c: Context; value: string): Element =
   ## Adds a text element using the system UI font at its natural size.
-  result = c.newElement(false)
+  result = c.newElement(false, identityKindText)
   let n = result.node
   if n != nil:
     n.hasText = true
@@ -446,11 +585,17 @@ proc build*(c: Context; view: proc(c: Context) {.closure.}) =
   if c.owner.generation == high(uint32):
     c.owner.retire()
     new(c.owner)
+    c.owner.idSlots = initTable[uint64, int]()
+    c.owner.previousInteraction = initTable[uint64, uint8]()
+    c.owner.keyedSeen = initHashSet[string]()
   inc c.owner.generation
   c.owner.nodes.setLen(0)
+  c.owner.idSlots.clear()
+  c.owner.keyedSeen.clear()
   c.owner.paintSlots.setLen(0)
   c.owner.nodes.add(ElementNode(parent: -1, firstChild: -1,
                                 lastChild: -1, nextSibling: -1,
+                                identity: rootIdentity,
                                 rightToLeft: c.rightToLeft,
                                 background: if c.themeBackground:
                                     c.theme.background
@@ -465,11 +610,17 @@ proc build*(c: Context; view: proc(c: Context) {.closure.}) =
   try:
     if view != nil:
       view(c)
+    for slot, node in c.owner.nodes:
+      c.owner.idSlots[node.identity] = slot
     built = true
   finally:
     c.owner.inBuild = false
     c.owner.parent = -1
     c.owner.hasFrame = built
+    c.hasPendingKey = false
+    c.pendingKey.setLen(0)
+    c.owner.previousInteraction.clear()
+    c.owner.keyedSeen.clear()
     c.owner.hoveredSlots.setLen(0)
     c.owner.pressedSlots.setLen(0)
     c.owner.clickedSlots.setLen(0)
