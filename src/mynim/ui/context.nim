@@ -101,7 +101,10 @@ type
     textColor: Color
     shapedText: textStack.Layout
     textClient: platform.TextInputClient
-    clickHandler: proc() {.closure.}
+    clickHandler: proc(mods: platform.Modifiers) {.closure.}
+    accessRole: platform.AccessRole
+    accessSort: platform.AccessStates
+    accessRoleSet: bool
     bitmap: Bitmap
     imageRegion: Rect
     flipX, flipY: bool

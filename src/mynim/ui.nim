@@ -1,7 +1,7 @@
 ## Package ui builds native, GPU-rendered user interfaces.
 
 import std/[algorithm, math, monotimes, parseutils, sequtils, sets, strutils,
-            times, unicode]
+            tables, times, unicode]
 import mynim/internal/gamut
 import mynim/internal/scene as scene
 import mynim/internal/platform
@@ -29,4 +29,5 @@ include mynim/ui/layout
 include mynim/ui/direction
 include mynim/ui/list
 include mynim/ui/paint
+include mynim/ui/table
 include mynim/ui/runtime

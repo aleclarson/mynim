@@ -245,14 +245,17 @@ proc accessibilityTree(layout: LayoutResult;
     let listContainer = node.listState != nil and node.listRowIndex == -1
     let listItem = node.listState != nil and node.listRowIndex >= 0
     if image and node.label.len == 0 and node.clickHandler == nil and
-        not node.focusable and node.textClient == nil and not listItem:
+        not node.focusable and node.textClient == nil and not listItem and
+        not node.accessRoleSet:
       continue
     if not image and not node.hasText and node.clickHandler == nil and
         not node.focusable and node.textClient == nil and node.label.len == 0 and
-        not listContainer and not listItem:
+        not listContainer and not listItem and not node.accessRoleSet:
       continue
 
-    let role = if listContainer:
+    let role = if node.accessRoleSet:
+        node.accessRole
+      elif listContainer:
         platform.roleList
       elif listItem:
         platform.roleListItem
@@ -276,13 +279,14 @@ proc accessibilityTree(layout: LayoutResult;
       parent: parent, role: role, label: label,
       bounds: platform.RectF(x: rect.x.float64, y: rect.y.float64,
         w: rect.w.float64, h: rect.h.float64))
+    accessible.states = accessible.states or node.accessSort
     if node.textClient != nil:
       let (value, _) = node.textClient.textForRange(platform.TextRange(
         start: 0, `end`: high(int)))
       accessible.value = value
     if node.focusable or node.clickHandler != nil or node.textClient != nil:
-      accessible.states = platform.accessFocusable
-      accessible.actions = platform.actionFocus
+      accessible.states = accessible.states or platform.accessFocusable
+      accessible.actions = accessible.actions or platform.actionFocus
     if listItem and node.listState.selectionEnabled and
         not node.listRowHeader:
       accessible.states = accessible.states or platform.accessSelectable
@@ -298,7 +302,7 @@ proc accessibilityTree(layout: LayoutResult;
       accessible.actions = accessible.actions or platform.actionScrollIntoView
     if node.textClient != nil:
       accessible.actions = accessible.actions or platform.actionSetValue
-    if role == platform.roleButton or
+    if node.clickHandler != nil or role == platform.roleButton or
         (listItem and node.listState.selectionEnabled and
           not node.listRowHeader):
       accessible.actions = accessible.actions or platform.actionPress
@@ -732,7 +736,7 @@ proc event(rt: Runtime; ev: platform.SurfaceEvent): bool =
       rt.cancelKeyPress()
       if activate:
         let handler = rt.frameLayout.owner.nodes[slot].clickHandler
-        handler()
+        handler(0)
         rt.clickedSlots = @[slot]
       rt.refreshPointer()
       rt.requestFrame()

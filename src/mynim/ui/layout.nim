@@ -1974,7 +1974,7 @@ proc dispatchClick(layout: LayoutResult; pressed: Element;
   else:
     let handler = node.clickHandler
     if handler != nil:
-      handler()
+      handler(mods)
   true
 
 proc dispatchAccessPress(layout: LayoutResult; id: uint64): bool =
@@ -1988,7 +1988,7 @@ proc dispatchAccessPress(layout: LayoutResult; id: uint64): bool =
     let handler = layout.owner.nodes[slot].clickHandler
     if handler == nil:
       return false
-    handler()
+    handler(0)
     return true
 
 proc len*(layout: LayoutResult): int = max(layout.rects.len - 1, 0)
@@ -2557,6 +2557,17 @@ proc textAlign*(e: Element; value: Align): Element =
 
 proc onClick*(e: Element; handler: proc() {.closure.}): Element =
   ## Runs handler for pointer clicks and Enter/Space activation on e.
+  result = e
+  let n = e.node
+  if n != nil:
+    n.clickHandler = if handler == nil: nil else:
+      proc(mods: platform.Modifiers) = handler()
+    if handler != nil:
+      n.focusable = true
+
+proc onClick*(e: Element;
+              handler: proc(mods: platform.Modifiers) {.closure.}): Element =
+  ## Runs handler for clicks and passes the modifiers held on pointer down.
   result = e
   let n = e.node
   if n != nil:

@@ -107,19 +107,41 @@ type
   ListRowReorder* = proc(rows: seq[int]; beforeRow: int) {.closure.}
     ## Receives ordered row indices and the insertion index; rowCount means end.
 
+  SortOrder* = object ## One column and direction in a table sort.
+    column*: string ## Column ID, or its title when ID is empty.
+    descending*: bool ## False sorts ascending.
+
+  TableColumn* = object ## A table column's title, sizing, and behavior.
+    title*: string ## Header text and fallback ID.
+    id*: string ## Stable ID for saved order, width, and sorting.
+    width*: float32 ## Initial width; zero shares available space.
+    minWidth*, maxWidth*: float32 ## User resize limits; zero max is unbounded.
+    align*: Align ## Cell content alignment.
+    sortable*: bool ## Header clicks update ListState.sort or sortBy.
+    fixed*: bool ## Keeps the column in its declared slot and width.
+
+  TableLayout* = object ## User-persisted column order and widths.
+    order*: seq[string] ## Movable column IDs, followed by unspecified columns.
+    widths*: Table[string, float32] ## User widths keyed by column ID.
+
   ListSelectedRow = object
     row, nearRow: int
     key: string
     keyValid: bool
 
   ListState* = ref object
-    ## Persistent scroll and measured-height state for a virtualized list.
+    ## Persistent state for a virtualized list or a table body.
     scrollState: ScrollState
     heights: ListHeights
     rowKey: ListRowKey
     rowLabel: ListRowLabel
     rowHeader: ListRowHeader
     rowReorder: ListRowReorder
+    columns*: TableLayout ## Saved table column order and user widths.
+    sort*: SortOrder ## Primary table sort; title fallback uses column ID.
+    sortBy*: seq[SortOrder] ## Optional ordered, multi-column sort.
+    multiSort*: bool ## Keeps multi-sort enabled when sortBy is empty.
+    tableRowsRole: bool
     headerCacheRow, headerCacheFrom, headerCacheStop: int
     headerCacheValid: bool
     keepOffset: bool

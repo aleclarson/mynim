@@ -155,6 +155,10 @@ proc resetListMeasurements(heights: var ListHeights) =
   heights.defaultHeight = estimate
   heights.dirty = true
 
+proc scrollListY(state: ListState; y: float32) =
+  let x = if state.tableRowsRole: state.scrollState.offsetX else: 0'f32
+  state.scrollState.scrollTo(x, y)
+
 proc syncListAnchor(state: ListState) =
   if state.rowKey == nil or not state.anchorValid or state.rowCount <= 0:
     return
@@ -172,7 +176,7 @@ proc syncListAnchor(state: ListState) =
       state.request == listNoRequest:
     let inputMovement = float64(state.scrollState.offsetY - state.anchorScrollY)
     let top = state.heights.listHeightTop(newAnchor, state.gap)
-    state.scrollState.scrollTo(0,
+    state.scrollListY(
       listHeightFloat32(max(top + state.anchorInset + inputMovement, 0.0)))
 
 proc clearListSelection(state: ListState) =
@@ -937,8 +941,7 @@ proc beginList(state: ListState; count: int): ListPlan =
         target = max(contentHeight - viewport64, 0.0)
       of listNoRequest:
         discard
-    state.scrollState.scrollTo(0,
-      listHeightFloat32(min(max(target, 0.0), maximum)))
+    state.scrollListY(listHeightFloat32(min(max(target, 0.0), maximum)))
     state.request = listNoRequest
     if state.followEnd:
       if request == listRequestToEnd:
@@ -947,9 +950,10 @@ proc beginList(state: ListState; count: int): ListPlan =
         state.following = state.scrollState.offsetY >=
           float32(maximum) - 0.5'f32
 
-  state.scrollState.maxX = 0
+  if not state.tableRowsRole:
+    state.scrollState.maxX = 0
+    state.scrollState.offsetX = 0
   state.scrollState.maxY = float32(maximum)
-  state.scrollState.offsetX = 0
   state.scrollState.offsetY = min(max(state.scrollState.offsetY, 0'f32),
     state.scrollState.maxY)
 
