@@ -267,9 +267,81 @@ doAssert animatedState.offset().y == 40
 doAssert not animatedState.scrolling
 fake.setPreferences(platform.Preferences())
 
+let followState = ui.newScrollState()
+let followContent = ui.newContent(proc(ctx: ui.Context) =
+  let root = ctx.column()
+  discard root.children(proc() =
+    let header = ctx.row().size(100, 20).clip()
+    discard header.children(proc() =
+      discard ctx.box().size(50, 20).shrink(0)
+        .background(ui.rgb(255, 0, 0))
+      discard ctx.box().size(50, 20).shrink(0)
+        .background(ui.rgb(0, 255, 0))
+      discard ctx.box().size(50, 20).shrink(0)
+        .background(ui.rgb(255, 255, 0))
+    )
+    let list = ctx.row().size(100, 20).scrollX(followState)
+    discard list.children(proc() =
+      for _ in 0..<3:
+        discard ctx.box().size(50, 20).shrink(0)
+    )
+    discard header.scrollWith(list)
+  )
+)
+let followWindow = newWindow(WindowOptions(width: 120, height: 40,
+  hidden: true, content: followContent))
+let followSurface = fake.windows[^1].surface
+doAssert followSurface.frame()
+doAssert followState.maxOffset().x == 50
+doAssert followSurface.pixel(10, 5) == [0'u8, 0, 255, 255]
+doAssert followSurface.pixel(60, 5) == [0'u8, 255, 0, 255]
+doAssert followSurface.pixel(110, 5) == [0'u8, 0, 0, 0]
+
+discard followSurface.send(platform.SurfaceEvent(kind: platform.pointerScroll,
+  x: 5, y: 25, dx: 25))
+doAssert followSurface.frame()
+doAssert followState.offset().x == 25
+doAssert followSurface.pixel(10, 5) == [0'u8, 0, 255, 255]
+doAssert followSurface.pixel(30, 5) == [0'u8, 255, 0, 255]
+doAssert followSurface.pixel(80, 5) == [0'u8, 255, 255, 255]
+doAssert followSurface.pixel(110, 5) == [0'u8, 0, 0, 0]
+
+let axisClipContent = ui.newContent(proc(ctx: ui.Context) =
+  let root = ctx.column()
+  discard root.children(proc() =
+    let top = ctx.row().size(60, 20).shrink(0)
+    discard top.children(proc() =
+      let xClip = ctx.box().size(20, 20).shrink(0).clipX()
+      discard xClip.children(proc() =
+        discard ctx.box().size(40, 40).shrink(0)
+          .background(ui.rgb(255, 0, 0))
+      )
+    )
+    let bottom = ctx.row().size(60, 20).shrink(0)
+    discard bottom.children(proc() =
+      discard ctx.box().size(20, 20).shrink(0)
+      let yClip = ctx.box().size(20, 20).shrink(0).clipY()
+      discard yClip.children(proc() =
+        discard ctx.box().size(40, 40).shrink(0)
+          .background(ui.rgb(0, 255, 0))
+      )
+    )
+  )
+)
+let axisClipWindow = newWindow(WindowOptions(width: 60, height: 60,
+  hidden: true, content: axisClipContent))
+let axisClipSurface = fake.windows[^1].surface
+doAssert axisClipSurface.frame()
+doAssert axisClipSurface.pixel(25, 5) == [0'u8, 0, 0, 0]
+doAssert axisClipSurface.pixel(5, 25) == [0'u8, 0, 255, 255]
+doAssert axisClipSurface.pixel(45, 25) == [0'u8, 255, 0, 255]
+doAssert axisClipSurface.pixel(45, 45) == [0'u8, 0, 0, 0]
+
 win.destroy()
 focusWindow.destroy()
 nestedWindow.destroy()
 barsWindow.destroy()
 animatedWindow.destroy()
+followWindow.destroy()
+axisClipWindow.destroy()
 loop.shutdown()

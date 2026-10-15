@@ -473,19 +473,28 @@ proc paintBitmap(s: scene.Scene; node: ElementNode; rect, root: Rect;
     color: sceneColor(node.imageTint), grayscale: node.grayscale,
     opacity: opacity))
 
-proc scrollClipOp(layout: LayoutResult; slot: int;
-                  scale: float32): scene.Op =
+proc clipOp(layout: LayoutResult; slot: int; scale: float32): scene.Op =
   let node = layout.owner.nodes[slot]
   let box = layout.rects[slot]
-  let clip = Rect(x: box.x + node.border[3],
+  var clip = Rect(x: box.x + node.border[3],
     y: box.y + node.border[0],
     w: max(box.w - node.border[1] - node.border[3], 0'f32),
     h: max(box.h - node.border[0] - node.border[2], 0'f32))
-  let radii = [
+  let clipsX = node.scrollState != nil or node.clipX
+  let clipsY = node.scrollState != nil or node.clipY
+  var radii = [
     max(node.radius[0] - max(node.border[0], node.border[3]), 0'f32),
     max(node.radius[1] - max(node.border[0], node.border[1]), 0'f32),
     max(node.radius[2] - max(node.border[2], node.border[1]), 0'f32),
     max(node.radius[3] - max(node.border[2], node.border[3]), 0'f32)]
+  if not clipsX:
+    clip.x = layout.root.x - 1_000_000'f32
+    clip.w = 2_000_000'f32
+  if not clipsY:
+    clip.y = layout.root.y - 1_000_000'f32
+    clip.h = 2_000_000'f32
+  if not (clipsX and clipsY):
+    radii = [0'f32, 0, 0, 0]
   scene.Op(kind: scene.opPushClip,
     rect: clip.sceneRect(layout.root, scale),
     radii: radii.scaledEdges(scale), continuous: continuousCorners)
@@ -508,8 +517,8 @@ proc paintScrollbar(sceneFrame: scene.Scene; layout: LayoutResult;
   var clips = 0
   var parent = int(layout.owner.nodes[slot].parent)
   while parent >= 0:
-    if layout.owner.nodes[parent].scrollState != nil:
-      sceneFrame.ops.add(layout.scrollClipOp(parent, scale))
+    if layout.owner.nodes[parent].clipsChildren:
+      sceneFrame.ops.add(layout.clipOp(parent, scale))
       inc clips
     parent = int(layout.owner.nodes[parent].parent)
   let radius = min(rect.w, rect.h) / 2 * scale
@@ -591,8 +600,8 @@ proc paintScene*(layout: LayoutResult; scale = 1'f32;
         var clipCount = 0
         var parent = int(node.parent)
         while parent >= 0:
-          if layout.owner.nodes[parent].scrollState != nil:
-            result.ops.add(layout.scrollClipOp(parent, scale))
+          if layout.owner.nodes[parent].clipsChildren:
+            result.ops.add(layout.clipOp(parent, scale))
             inc clipCount
           parent = int(layout.owner.nodes[parent].parent)
         for shadow in node.shadows:

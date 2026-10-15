@@ -1358,6 +1358,12 @@ proc shiftScrolledRects(nodes: seq[ElementNode]; rects: var seq[Rect]) =
           rects[slot].x -= state.offsetX
         if ancestor.scrollY:
           rects[slot].y -= state.offsetY
+      if ancestor.hasFollowScroll:
+        let followSlot = int(ancestor.followScrollSlot)
+        if followSlot >= 0 and followSlot < nodes.len:
+          let follow = nodes[followSlot]
+          if follow.scrollX and follow.scrollState != nil:
+            rects[slot].x -= follow.scrollState.offsetX
       parent = int(ancestor.parent)
 
 proc layoutAt(c: Context; bounds: Rect; now: MonoTime;
@@ -1434,18 +1440,20 @@ proc bounds*(layout: LayoutResult; element: Element): Rect =
     raise newException(ValueError, "ui: element is not part of this layout")
   layout.rects[int(element.slot)]
 
-proc insideScrollClips(layout: LayoutResult; slot: int;
-                       x, y: float32): bool =
+proc insideClips(layout: LayoutResult; slot: int; x, y: float32): bool =
   var parent = int(layout.owner.nodes[slot].parent)
   while parent >= 0:
     let node = layout.owner.nodes[parent]
-    if node.scrollState != nil:
+    if node.clipsChildren:
       let box = layout.rects[parent]
       let left = box.x + node.border[3]
       let top = box.y + node.border[0]
       let right = box.x + box.w - node.border[1]
       let bottom = box.y + box.h - node.border[2]
-      if x < left or x >= right or y < top or y >= bottom:
+      let clipsX = node.scrollState != nil or node.clipX
+      let clipsY = node.scrollState != nil or node.clipY
+      if (clipsX and (x < left or x >= right)) or
+          (clipsY and (y < top or y >= bottom)):
         return false
     parent = int(node.parent)
   true
@@ -1468,7 +1476,7 @@ proc targetAt(layout: LayoutResult; x, y: float32): Element =
       else:
         orderIndex
     if slot > 0 and layout.rects[slot].contains(x, y) and
-        layout.insideScrollClips(slot, x, y):
+        layout.insideClips(slot, x, y):
       let target = Element(owner: layout.owner, slot: uint32(slot),
                            generation: layout.generation)
       if topmost.owner == nil:
@@ -1653,7 +1661,7 @@ proc slotsAt(layout: LayoutResult; x, y: float32): seq[int] =
     return
   for slot in 1..<layout.rects.len:
     if layout.rects[slot].contains(x, y) and
-        layout.insideScrollClips(slot, x, y):
+        layout.insideClips(slot, x, y):
       result.add(slot)
 
 proc scrollAt(layout: LayoutResult; x, y, dx, dy: float32): bool =
@@ -1845,6 +1853,45 @@ proc scrollHorizontal*(c: Context; state: ScrollState): Element =
 proc scrollBoth*(c: Context; state: ScrollState): Element =
   ## Creates a two-axis scrolling box with persistent state.
   c.box().scroll(state)
+
+proc clip*(e: Element): Element =
+  ## Clips the element's children to its inner rounded rectangle.
+  result = e
+  let n = e.node
+  if n != nil:
+    n.clipX = true
+    n.clipY = true
+
+proc clipX*(e: Element): Element =
+  ## Clips the element's children horizontally to its inner bounds.
+  result = e
+  let n = e.node
+  if n != nil:
+    n.clipX = true
+
+proc clipY*(e: Element): Element =
+  ## Clips the element's children vertically to its inner bounds.
+  result = e
+  let n = e.node
+  if n != nil:
+    n.clipY = true
+
+proc scrollWith*(e, scroller: Element): Element =
+  ## Moves this element's content with a horizontal scroll container.
+  ## Clip this element when its moving content must stay within its bounds.
+  result = e
+  let n = e.node
+  if n == nil:
+    return
+  if scroller.owner != e.owner:
+    raise newException(ValueError,
+      "ui: scrollWith elements must belong to the same frame")
+  let source = scroller.node
+  if source == nil or source.scrollState == nil or not source.scrollX:
+    raise newException(ValueError,
+      "ui: scrollWith requires a horizontal scroll container")
+  n.followScrollSlot = int32(scroller.slot)
+  n.hasFollowScroll = true
 
 proc updateDimension(e: Element; dimension: LayoutDimension;
                      value: UiLength): Element =

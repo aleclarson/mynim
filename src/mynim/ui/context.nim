@@ -83,6 +83,8 @@ type
     row, reverse, wrap, wrapReverse, grid, absolute, alignSet,
       justifySet, focusable, focused, focusVisible, scrollX, scrollY,
       revealInScroll: bool
+    clipX, clipY, hasFollowScroll: bool
+    followScrollSlot: int32
     gridCol, gridRow, gridColSpan, gridRowSpan: int
     hasText: bool
     hovered, pressed, clicked: bool
@@ -127,6 +129,9 @@ type
     generation: uint32
     rects: seq[Rect]
     animating: bool
+
+func clipsChildren(node: ElementNode): bool =
+  node.scrollState != nil or node.clipX or node.clipY
 
 proc finiteRegion(value: float32): bool =
   classify(value) notin {fcNan, fcInf, fcNegInf}
