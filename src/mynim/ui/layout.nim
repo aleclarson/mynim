@@ -2659,6 +2659,29 @@ proc checkboxBase*(c: Context; checked: var bool): Element =
     if value[]:
       n.accessExtraStates = n.accessExtraStates or platform.accessChecked
 
+proc switchBase*(c: Context; on: var bool): Element =
+  ## Creates a switch without a look. Style its contents and set a label;
+  ## pointer or Space activation toggles on and reports changed().
+  let value = addr on
+  result = c.row().focusable()
+  let owner = result.owner
+  let generation = result.generation
+  let node = result.node
+  if node == nil:
+    return
+  let identity = node[].identity
+  result = result.onClick(proc() =
+    value[] = not value[]
+    discard owner.notifyAction(identity, generation, actionChange)
+  )
+  let n = result.node
+  if n != nil:
+    n.activateEnter = false
+    n.accessRole = platform.roleSwitch
+    n.accessRoleSet = true
+    if value[]:
+      n.accessExtraStates = n.accessExtraStates or platform.accessChecked
+
 proc radioBase*[T](c: Context; selected: var T; value: T): Element =
   ## Creates a radio option without a look. Style its contents and set a
   ## label; pointer or Space activation selects value and reports changed().
