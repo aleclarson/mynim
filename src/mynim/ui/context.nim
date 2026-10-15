@@ -7,6 +7,7 @@ type
     owner: ElementOwner
     theme: Theme
     treeState: TreeState
+    checkboxGroup: CheckboxGroupBuild
     pendingKey: string
     rightToLeft: bool
     hasPendingKey: bool
@@ -33,6 +34,9 @@ type
 
   UiActionKind = enum
     actionShortcut, actionChange, actionSubmit
+
+  CheckboxGroupBuild = ref object
+    boxes: seq[ptr bool]
 
   UiAction = object
     handle: HandleState

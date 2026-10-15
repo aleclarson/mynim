@@ -1,7 +1,32 @@
 ## Theme-styled controls built on the stateful bases.
 
+proc checkboxIndicator(c: Context; theme: Theme; checked, mixed,
+                       hovered: bool): Element =
+  let size = theme.space(4)
+  result = c.box().size(size, size).shrink(0)
+    .radius(theme.space(1)).center()
+  if checked or mixed:
+    discard result.background(theme.accent)
+    if mixed:
+      discard result.children(proc() =
+        discard c.box().size(size * 0.5'f32, theme.space(0.5))
+          .shrink(0).radius(theme.space(0.25)).background(theme.accentText)
+      )
+    else:
+      discard result.children(proc() =
+        discard c.text("✓").textSize(theme.space(2.5))
+          .textColor(theme.accentText)
+      )
+  else:
+    discard result.background(theme.background)
+      .border(1, theme.border.mix(theme.text, 0.25'f32))
+    if hovered:
+      discard result.border(1, theme.accent)
+
 proc checkbox*(c: Context; checked: var bool; label: string): Element =
   ## Creates a themed check box with a label.
+  if c.checkboxGroup != nil:
+    c.checkboxGroup.boxes.add(addr checked)
   let theme = c.theme
   var frameChecked = checked
   result = c.checkboxBase(frameChecked).gap(theme.space(2))
@@ -10,22 +35,65 @@ proc checkbox*(c: Context; checked: var bool; label: string): Element =
   result = result.label(label)
   let row = result
   result = result.children(proc() =
-    let size = theme.space(4)
-    let indicator = c.box().size(size, size).shrink(0)
-      .radius(theme.space(1)).center()
-    if frameChecked:
-      discard indicator.background(theme.accent)
-      discard indicator.children(proc() =
-        discard c.text("✓").textSize(theme.space(2.5))
-          .textColor(theme.accentText)
-      )
-    else:
-      discard indicator.background(theme.background)
-        .border(1, theme.border.mix(theme.text, 0.25'f32))
-      if row.hovered():
-        discard indicator.border(1, theme.accent)
+    discard c.checkboxIndicator(theme, frameChecked, false, row.hovered())
     if label.len > 0:
       discard c.text(label)
+  )
+
+proc checkboxGroup*(c: Context; label: string;
+                    build: proc() {.closure.}): Element =
+  ## Creates a parent check box for checkboxes built in the child closure.
+  ## The parent is checked when all children are checked and mixed when some
+  ## are checked. Clicking it checks all children, or clears all when checked.
+  let theme = c.theme
+  result = c.column().gap(theme.space(2)).shrink(0)
+  let group = result
+  result = result.children(proc() =
+    var header = c.row().focusable().shrink(0).gap(theme.space(2))
+      .focusRing(false).onClick(proc() = discard)
+    let headerNode = header.node
+    if headerNode != nil:
+      headerNode.activateEnter = false
+      headerNode.accessRole = platform.roleCheckBox
+      headerNode.accessRoleSet = true
+    header = header.label(label)
+
+    let previousGroup = c.checkboxGroup
+    let children = CheckboxGroupBuild()
+    c.checkboxGroup = children
+    try:
+      let childGroup = c.column().gap(theme.space(2))
+        .paddingStart(theme.space(6)).label(label)
+      if childGroup.node != nil:
+        childGroup.node.accessRole = platform.roleGroup
+        childGroup.node.accessRoleSet = true
+      discard childGroup.children(build)
+    finally:
+      c.checkboxGroup = previousGroup
+
+    var checkedCount = 0
+    for box in children.boxes:
+      if box[]:
+        inc checkedCount
+    let allChecked = checkedCount > 0 and checkedCount == children.boxes.len
+    let mixed = checkedCount > 0 and not allChecked
+    if headerNode != nil:
+      if allChecked:
+        headerNode.accessExtraStates =
+          headerNode.accessExtraStates or platform.accessChecked
+      elif mixed:
+        headerNode.accessExtraStates =
+          headerNode.accessExtraStates or platform.accessMixed
+
+    discard header.children(proc() =
+      discard c.checkboxIndicator(theme, allChecked, mixed, header.hovered())
+      discard c.text(label)
+    )
+
+    if header.clicked():
+      for box in children.boxes:
+        box[] = not allChecked
+      group.markBoundValueChanged()
   )
 
 proc radio*[T](c: Context; selected: var T; value: T;
