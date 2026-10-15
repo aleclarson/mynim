@@ -395,11 +395,14 @@ proc pngEncode*(img: Image): seq[byte] =
 proc inflate*(data: openArray[byte]): seq[byte] =
   if data.len < 6:
     raise newException(ValueError, "zlib: corrupt stream")
+  ## The bit readers below are nested procs. Copy the borrowed input so
+  ## their closure captures owned storage, not the openArray parameter.
+  let input = @data
   var pos = 2 ## skip the zlib header
   var bit = 0
   var outb: seq[byte]
   proc bit1(): int =
-    let v = (int(data[pos]) shr bit) and 1
+    let v = (int(input[pos]) shr bit) and 1
     inc bit
     if bit == 8:
       bit = 0
@@ -455,10 +458,11 @@ proc inflate*(data: openArray[byte]): seq[byte] =
       if bit != 0:
         bit = 0
         inc pos
-      let n = int(data[pos]) or (int(data[pos + 1]) shl 8)
+      let n = int(input[pos]) or (int(input[pos + 1]) shl 8)
+      pos += 4 ## LEN and NLEN
       for i in 0 ..< n:
-        outb.add data[pos + i]
-      pos += n + 2 ## LEN + NLEN
+        outb.add input[pos + i]
+      pos += n
     else:
       var litMax: int
       var litCodes, distCodes: seq[tuple[code, len, sym: int]]

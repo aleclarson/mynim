@@ -1,0 +1,16 @@
+import std/assertions
+
+import mynim/image
+
+block inflate_stored_zlib:
+  let compressed = [
+    0x78'u8, 0x01, 0x01, 0x05, 0x00, 0xfa, 0xff,
+    0x68, 0x65, 0x6c, 0x6c, 0x6f, 0x06, 0x2c, 0x02, 0x15
+  ]
+  let decoded = inflate(compressed)
+  doAssert decoded == @[0x68'u8, 0x65, 0x6c, 0x6c, 0x6f],
+    "inflate should return the stored-block payload"
+
+block inflate_short_zlib:
+  doAssertRaises ValueError:
+    discard inflate([0x78'u8, 0x01])
