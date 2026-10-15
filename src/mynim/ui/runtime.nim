@@ -220,14 +220,21 @@ proc accessibilityTree(layout: LayoutResult;
   for slot in 1..<owner.nodes.len:
     let node = owner.nodes[slot]
     let image = node.bitmap != nil or node.vector != nil
+    let listContainer = node.listState != nil and node.listRowIndex == -1
+    let listItem = node.listState != nil and node.listRowIndex >= 0
     if image and node.label.len == 0 and node.clickHandler == nil and
-        not node.focusable and node.textClient == nil:
+        not node.focusable and node.textClient == nil and not listItem:
       continue
     if not image and not node.hasText and node.clickHandler == nil and
-        not node.focusable and node.textClient == nil and node.label.len == 0:
+        not node.focusable and node.textClient == nil and node.label.len == 0 and
+        not listContainer and not listItem:
       continue
 
-    let role = if node.textClient != nil:
+    let role = if listContainer:
+        platform.roleList
+      elif listItem:
+        platform.roleListItem
+      elif node.textClient != nil:
         platform.roleTextField
       elif node.clickHandler != nil:
         platform.roleButton
@@ -254,11 +261,22 @@ proc accessibilityTree(layout: LayoutResult;
     if node.focusable or node.clickHandler != nil or node.textClient != nil:
       accessible.states = platform.accessFocusable
       accessible.actions = platform.actionFocus
+    if listItem and node.listState.selectionEnabled:
+      accessible.states = accessible.states or platform.accessSelectable
+      let selected = if node.listState.multiSelectionEnabled:
+          node.listState.isSelected(node.listRowIndex)
+        else:
+          node.listState.selected() == node.listRowIndex
+      if selected:
+        accessible.states = accessible.states or platform.accessSelected
+    if listContainer and node.listState.multiSelectionEnabled:
+      accessible.states = accessible.states or platform.accessMultiselectable
     if layout.hasScrollAncestor(slot):
       accessible.actions = accessible.actions or platform.actionScrollIntoView
     if node.textClient != nil:
       accessible.actions = accessible.actions or platform.actionSetValue
-    if role == platform.roleButton:
+    if role == platform.roleButton or
+        (listItem and node.listState.selectionEnabled):
       accessible.actions = accessible.actions or platform.actionPress
     result.nodes.add(accessible)
     accessIndex[slot] = result.nodes.high

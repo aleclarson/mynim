@@ -165,6 +165,22 @@ doAssert multiSurface.send(platform.SurfaceEvent(kind: platform.keyPressed,
 doAssert multiSurface.frame()
 doAssert multiState.selectedRows().len == 100
 doAssert multiState.isSelected(99)
+doAssert multiSurface.send(platform.SurfaceEvent(kind: platform.accessibilityOn))
+let (multiAccessTree, _) = multiSurface.accessibility()
+doAssert multiAccessTree != nil
+var foundMultiList = false
+var foundMultiItem = false
+for accessible in multiAccessTree.nodes:
+  if accessible.role == platform.roleList:
+    foundMultiList = true
+    doAssert (accessible.states and platform.accessMultiselectable) !=
+      platform.AccessStates(0)
+  elif accessible.role == platform.roleListItem and
+      (accessible.states and platform.accessSelected) != platform.AccessStates(0):
+    doAssert (accessible.states and platform.accessSelectable) !=
+      platform.AccessStates(0)
+    foundMultiItem = true
+doAssert foundMultiList and foundMultiItem
 
 let searchState = ui.newListState(20, rowLabel = proc(row: int): string =
   case row
@@ -226,3 +242,14 @@ doAssert unicodeSearchSurface.send(platform.SurfaceEvent(kind: platform.textInpu
   text: "c"))
 doAssert unicodeSearchSurface.frame()
 doAssert unicodeSearchState.selected() == 10
+doAssert unicodeSearchSurface.send(
+  platform.SurfaceEvent(kind: platform.accessibilityOn))
+let (unicodeSearchTree, _) = unicodeSearchSurface.accessibility()
+var foundLabeledSelectedRow = false
+for accessible in unicodeSearchTree.nodes:
+  if accessible.label == "Éclair":
+    doAssert accessible.role == platform.roleListItem
+    doAssert (accessible.states and platform.accessSelected) !=
+      platform.AccessStates(0)
+    foundLabeledSelectedRow = true
+doAssert foundLabeledSelectedRow
