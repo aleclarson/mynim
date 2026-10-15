@@ -53,6 +53,7 @@ type
   DocBase = ref object of RootObj
     kind: DocKind
     mu: Lock
+    ioMu: Lock
     path, name: string
     edited, readOnly, conflict, deleted, closed: bool
     changes, savedAt: uint64
@@ -64,6 +65,8 @@ type
     makeWindow: proc(): Window {.closure.}
     saveDocument: proc(): ref CatchableError {.closure.}
     saveAsDocument: proc(): ref CatchableError {.closure.}
+    renameDocument: proc(name: string): ref CatchableError {.closure.}
+    moveDocument: proc(dir: string): ref CatchableError {.closure.}
     duplicateDocument: proc(): DocBase {.closure.}
     revertDocument: proc(): ref CatchableError {.closure.}
     onState: Listeners[proc(state: DocumentState) {.closure.}]
@@ -334,6 +337,9 @@ proc showDocument(doc: DocBase) =
 proc save*[T](doc: Document[T]): ref CatchableError
 proc saveToPath[T](doc: Document[T]; path: string;
     checkConflict: bool): ref CatchableError
+proc renameToDocument[T](doc: Document[T]; name: string): ref CatchableError
+proc moveDocumentTo[T](doc: Document[T]; dir: string): ref CatchableError
+proc relocateDocument[T](doc: Document[T]; target: string): ref CatchableError
 proc duplicate*[T](doc: Document[T]): Document[T]
 proc revert*[T](doc: Document[T]): ref CatchableError
 proc chooseOpen(parent: Window; filters: seq[platform.FileFilter]):
@@ -350,6 +356,7 @@ proc makeDocument[T](ds: Documents[T]; content: T; untitledName: string):
   result.saved = content
   result.savedKnown = true
   result.mu.initLock()
+  result.ioMu.initLock()
   result.onState.mu.initLock()
   result.onReload.mu.initLock()
   let doc = result
@@ -357,6 +364,10 @@ proc makeDocument[T](ds: Documents[T]; content: T; untitledName: string):
   result.saveDocument = proc(): ref CatchableError = doc.save()
   result.saveAsDocument = proc(): ref CatchableError =
     doc.saveToPath("", false)
+  result.renameDocument = proc(name: string): ref CatchableError =
+    doc.renameToDocument(name)
+  result.moveDocument = proc(dir: string): ref CatchableError =
+    doc.moveDocumentTo(dir)
   result.duplicateDocument = proc(): DocBase = doc.duplicate()
   result.revertDocument = proc(): ref CatchableError = doc.revert()
 
@@ -627,7 +638,8 @@ proc chooseOpen(parent: Window; filters: seq[platform.FileFilter]):
   channel.close()
 
 proc chooseSave(parent: Window; path: string;
-    filters: seq[platform.FileFilter]): tuple[path: string,
+    filters: seq[platform.FileFilter]; title = ""; buttonLabel = "";
+    nameFieldLabel = ""): tuple[path: string,
         err: ref CatchableError] =
   var channel: system.Channel[tuple[path: string, err: ref CatchableError]]
   channel.open()
@@ -640,12 +652,40 @@ proc chooseSave(parent: Window; path: string;
       deliver(reply[], ("", failure))
     else:
       dialogs.showSaveDialog(if parent == nil: nil else: parent.native,
-        platform.SaveDialogOptions(defaultPath: path, filters: filters),
+        platform.SaveDialogOptions(defaultPath: path, filters: filters,
+          title: title, buttonLabel: buttonLabel,
+          nameFieldLabel: nameFieldLabel),
         proc(path: string; err: ref CatchableError) =
           deliver(reply[], (path, err)))
   )
   result = await(channel)
   channel.close()
+
+proc chooseDirectory(parent: Window; title, buttonLabel: string):
+    tuple[path: string, err: ref CatchableError] =
+  var channel: system.Channel[tuple[paths: seq[string], err: ref CatchableError]]
+  channel.open()
+  let reply = addr channel
+  discard postMain(proc() =
+    let dialogs = backend().dialogs()
+    if dialogs == nil:
+      let failure: ref CatchableError = newException(IOError,
+        "mynim: document dialogs are unavailable")
+      deliver(reply[], (@[], failure))
+    else:
+      dialogs.showOpenDialog(if parent == nil: nil else: parent.native,
+        platform.OpenDialogOptions(title: title, buttonLabel: buttonLabel,
+          openDirectories: true, createDirectories: true),
+        proc(paths: seq[string]; err: ref CatchableError) =
+          deliver(reply[], (paths, err)))
+  )
+  let selected = await(channel)
+  channel.close()
+  if selected.err != nil:
+    return ("", selected.err)
+  if selected.paths.len == 0:
+    return ("", ErrCanceled)
+  (selected.paths[0], nil)
 
 proc filters(k: DocKind): seq[platform.FileFilter] =
   for fileType in k.types:
@@ -662,6 +702,7 @@ proc saveToPath[T](doc: Document[T]; path: string;
     if picked.path == "":
       return ErrCanceled
     target = picked.path
+  doc.ioMu.acquire()
   try:
     target = absolutePath(target)
     if checkConflict:
@@ -715,6 +756,8 @@ proc saveToPath[T](doc: Document[T]; path: string;
     nil
   except CatchableError as err:
     err
+  finally:
+    doc.ioMu.release()
 
 proc save*[T](doc: Document[T]): ref CatchableError =
   ## Saves to the current file, or asks where to save an untitled document.
@@ -732,8 +775,129 @@ proc saveAnyway*[T](doc: Document[T]): ref CatchableError =
     return doc.saveToPath("", false)
   doc.saveToPath(doc.path(), false)
 
+proc renameToDocument[T](doc: Document[T]; name: string): ref CatchableError =
+  ## Renames a file in its current directory. An untitled document is saved.
+  let path = doc.path()
+  if path == "":
+    return doc.saveAs()
+  var target: string
+  if name == "":
+    let tx = menuMessages()
+    let picked = chooseSave(doc.window(), path, doc.ds.kind.filters(),
+      tx.rename(), tx.rename(), tx.renameTo())
+    if picked.err != nil:
+      return picked.err
+    if picked.path == "":
+      return ErrCanceled
+    target = picked.path
+    if splitFile(target).ext == "":
+      target.add "." & doc.ds.kind.types[0].extensions[0]
+  else:
+    if name.contains({'/', '\\'}) or name == "." or name == "..":
+      return newException(ValueError, "mynim: invalid file name " & name)
+    target = path.parentDir() / name
+  try:
+    target = absolutePath(target)
+    if target != path and (fileExists(target) or dirExists(target)):
+      return newException(IOError, "mynim: " & target & " already exists")
+    doc.relocateDocument(target)
+  except CatchableError as err:
+    err
+
+proc confirmDocumentReplace(doc: DocBase; target: string): bool =
+  var channel: system.Channel[tuple[result: platform.MessageBoxResult,
+      err: ref CatchableError]]
+  channel.open()
+  let reply = addr channel
+  let tx = menuMessages()
+  discard postMain(proc() =
+    let dialogs = backend().dialogs()
+    if dialogs == nil:
+      let failure: ref CatchableError = newException(IOError,
+        "mynim: document dialogs are unavailable")
+      deliver(reply[], (platform.MessageBoxResult(), failure))
+    else:
+      let win = doc.windowOf()
+      dialogs.showMessageBox(if win == nil: nil else: win.native,
+        platform.MessageBoxOptions(`type`: "warning",
+          buttons: @[tx.replaceFile(), tx.cancel()],
+          message: tx.alreadyExists(target.extractFilename()),
+          detail: tx.alreadyExistsDetail(), defaultId: 0, cancelId: 1),
+        proc(value: platform.MessageBoxResult; err: ref CatchableError) =
+          deliver(reply[], (value, err)))
+  )
+  let answer = await(channel)
+  channel.close()
+  answer.err == nil and answer.result.response == 0
+
+proc moveDocumentTo[T](doc: Document[T]; dir: string): ref CatchableError =
+  ## Moves a document's file into `dir`, asking for a directory when empty.
+  var targetDir = dir
+  if targetDir == "":
+    let tx = menuMessages()
+    let selected = chooseDirectory(doc.window(), tx.moveTo(), tx.move())
+    if selected.err != nil:
+      return selected.err
+    targetDir = selected.path
+  try:
+    targetDir = absolutePath(targetDir)
+    if not dirExists(targetDir):
+      return newException(IOError, "mynim: not a directory: " & targetDir)
+    let path = doc.path()
+    if path == "":
+      let target = targetDir / (doc.name() & "." &
+        doc.ds.kind.types[0].extensions[0])
+      return doc.saveToPath(target, false)
+    let target = absolutePath(targetDir / path.extractFilename())
+    if target == path:
+      return nil
+    if (fileExists(target) or dirExists(target)) and
+        not doc.confirmDocumentReplace(target):
+      return ErrCanceled
+    doc.relocateDocument(target)
+  except CatchableError as err:
+    err
+
+proc relocateDocument[T](doc: Document[T]; target: string): ref CatchableError =
+  ## Moves the file and updates the path and file stamp as one document change.
+  doc.ioMu.acquire()
+  try:
+    let source = doc.path()
+    if source == "":
+      return newException(IOError,
+        "mynim: an untitled document has no file to move")
+    if target == source:
+      return nil
+    moveFile(source, target)
+    let stamp = stampOf(target)
+    doc.mu.acquire()
+    doc.path = target
+    doc.stamp = stamp
+    doc.stampKnown = true
+    doc.readOnly = not fileWritable(target)
+    doc.conflict = false
+    doc.deleted = false
+    doc.mu.release()
+    addRecent(target)
+    doc.notifyDocument()
+    nil
+  except CatchableError as err:
+    err
+  finally:
+    doc.ioMu.release()
+
+proc rename*[T](doc: Document[T]; name = ""): ref CatchableError =
+  ## Renames the document's file in place; an empty name opens a rename dialog.
+  doc.renameToDocument(name)
+
+proc moveTo*[T](doc: Document[T]; dir = ""): ref CatchableError =
+  ## Moves the document's file into a directory; an empty path opens a dialog.
+  doc.moveDocumentTo(dir)
+
 proc revert*[T](doc: Document[T]): ref CatchableError =
   ## Re-reads the file and drops unsaved content.
+  doc.ioMu.acquire()
+  defer: doc.ioMu.release()
   let path = doc.path()
   if path == "":
     return newException(IOError, "mynim: an untitled document has no file to revert")
@@ -840,6 +1004,16 @@ proc documentRole(role: MenuRole; win: Window) =
       if err != nil: stderr.writeLine("mynim: document save: " & err.msg))
   of roleDuplicate:
     goAsync(proc() = discard doc.duplicateDocument())
+  of roleRename:
+    goAsync(proc() =
+      let err = doc.renameDocument("")
+      if err != nil and err.msg != ErrCanceled.msg:
+        stderr.writeLine("mynim: document rename: " & err.msg))
+  of roleMoveTo:
+    goAsync(proc() =
+      let err = doc.moveDocument("")
+      if err != nil and err.msg != ErrCanceled.msg:
+        stderr.writeLine("mynim: document move: " & err.msg))
   of roleRevert:
     goAsync(proc() =
       let err = doc.revertDocument()
@@ -865,7 +1039,7 @@ proc refreshDocumentMenus() =
       continue
     walkDocumentItems(menu.items(), proc(item: MenuItem) =
       case item.role
-      of roleSave, roleSaveAs, roleDuplicate:
+      of roleSave, roleSaveAs, roleDuplicate, roleRename, roleMoveTo:
         item.setEnabled(enabled)
       of roleRevert:
         item.setEnabled(enabled and doc.editedOf() and doc.pathOf() != "")

@@ -95,13 +95,108 @@ block opensFilesFromDialog:
   doAssert selected.documents[0].content() == "dialog content"
   fake.onOpenDialog = nil
 
+block renameAndMove:
+  let doc = docs.documents()[0]
+  let renamed = docTestDir / "renamed.txt"
+  doAssert doc.rename("renamed.txt") == nil
+  doAssert not fileExists(docTestDir / "notes.txt")
+  doAssert readFile(renamed) == "local revision"
+  doAssert doc.path() == absolutePath(renamed)
+  doAssert doc.name() == "renamed.txt"
+  doAssert doc.rename("../outside.txt") != nil
+
+  let dialogRenamed = docTestDir / "dialog-renamed.txt"
+  var sawRenameDialog = false
+  fake.onSaveDialog = proc(options: platform.SaveDialogOptions): string =
+    sawRenameDialog = options.title == "Rename" and
+      options.buttonLabel == "Rename" and
+      options.nameFieldLabel == "Rename To:"
+    docTestDir / "dialog-renamed"
+  doAssert doc.rename() == nil
+  fake.onSaveDialog = nil
+  doAssert sawRenameDialog
+  doAssert fileExists(dialogRenamed)
+  doAssert doc.path() == absolutePath(dialogRenamed)
+
+  let movedDir = docTestDir / "moved"
+  createDir(movedDir)
+  doAssert doc.moveTo(movedDir) == nil
+  let moved = movedDir / "dialog-renamed.txt"
+  doAssert not fileExists(dialogRenamed)
+  doAssert readFile(moved) == "local revision"
+  doAssert doc.path() == absolutePath(moved)
+
+  let replaceDir = docTestDir / "replace"
+  createDir(replaceDir)
+  let replaceTarget = replaceDir / "dialog-renamed.txt"
+  writeFile(replaceTarget, "old destination")
+  var sawReplacePrompt = false
+  fake.onMessageBox = proc(options: platform.MessageBoxOptions):
+      platform.MessageBoxResult =
+    sawReplacePrompt = options.buttons.len == 2 and
+      options.buttons[0] == "Replace" and options.buttons[1] == "Cancel"
+    platform.MessageBoxResult(response: 0)
+  doAssert doc.moveTo(replaceDir) == nil
+  doAssert sawReplacePrompt
+  doAssert not fileExists(moved)
+  doAssert readFile(replaceTarget) == "local revision"
+  doAssert doc.path() == absolutePath(replaceTarget)
+
+  let cancelDir = docTestDir / "cancel-move"
+  createDir(cancelDir)
+  let cancelTarget = cancelDir / "dialog-renamed.txt"
+  writeFile(cancelTarget, "keep destination")
+  fake.onMessageBox = proc(options: platform.MessageBoxOptions):
+      platform.MessageBoxResult = platform.MessageBoxResult(response: 1)
+  doAssert doc.moveTo(cancelDir) == ErrCanceled
+  doAssert doc.path() == absolutePath(replaceTarget)
+  doAssert readFile(cancelTarget) == "keep destination"
+  fake.onMessageBox = nil
+
+  let pickedDir = docTestDir / "picked"
+  createDir(pickedDir)
+  var sawDirectoryDialog = false
+  fake.onOpenDialog = proc(options: platform.OpenDialogOptions): seq[string] =
+    sawDirectoryDialog = options.openDirectories and options.createDirectories
+    @[pickedDir]
+  doAssert doc.moveTo() == nil
+  fake.onOpenDialog = nil
+  let pickedPath = pickedDir / "dialog-renamed.txt"
+  doAssert sawDirectoryDialog
+  doAssert doc.path() == absolutePath(pickedPath)
+  doAssert readFile(pickedPath) == "local revision"
+
+  let untitledDir = docTestDir / "untitled-move"
+  createDir(untitledDir)
+  let untitled = docs.new()
+  untitled.set("new content")
+  let untitledPath = untitledDir / (untitled.name() & ".txt")
+  doAssert untitled.moveTo(untitledDir) == nil
+  doAssert untitled.path() == absolutePath(untitledPath)
+  doAssert readFile(untitledPath) == "new content"
+  doAssert not untitled.isEdited()
+  fake.onOpenDialog = nil
+  fake.onSaveDialog = nil
+  fake.onMessageBox = nil
+
 for doc in docs.documents():
   doc.window().destroy()
 loop.shutdown()
 if fileExists(docTestDir / "recent-documents.json"):
   removeFile(docTestDir / "recent-documents.json")
-if fileExists(docTestDir / "notes.txt"):
-  removeFile(docTestDir / "notes.txt")
+for path in [docTestDir / "notes.txt", docTestDir / "renamed.txt",
+    docTestDir / "dialog-renamed.txt", docTestDir / "moved" / "dialog-renamed.txt",
+    docTestDir / "replace" / "dialog-renamed.txt",
+    docTestDir / "cancel-move" / "dialog-renamed.txt",
+    docTestDir / "picked" / "dialog-renamed.txt",
+    docTestDir / "untitled-move" / "Untitled 1.txt"]:
+  if fileExists(path):
+    removeFile(path)
 if fileExists(docTestDir / "from-dialog.txt"):
   removeFile(docTestDir / "from-dialog.txt")
+for dir in [docTestDir / "moved", docTestDir / "replace",
+    docTestDir / "cancel-move", docTestDir / "picked",
+    docTestDir / "untitled-move"]:
+  if dirExists(dir):
+    removeDir(dir)
 removeDir(docTestDir)
