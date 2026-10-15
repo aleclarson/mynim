@@ -53,7 +53,7 @@ type
 
   ElementNode = object
     parent, firstChild, lastChild, nextSibling: int32
-    row: bool
+    row, reverse: bool
     hasText: bool
     hovered, pressed, clicked: bool
     label: string

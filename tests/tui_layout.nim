@@ -98,6 +98,34 @@ block justify_and_auto_margin:
   layout = c.layout(100, 20)
   doAssert layout.bounds(first).x == 40
 
+block reverse_direction:
+  let c = newContext()
+  var row, first, second, column, upper, lower, endRow, endFirst, endSecond: Element
+  c.build(proc(ctx: Context) =
+    row = ctx.row().size(100, 20).gap(10).reverse()
+    discard row.children(proc() =
+      first = ctx.box().size(20, 10).margin(0, 5, 0, 0)
+      second = ctx.box().size(20, 10)
+    )
+    column = ctx.column().size(40, 100).reverse()
+    discard column.children(proc() =
+      upper = ctx.box().size(10, 20)
+      lower = ctx.box().size(10, 20)
+    )
+    endRow = ctx.row().size(100, 20).reverse().justify(Align.End)
+    discard endRow.children(proc() =
+      endFirst = ctx.box().size(20, 10)
+      endSecond = ctx.box().size(20, 10)
+    )
+  )
+  let layout = c.layout(100, 160)
+  doAssert layout.bounds(first) == Rect(x: 75, y: 5, w: 20, h: 10)
+  doAssert layout.bounds(second) == Rect(x: 45, y: 5, w: 20, h: 10)
+  doAssert layout.bounds(upper) == Rect(x: 0, y: 100, w: 10, h: 20)
+  doAssert layout.bounds(lower) == Rect(x: 0, y: 80, w: 10, h: 20)
+  doAssert layout.bounds(endFirst) == Rect(x: 20, y: 125, w: 20, h: 10)
+  doAssert layout.bounds(endSecond) == Rect(x: 0, y: 125, w: 20, h: 10)
+
 block percentages_and_limits:
   let c = newContext()
   var row, child: Element

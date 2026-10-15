@@ -251,8 +251,14 @@ proc placeNode(nodes: seq[ElementNode]; natural: seq[NaturalSize];
   let mainSize = if row: innerW else: innerH
   let crossSize = if row: innerH else: innerW
   let gap = if row: node.gapX else: node.gapY
-  let mainStart = if row: 3 else: 0
-  let mainEnd = if row: 1 else: 2
+  let mainStart = if row:
+      (if node.reverse: 1 else: 3)
+    else:
+      (if node.reverse: 2 else: 0)
+  let mainEnd = if row:
+      (if node.reverse: 3 else: 1)
+    else:
+      (if node.reverse: 0 else: 2)
   let crossStart = if row: 0 else: 3
   let crossEnd = if row: 2 else: 1
 
@@ -382,7 +388,11 @@ proc placeNode(nodes: seq[ElementNode]; natural: seq[NaturalSize];
         discard
     crossOffset += crossBefore
 
-    let mainOffset = position + mainBefore
+    let mainPosition = position + mainBefore
+    let mainOffset = if node.reverse:
+        mainSize - mainPosition - sizes[childSlot]
+      else:
+        mainPosition
     var childRect: Rect
     if row:
       childRect = Rect(x: innerX + mainOffset, y: innerY + crossOffset,
@@ -643,6 +653,14 @@ proc justify*(e: Element; value: Align): Element =
   let n = e.node
   if n != nil:
     n.justify = value
+
+proc reverse*(e: Element): Element =
+  ## Lays out row children from right to left, or column children bottom to top.
+  ## Justify.Start then uses the right or bottom edge as the main-axis start.
+  result = e
+  let n = e.node
+  if n != nil:
+    n.reverse = true
 
 proc alignItems*(e: Element; value: Align): Element =
   result = e
