@@ -13,6 +13,7 @@ type
     context: Context
     frameLayout: LayoutResult
     pressTarget: Element
+    pressMods: platform.Modifiers
     scrollbarDrag: ScrollbarDrag
     focusSlot, keyPressSlot: int
     keyPressKey: platform.Key
@@ -697,6 +698,7 @@ proc event(rt: Runtime; ev: platform.SurfaceEvent): bool =
       rt.requestFrame()
       return true
     rt.pressTarget = rt.frameLayout.targetAt(rt.pointerX, rt.pointerY)
+    rt.pressMods = ev.mods
     rt.pressHoverSlots = rt.frameLayout.slotsAt(rt.pointerX, rt.pointerY)
     if rt.pressTarget.owner != nil:
       var slot = int(rt.pressTarget.slot)
@@ -729,11 +731,12 @@ proc event(rt: Runtime; ev: platform.SurfaceEvent): bool =
       return true
     var clickedSlot = -1
     result = rt.frameLayout.dispatchClick(rt.pressTarget,
-      rt.pointerX, rt.pointerY, clickedSlot)
+      rt.pointerX, rt.pointerY, rt.pressMods, clickedSlot)
     rt.clickedSlots.setLen(0)
     if result:
       rt.clickedSlots.add(clickedSlot)
     rt.pressTarget = Element()
+    rt.pressMods = 0
     rt.pressHoverSlots.setLen(0)
     rt.refreshPointer()
     if result or rt.hoverSlots != previousHover or
@@ -752,6 +755,7 @@ proc event(rt: Runtime; ev: platform.SurfaceEvent): bool =
     rt.keyboardFocusVisible = false
     rt.surfaceFocused = false
     rt.pressTarget = Element()
+    rt.pressMods = 0
     rt.pressHoverSlots.setLen(0)
     rt.refreshPointer()
     rt.updateTextInput()

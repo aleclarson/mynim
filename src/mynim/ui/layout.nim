@@ -1781,7 +1781,8 @@ proc scrollIntoView*(e: Element): Element =
     node.revealInScroll = true
 
 proc dispatchClick(layout: LayoutResult; pressed: Element;
-                   x, y: float32; clickedSlot: var int): bool =
+                   x, y: float32; mods: platform.Modifiers;
+                   clickedSlot: var int): bool =
   if pressed.owner == nil or pressed.owner != layout.owner or
       layout.owner == nil or layout.owner.closed or layout.owner.inBuild or
       not layout.owner.hasFrame or layout.generation != layout.owner.generation:
@@ -1790,9 +1791,13 @@ proc dispatchClick(layout: LayoutResult; pressed: Element;
   if target.owner != pressed.owner or target.slot != pressed.slot:
     return false
   clickedSlot = int(target.slot)
-  let handler = layout.owner.nodes[clickedSlot].clickHandler
-  if handler != nil:
-    handler()
+  let node = layout.owner.nodes[clickedSlot]
+  if node.listState != nil and node.listRowIndex >= 0:
+    node.listState.clickListRow(node.listRowIndex, mods)
+  else:
+    let handler = node.clickHandler
+    if handler != nil:
+      handler()
   true
 
 proc dispatchAccessPress(layout: LayoutResult; id: uint64): bool =

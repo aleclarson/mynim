@@ -178,6 +178,43 @@ block selection_follows_keyed_rows_and_can_be_cleared:
   state.select(-1)
   doAssert state.selected() == -1
 
+block multi_selection_follows_keyed_rows:
+  let context = newContext()
+  var prepended = false
+  let rowKey: ListRowKey = proc(row: int): string =
+    if prepended:
+      if row == 0: "new" else: $(row - 1)
+    else:
+      $row
+  let state = newListState(20, rowKey = rowKey, multiSelectable = true)
+  var count = 10
+
+  proc buildList() =
+    context.build(proc(ctx: Context) =
+      discard ctx.list(state, count, proc(row: int) =
+        discard ctx.box().height(20).shrink(0)
+      ).size(120, 40)
+    )
+
+  buildList()
+  discard context.layout(120, 40)
+  state.select(2)
+  state.toggleSelection(5)
+  doAssert state.selectedRows() == @[2, 5]
+
+  prepended = true
+  inc count
+  buildList()
+  discard context.layout(120, 40)
+  doAssert state.selected() == 6
+  doAssert state.isSelected(3)
+  doAssert state.isSelected(6)
+  doAssert state.selectedRows() == @[3, 6]
+
+  state.clearSelection()
+  doAssert state.selected() == -1
+  doAssert state.selectedRows().len == 0
+
 block follow_end_tracks_growth_until_scrolled_away:
   let context = newContext()
   let state = newListState(20, followEnd = true)

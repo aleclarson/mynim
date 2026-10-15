@@ -1,6 +1,6 @@
 ## Package ui builds native, GPU-rendered user interfaces.
 
-import std/[math, monotimes, parseutils, sequtils, strutils, times, unicode]
+import std/[math, monotimes, parseutils, sequtils, sets, strutils, times, unicode]
 import mynim/internal/gamut
 import mynim/internal/scene as scene
 import mynim/internal/platform

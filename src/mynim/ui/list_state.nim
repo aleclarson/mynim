@@ -70,10 +70,101 @@ proc clearListSelection(state: ListState) =
   state.selectedRow = -1
   state.selectedKey = ""
   state.selectedKeyValid = false
+  state.selectionPivot = -1
+  state.selectionPivotKey = ""
+  state.selectionPivotKeyValid = false
+  state.selectionSpan = 0
   if state.request == listRequestIntoView and state.requestRow == previous:
     state.request = listNoRequest
 
+proc selectionEntry(state: ListState; row: int): ListSelectedRow =
+  result.row = row
+  result.nearRow = row
+  if state.rowKey != nil and row < state.rowCount:
+    result.key = state.rowKey(row)
+    result.keyValid = true
+
+proc listRowIsSelected(state: ListState; row: int): bool =
+  if row < 0 or row >= state.rowCount:
+    return false
+  if state.rowKey != nil:
+    state.selectedKeys.contains(state.rowKey(row))
+  else:
+    state.selectedIndices.contains(row)
+
+proc setListRowSelected(state: ListState; row: int; selected: bool): bool =
+  if row < 0:
+    return false
+  let entry = state.selectionEntry(row)
+  let exists = if entry.keyValid:
+      state.selectedKeys.contains(entry.key)
+    else:
+      state.selectedIndices.contains(row)
+  if exists == selected:
+    return false
+  if selected:
+    if entry.keyValid:
+      state.selectedKeys.incl(entry.key)
+    else:
+      state.selectedIndices.incl(row)
+    state.chosenRows.add(entry)
+    return true
+  if entry.keyValid:
+    state.selectedKeys.excl(entry.key)
+  else:
+    state.selectedIndices.excl(row)
+  for i, chosen in state.chosenRows:
+    let same = if entry.keyValid:
+        chosen.keyValid and chosen.key == entry.key
+      else:
+        not chosen.keyValid and chosen.row == row
+    if same:
+      state.chosenRows.delete(i)
+      break
+  true
+
+proc setListCursor(state: ListState; row: int; pivot: bool) =
+  state.selectedRow = row
+  state.selectedKey = ""
+  state.selectedKeyValid = state.rowKey != nil and row < state.rowCount
+  if state.selectedKeyValid:
+    state.selectedKey = state.rowKey(row)
+  if pivot:
+    state.selectionPivot = row
+    state.selectionPivotKey = state.selectedKey
+    state.selectionPivotKeyValid = state.selectedKeyValid
+    state.selectionSpan = 0
+
 proc syncListSelection(state: ListState) =
+  for i in 0..<state.chosenRows.len:
+    var chosen = state.chosenRows[i]
+    if not chosen.keyValid and state.rowKey != nil and
+        chosen.row >= 0 and chosen.row < state.rowCount:
+      chosen.key = state.rowKey(chosen.row)
+      chosen.keyValid = true
+      chosen.nearRow = chosen.row
+      state.selectedIndices.excl(chosen.row)
+      state.selectedKeys.incl(chosen.key)
+    elif chosen.keyValid and state.rowKey != nil:
+      if chosen.row >= 0 and chosen.row < state.rowCount and
+          state.rowKey(chosen.row) == chosen.key:
+        chosen.nearRow = chosen.row
+      else:
+        let moved = state.findListKey(chosen.key, chosen.nearRow)
+        chosen.row = moved
+        if moved >= 0:
+          chosen.nearRow = moved
+    state.chosenRows[i] = chosen
+
+  if state.selectionPivotKeyValid and state.rowKey != nil:
+    if state.selectionPivot >= 0 and
+        state.selectionPivot < state.rowCount and
+        state.rowKey(state.selectionPivot) == state.selectionPivotKey:
+      discard
+    else:
+      state.selectionPivot = state.findListKey(state.selectionPivotKey,
+        state.selectionPivot)
+
   if state.selectedRow < 0:
     return
   if state.selectedRow >= state.rowCount:
@@ -260,7 +351,8 @@ proc resizeListHeights(heights: var ListHeights; count: int) =
 
 proc newListState*(estimatedRowHeight = 28'f32; rowGap = 0'f32;
                    rowKey: ListRowKey = nil; keepOffset = false;
-                   selectable = false; followEnd = false): ListState =
+                   selectable = false; followEnd = false;
+                   multiSelectable = false): ListState =
   ## Creates persistent state for a virtualized list.
   ##
   ## rowKey should return a stable, unique key for each logical row. When a
@@ -268,20 +360,26 @@ proc newListState*(estimatedRowHeight = 28'f32; rowGap = 0'f32;
   ## key is searched within 1000 rows of its previous index. Set selectable
   ## to enable row clicks and keyboard selection; select also enables it.
   ## followEnd starts at and follows the end until the user scrolls away.
+  ## multiSelectable enables multi-row selection and modifier handling; rowKey
+  ## keeps those choices with their rows as they move.
   if not estimatedRowHeight.finiteMotion or estimatedRowHeight <= 0 or
       not rowGap.finiteMotion or rowGap < 0:
     raise newException(ValueError,
       "ui: list row height must be positive and row gap cannot be negative")
   new(result)
   result.scrollState = newScrollState()
+  result.selectedKeys = initHashSet[string]()
+  result.selectedIndices = initHashSet[int]()
   result.heights.defaultHeight = float64(estimatedRowHeight)
   result.heights.dirty = true
   result.gap = rowGap
   result.rowKey = rowKey
   result.keepOffset = keepOffset
-  result.selectionEnabled = selectable
+  result.selectionEnabled = selectable or multiSelectable
+  result.multiSelectionEnabled = multiSelectable
   result.followEnd = followEnd
   result.selectedRow = -1
+  result.selectionPivot = -1
   result.last = -1
 
 func selected*(state: ListState): int =
@@ -297,12 +395,16 @@ proc select*(state: ListState; row: int) =
   state.selectionEnabled = true
   if row < 0:
     state.clearListSelection()
+    state.chosenRows.setLen(0)
+    state.selectedKeys.clear()
+    state.selectedIndices.clear()
     return
-  state.selectedRow = row
-  state.selectedKey = ""
-  state.selectedKeyValid = state.rowKey != nil and row < state.rowCount
-  if state.selectedKeyValid:
-    state.selectedKey = state.rowKey(row)
+  if state.multiSelectionEnabled:
+    state.chosenRows.setLen(0)
+    state.selectedKeys.clear()
+    state.selectedIndices.clear()
+    discard state.setListRowSelected(row, true)
+  state.setListCursor(row, pivot = true)
   state.request = listRequestIntoView
   state.requestRow = row
 
@@ -313,11 +415,134 @@ proc enableSelection*(state: ListState): ListState =
   state.selectionEnabled = true
   state
 
+proc enableMultiSelection*(state: ListState): ListState =
+  ## Enables multi-row selection by click and keyboard.
+  if state == nil:
+    raise newException(ValueError, "ui: list state cannot be nil")
+  if not state.multiSelectionEnabled and state.selectedRow >= 0:
+    discard state.setListRowSelected(state.selectedRow, true)
+  state.selectionEnabled = true
+  state.multiSelectionEnabled = true
+  state
+
+proc isSelected*(state: ListState; row: int): bool =
+  ## Reports whether row belongs to this list's multi-selection.
+  state != nil and state.multiSelectionEnabled and
+    state.listRowIsSelected(row)
+
+proc selectedRows*(state: ListState): seq[int] =
+  ## Returns the selected row indices still present in the current list.
+  if state == nil or not state.multiSelectionEnabled:
+    return
+  for chosen in state.chosenRows:
+    if chosen.keyValid:
+      if chosen.row >= 0 and chosen.row < state.rowCount and
+          state.rowKey != nil and state.rowKey(chosen.row) == chosen.key:
+        result.add(chosen.row)
+    elif chosen.row >= 0 and chosen.row < state.rowCount:
+      result.add(chosen.row)
+
+proc clearSelection*(state: ListState) =
+  ## Clears the row choice and any multi-selection.
+  if state == nil:
+    raise newException(ValueError, "ui: list state cannot be nil")
+  state.clearListSelection()
+  state.chosenRows.setLen(0)
+  state.selectedKeys.clear()
+  state.selectedIndices.clear()
+
+proc toggleSelection*(state: ListState; row: int) =
+  ## Adds row to the multi-selection, or removes it if already selected.
+  if state == nil:
+    raise newException(ValueError, "ui: list state cannot be nil")
+  if row < 0 or row >= state.rowCount:
+    raise newException(ValueError, "ui: row is outside the list")
+  discard state.setListRowSelected(row, not state.listRowIsSelected(row))
+  state.multiSelectionEnabled = true
+  state.selectionEnabled = true
+  state.setListCursor(row, pivot = true)
+  state.request = listRequestIntoView
+  state.requestRow = row
+
+proc extendListSelection(state: ListState; row: int; keep: bool) =
+  let pivot = state.selectionPivot
+  if pivot < 0 or pivot >= state.rowCount:
+    state.select(row)
+    return
+  let first = min(pivot, row)
+  let last = max(pivot, row)
+  when defined(macosx):
+    let oldLast = max(0, min(pivot + state.selectionSpan, state.rowCount - 1))
+    for oldRow in min(pivot, oldLast)..max(pivot, oldLast):
+      if (oldRow < first or oldRow > last) and
+          state.listRowIsSelected(oldRow):
+        discard state.setListRowSelected(oldRow, false)
+  else:
+    if not keep:
+      state.chosenRows.setLen(0)
+      state.selectedKeys.clear()
+      state.selectedIndices.clear()
+  for selectedRow in first..last:
+    discard state.setListRowSelected(selectedRow, true)
+  state.selectionSpan = row - pivot
+  state.setListCursor(row, pivot = false)
+  state.request = listRequestIntoView
+  state.requestRow = row
+
+proc clickListRow(state: ListState; row: int; mods: platform.Modifiers) =
+  if not state.multiSelectionEnabled:
+    state.select(row)
+    return
+  when defined(macosx):
+    const commandMask = platform.modSuper
+  else:
+    const commandMask = platform.modCtrl
+  if (mods and platform.modShift) != 0:
+    state.extendListSelection(row, keep = (mods and commandMask) != 0)
+  elif (mods and commandMask) != 0:
+    state.toggleSelection(row)
+  else:
+    state.select(row)
+
+proc selectAllListRows(state: ListState) =
+  for row in 0..<state.rowCount:
+    discard state.setListRowSelected(row, true)
+
 proc selectListKey(state: ListState; key: platform.Key;
                    mods: platform.Modifiers): bool =
-  if state == nil or not state.selectionEnabled or mods != 0 or
-      state.rowCount <= 0:
+  if state == nil or not state.selectionEnabled or state.rowCount <= 0:
     return false
+
+  when defined(macosx):
+    const commandMask = platform.modSuper
+  else:
+    const commandMask = platform.modCtrl
+
+  if state.multiSelectionEnabled and key == platform.keyA and
+      mods == commandMask:
+    state.selectAllListRows()
+    return true
+
+  when not defined(macosx):
+    if state.multiSelectionEnabled and key == platform.keySpace and
+        mods == platform.modCtrl:
+      if state.selectedRow >= 0 and state.selectedRow < state.rowCount:
+        state.toggleSelection(state.selectedRow)
+      return true
+
+  var extend = false
+  var moveCursor = false
+  if mods != 0:
+    if not state.multiSelectionEnabled:
+      return false
+    if mods == platform.modShift or
+        mods == (platform.modShift or commandMask):
+      extend = true
+    elif not defined(macosx) and mods == platform.modCtrl:
+      moveCursor = true
+    else:
+      return false
+
   let current = state.selectedRow
   var target = -1
   case key
@@ -346,7 +571,14 @@ proc selectListKey(state: ListState; key: platform.Key;
         target = max(0, min(state.rowCount - 1, start + step))
   else:
     return false
-  state.select(target)
+  if extend:
+    state.extendListSelection(target, keep = (mods and commandMask) != 0)
+  elif moveCursor:
+    state.setListCursor(target, pivot = false)
+    state.request = listRequestIntoView
+    state.requestRow = target
+  else:
+    state.select(target)
   true
 
 proc handleListKey(layout: LayoutResult; focusSlot: int;

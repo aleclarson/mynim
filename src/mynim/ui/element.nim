@@ -99,6 +99,11 @@ type
 
   ListRowKey* = proc(row: int): string {.closure.} ## Returns a stable, unique row key.
 
+  ListSelectedRow = object
+    row, nearRow: int
+    key: string
+    keyValid: bool
+
   ListState* = ref object
     ## Persistent scroll and measured-height state for a virtualized list.
     scrollState: ScrollState
@@ -110,6 +115,13 @@ type
     first, last: int
     selectedRow: int
     selectedKey: string
+    chosenRows: seq[ListSelectedRow]
+    selectedKeys: HashSet[string]
+    selectedIndices: HashSet[int]
+    selectionPivot: int
+    selectionPivotKey: string
+    selectionPivotKeyValid: bool
+    selectionSpan: int
     anchor: int
     anchorKey: string
     anchorInset: float64
@@ -117,6 +129,7 @@ type
     followOffsetY, followMaxY: float32
     laidOut, visibleRead, atEnd: bool
     anchorValid, selectedKeyValid, selectionEnabled: bool
+    multiSelectionEnabled: bool
     followEnd, following, followStarted: bool
     request: ListRequestKind
     requestRow: int
