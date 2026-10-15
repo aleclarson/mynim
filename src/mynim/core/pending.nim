@@ -42,18 +42,6 @@ proc writeTypeScript*(outPath: string) =
   ## methods and events.
   raise errUnsupported()
 
-proc randomText*(): string =
-  ## pending: used by tsgen.go and window secrets in the Go source;
-  ## here it generates unguessable tokens.
-  var b: array[16, byte]
-  for i in 0 ..< b.len:
-    b[i] = byte(rand(256))
-  const hex = "0123456789abcdef"
-  result = newString(32)
-  for i, v in b:
-    result[2*i] = hex[v.int shr 4]
-    result[2*i+1] = hex[v.int and 15]
-
 proc stopFileWatches() =
   ## pending: watch.go — stops fsnotify watchers on quit.
   discard

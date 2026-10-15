@@ -9,7 +9,7 @@
 
 import std/[os, strutils, strtabs, tables, sets, json, atomics, times,
             options, strformat, hashes, osproc, uri, math, sequtils,
-            parseutils, base64, random, algorithm]
+            parseutils, base64, algorithm]
 import core/locks
 import mynim/transfer, mynim/image
 import mynim/ui as uiPackage
@@ -47,6 +47,7 @@ include mynim/core/modules
 include mynim/core/paths
 include mynim/core/power
 include mynim/core/secrets
+include mynim/core/random
 include mynim/core/pending
 
 when isMainModule:
