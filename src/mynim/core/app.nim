@@ -279,10 +279,13 @@ proc run*(a: Application) =
     raise newException(ValueError, "mynim: app.run called twice")
   a.running = true
   a.mu.release()
-  var t: Thread[void]
-  createThread(t, proc() {.thread.} = cleanUpdateLeftovers())
 
   let b = backend()
+  # POSIX signal masks are per-thread, so install the waiter before the
+  # backend or cleanup worker can create threads that inherit the mask.
+  quitOnSignals()
+  var t: Thread[void]
+  createThread(t, proc() {.thread.} = cleanUpdateLeftovers())
   b.init(AppHandlerImpl(), platform.AppOptions(
     name: a.name(),
     activationPolicy: $a.activationPolicy()))
@@ -292,7 +295,6 @@ proc run*(a: Application) =
   a.startLocale()
   if a.dock.menu() != nil:
     b.app().setDockMenu(a.dock.menu().snapshot())
-  quitOnSignals()
   # Run whatever was scheduled before the event loop existed.
   b.signal()
   b.run()

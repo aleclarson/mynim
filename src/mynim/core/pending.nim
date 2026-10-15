@@ -17,11 +17,6 @@ proc stopCookieCalls() =
 
 ## --- login.go / updater.go / deeplink.go / tsgen.go / watch.go ---
 
-proc quitOnSignals() =
-  ## pending: signals.go — quits the app on SIGINT/SIGTERM.
-  discard
-
-
 
 proc writeTypeScript*(outPath: string) =
   ## pending: tsgen.go — generates the TypeScript client for bound

@@ -44,6 +44,7 @@ include mynim/core/protocol
 include mynim/core/app
 include mynim/core/deeplink
 include mynim/core/updater
+include mynim/core/signals
 include mynim/core/clipboard
 include mynim/core/menu
 include mynim/core/modules
