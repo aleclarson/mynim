@@ -104,6 +104,16 @@ proc syncListSelection(state: ListState) =
   else:
     state.clearListSelection()
 
+proc prepareListFollow(state: ListState) =
+  if not state.followEnd:
+    return
+  if not state.followStarted:
+    state.following = true
+  elif abs(state.scrollState.offsetY - state.followOffsetY) >= 0.5'f32:
+    state.following = state.scrollState.offsetY >= state.followMaxY - 0.5'f32
+  if state.following and state.request == listNoRequest:
+    state.request = listRequestToEnd
+
 proc blockPosition(heights: ListHeights; id: int): tuple[index: int, found: bool] =
   var low = 0
   var high = heights.blockIds.len
@@ -250,13 +260,14 @@ proc resizeListHeights(heights: var ListHeights; count: int) =
 
 proc newListState*(estimatedRowHeight = 28'f32; rowGap = 0'f32;
                    rowKey: ListRowKey = nil; keepOffset = false;
-                   selectable = false): ListState =
+                   selectable = false; followEnd = false): ListState =
   ## Creates persistent state for a virtualized list.
   ##
   ## rowKey should return a stable, unique key for each logical row. When a
   ## keyed row moves, the list follows it unless keepOffset is true. The moved
   ## key is searched within 1000 rows of its previous index. Set selectable
   ## to enable row clicks and keyboard selection; select also enables it.
+  ## followEnd starts at and follows the end until the user scrolls away.
   if not estimatedRowHeight.finiteMotion or estimatedRowHeight <= 0 or
       not rowGap.finiteMotion or rowGap < 0:
     raise newException(ValueError,
@@ -269,6 +280,7 @@ proc newListState*(estimatedRowHeight = 28'f32; rowGap = 0'f32;
   result.rowKey = rowKey
   result.keepOffset = keepOffset
   result.selectionEnabled = selectable
+  result.followEnd = followEnd
   result.selectedRow = -1
   result.last = -1
 
@@ -402,6 +414,7 @@ proc beginList(state: ListState; count: int): ListPlan =
   state.rowCount = max(count, 0)
   state.heights.resizeListHeights(state.rowCount)
   state.syncListSelection()
+  state.prepareListFollow()
   state.syncListAnchor()
   let viewport = if state.viewportHeight > 0:
       state.viewportHeight
@@ -415,6 +428,7 @@ proc beginList(state: ListState; count: int): ListPlan =
   let maximum = min(max(contentHeight - viewport64, 0.0),
     float64(high(float32)))
   if state.request != listNoRequest:
+    let request = state.request
     var target = 0.0
     if state.rowCount > 0:
       case state.request
@@ -448,6 +462,12 @@ proc beginList(state: ListState; count: int): ListPlan =
     state.scrollState.scrollTo(0,
       listHeightFloat32(min(max(target, 0.0), maximum)))
     state.request = listNoRequest
+    if state.followEnd:
+      if request == listRequestToEnd:
+        state.following = true
+      else:
+        state.following = state.scrollState.offsetY >=
+          float32(maximum) - 0.5'f32
 
   state.scrollState.maxX = 0
   state.scrollState.maxY = float32(maximum)
@@ -497,6 +517,12 @@ proc finishList(state: ListState; first, last: int): bool =
   state.last = last
   state.atEnd = state.rowCount == 0 or
     state.scrollState.offset().y >= state.scrollState.maxOffset().y - 0.5'f32
+  if state.followEnd:
+    if state.atEnd:
+      state.following = true
+    state.followOffsetY = state.scrollState.offsetY
+    state.followMaxY = state.scrollState.maxY
+    state.followStarted = true
   state.anchorValid = state.rowKey != nil and state.rowCount > 0
   if state.anchorValid:
     state.anchor = max(0, min(first, state.rowCount - 1))

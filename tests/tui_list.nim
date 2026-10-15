@@ -177,3 +177,47 @@ block selection_follows_keyed_rows_and_can_be_cleared:
 
   state.select(-1)
   doAssert state.selected() == -1
+
+block follow_end_tracks_growth_until_scrolled_away:
+  let context = newContext()
+  let state = newListState(20, followEnd = true)
+  var count = 5
+
+  proc buildList() =
+    context.build(proc(ctx: Context) =
+      discard ctx.list(state, count, proc(row: int) =
+        discard ctx.box().height(20).shrink(0)
+      ).size(120, 40)
+    )
+
+  buildList()
+  discard context.layout(120, 40)
+  buildList()
+  discard context.layout(120, 40)
+  doAssert state.offset().y == state.maxOffset().y
+
+  count = 10
+  buildList()
+  discard context.layout(120, 40)
+  doAssert state.offset().y == state.maxOffset().y
+
+  state.scrollTo(0)
+  buildList()
+  discard context.layout(120, 40)
+  doAssert state.offset().y == 0
+
+  count = 15
+  buildList()
+  discard context.layout(120, 40)
+  doAssert state.offset().y == 0
+  doAssert state.offset().y < state.maxOffset().y
+
+  state.scrollToEnd()
+  buildList()
+  discard context.layout(120, 40)
+  doAssert state.offset().y == state.maxOffset().y
+
+  count = 20
+  buildList()
+  discard context.layout(120, 40)
+  doAssert state.offset().y == state.maxOffset().y

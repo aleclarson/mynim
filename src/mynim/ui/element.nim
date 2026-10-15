@@ -114,8 +114,10 @@ type
     anchorKey: string
     anchorInset: float64
     anchorScrollY: float32
+    followOffsetY, followMaxY: float32
     laidOut, visibleRead, atEnd: bool
     anchorValid, selectedKeyValid, selectionEnabled: bool
+    followEnd, following, followStarted: bool
     request: ListRequestKind
     requestRow: int
     requestAlign: Align

@@ -65,3 +65,40 @@ doAssert listSurface.send(platform.SurfaceEvent(kind: platform.keyPressed,
   key: platform.keyEnd))
 doAssert listSurface.frame()
 doAssert listState.selected() == 99
+
+var followCount = 100
+let followState = ui.newListState(20, followEnd = true)
+let followContent = ui.newContent(proc(ctx: ui.Context) =
+  discard ctx.list(followState, followCount, proc(row: int) =
+    discard ctx.box().size(20, 20).shrink(0)
+  ).size(20, 40)
+)
+discard newWindow(WindowOptions(width: 20, height: 40, hidden: true,
+  content: followContent))
+let followSurface = fake.windows[^1].surface
+
+doAssert followSurface.frame()
+doAssert followSurface.frame()
+doAssert followState.offset().y == followState.maxOffset().y
+
+discard followSurface.send(platform.SurfaceEvent(kind: platform.pointerScroll,
+  x: 5, y: 5, dy: -100))
+let scrolledAway = followState.offset().y
+doAssert scrolledAway < followState.maxOffset().y
+doAssert followSurface.frame()
+
+followCount = 110
+discard followSurface.send(platform.SurfaceEvent(kind: platform.surfaceResize))
+doAssert followSurface.frame()
+doAssert followState.offset().y == scrolledAway
+doAssert followState.offset().y < followState.maxOffset().y
+
+discard followSurface.send(platform.SurfaceEvent(kind: platform.pointerScroll,
+  x: 5, y: 5, dy: 10_000))
+doAssert followSurface.frame()
+doAssert followState.offset().y == followState.maxOffset().y
+
+followCount = 120
+discard followSurface.send(platform.SurfaceEvent(kind: platform.surfaceResize))
+doAssert followSurface.frame()
+doAssert followState.offset().y == followState.maxOffset().y
