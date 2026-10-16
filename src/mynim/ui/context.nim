@@ -214,6 +214,8 @@ type
     followScrollSlot: int32
     gridCol, gridRow, gridColSpan, gridRowSpan: int
     tooltipGap: float32
+    overlayAnchorIdentity: uint64
+    overlayGap: float32
     # Overlay text is painted but excluded from the node's natural size.
     hasText, textNoWrap, textColorSet, textOverlay, listRowSelected,
       listRowFocusVisible, listRowHeader, listRowPinnedHeader: bool

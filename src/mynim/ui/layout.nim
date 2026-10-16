@@ -2099,6 +2099,44 @@ proc layoutAt(c: Context; bounds: Rect; now: MonoTime;
       result.animating = state.finishList(first, last) or result.animating
       updateListReorderTarget(c.owner.nodes, result.rects, state, slot)
   for slot in 1..<c.owner.nodes.len:
+    let anchorIdentity = c.owner.nodes[slot].overlayAnchorIdentity
+    if anchorIdentity == 0:
+      continue
+    let anchorSlot = c.owner.idSlots.getOrDefault(anchorIdentity, -1)
+    if anchorSlot <= 0 or anchorSlot >= result.rects.len:
+      continue
+    let anchor = result.rects[anchorSlot]
+    let overlay = result.rects[slot]
+    let width = min(max(overlay.w, anchor.w), bounds.w)
+    let gap = c.owner.nodes[slot].overlayGap
+    let below = anchor.y + anchor.h + gap
+    let above = anchor.y - overlay.h - gap
+    let fitsBelow = below + overlay.h <= bounds.y + bounds.h
+    let fitsAbove = above >= bounds.y
+    let wantedY = if fitsBelow or not fitsAbove: below else: above
+    let maxX = max(bounds.x, bounds.x + bounds.w - width)
+    let wantedX = if c.owner.nodes[anchorSlot].rightToLeft:
+        anchor.x + anchor.w - width
+      else:
+        anchor.x
+    let targetX = min(max(wantedX, bounds.x), maxX)
+    let maxY = max(bounds.y, bounds.y + bounds.h - overlay.h)
+    let targetY = min(max(wantedY, bounds.y), maxY)
+    let deltaX = targetX - overlay.x
+    let deltaY = targetY - overlay.y
+    result.rects[slot].x = targetX
+    result.rects[slot].y = targetY
+    result.rects[slot].w = width
+    if deltaX != 0 or deltaY != 0:
+      for descendant in slot + 1..<c.owner.nodes.len:
+        var current = descendant
+        while current > slot and current > 0:
+          current = int(c.owner.nodes[current].parent)
+        if current == slot:
+          result.rects[descendant].x += deltaX
+          result.rects[descendant].y += deltaY
+
+  for slot in 1..<c.owner.nodes.len:
     if not c.owner.nodes[slot].tooltipOverlay:
       continue
     let anchorSlot = int(c.owner.nodes[slot].parent)
