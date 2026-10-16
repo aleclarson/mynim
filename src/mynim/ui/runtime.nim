@@ -3011,6 +3011,33 @@ proc capture(rt: Runtime): tuple[width, height: int, rgba: seq[byte]] =
   for offset in countup(0, result.rgba.high - 3, 4):
     swap(result.rgba[offset], result.rgba[offset + 2])
 
+proc render*(view: proc(c: Context) {.closure.}; width, height: int;
+             scale = 1'f32): sourceImage.RgbaImage =
+  ## Builds and draws one native UI frame into a premultiplied RGBA image.
+  ## Width and height are DIPs; scale is device pixels per DIP.
+  if view == nil:
+    raise newException(ValueError, "ui: Render needs a view")
+  let w = frameDimension(float64(width), "width")
+  let h = frameDimension(float64(height), "height")
+  let deviceScale = if classify(scale) in {fcNan, fcInf, fcNegInf} or
+      scale <= 0: 1'f32 else: scale
+
+  let c = newContext()
+  defer: c.close()
+  c.theme = lightTheme()
+  c.themeEnabled = true
+  c.themeBackground = false
+  c.build(view)
+  let layout = c.layoutAt(Rect(w: w, h: h), getMonoTime(),
+                          c.reduceMotion)
+  let frame = layout.paintScene(deviceScale)
+  var software: raster.Renderer
+  discard software.render(frame)
+  let bitmap = software.image
+  result = sourceImage.RgbaImage(pix: bitmap.rgba(),
+    stride: bitmap.w * 4,
+    rect: sourceImage.rect(0, 0, bitmap.w, bitmap.h))
+
 proc close(rt: Runtime) =
   if rt.closed:
     return
