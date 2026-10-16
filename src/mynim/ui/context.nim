@@ -5,6 +5,7 @@ type
 
   ContextObj = object
     owner: ElementOwner
+    routeRouter: Router
     theme: Theme
     reduceMotion: bool
     treeState: TreeState
@@ -219,6 +220,7 @@ type
     animations: Table[uint64, Table[string, ScalarAnimation]]
     colorMotions: Table[uint64, Table[string, ColorMotion]]
     keyframes: Table[uint64, Table[string, ScalarSequence]]
+    routers: seq[Router]
     frameNow: MonoTime
     committedRects: seq[Rect]
     lastBounds: Table[uint64, Rect]
@@ -1226,6 +1228,10 @@ proc build*(c: Context; view: proc(c: Context) {.closure.}) =
   if c.owner.inBuild:
     raise newException(ValueError, "ui: nested frame build")
   if c.owner.generation == high(uint32):
+    for router in c.owner.routers:
+      if router != nil:
+        router.onChanged = nil
+    c.owner.routers.setLen(0)
     c.owner.retire()
     new(c.owner)
     c.owner.idSlots = initTable[uint64, int]()
@@ -1448,6 +1454,10 @@ proc close*(c: Context) =
   if c == nil or c.owner.closed:
     return
   c.owner.actions.setLen(0)
+  for router in c.owner.routers:
+    if router != nil:
+      router.onChanged = nil
+  c.owner.routers.setLen(0)
   c.accordion = nil
   c.accordionHeaders.clear()
   c.owner.retire()

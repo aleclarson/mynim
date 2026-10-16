@@ -3,10 +3,14 @@
 type
   RouteEntry = ref object
     location, title: string
+    pages: seq[uint64]
+    layouts: seq[int]
 
   Router* = ref object
     entries: seq[RouteEntry]
     at: int
+    identity, nextPageIdentity: uint64
+    onChanged: proc() {.closure.}
 
   RouteParam = tuple[name, value: string]
 
@@ -16,8 +20,14 @@ type
     segments: seq[string]
     params, baseParams: seq[RouteParam]
     rest: int
+    level, offset: int
 
 const routerHistoryLimit = 100
+
+var nextRouterIdentity = 0'u64
+
+proc changed(router: Router)
+proc sharePages(entry: RouteEntry; previous: RouteEntry; location: string)
 
 func isHexDigitChar(c: char): bool =
   c in {'0'..'9', 'a'..'f', 'A'..'F'}
@@ -43,6 +53,15 @@ proc segmentsOf(location: string): seq[string] =
     return
   for part in pathParts(parsed.path):
     result.add(uri.decodeUrl(part, decodePlus = false))
+
+proc isAppPath(target: string): bool =
+  ## Reports whether target is a relative or absolute path within the app.
+  var parsed: uri.Uri
+  try:
+    parsed = uri.parseUri(target)
+  except ValueError:
+    return false
+  parsed.scheme.len == 0 and parsed.hostname.len == 0
 
 proc escapeUriPart(value: string; query: bool): string =
   var i = 0
@@ -148,6 +167,8 @@ proc replace*(router: Router; target: string)
 proc newRouter*(initialPath = "/"): Router =
   ## Creates a URL history showing initialPath.
   new(result)
+  inc nextRouterIdentity
+  result.identity = nextRouterIdentity
   result.replace(initialPath)
 
 proc route*(router: Router): Route =
@@ -238,6 +259,7 @@ proc push*(router: Router; target: string) =
   if not resolved.valid or resolved.location == current.location:
     return
   let entry = RouteEntry(location: resolved.location)
+  entry.sharePages(current, resolved.location)
   if router.at + 1 < router.entries.len:
     router.entries.setLen(router.at + 1)
   router.entries.add(entry)
@@ -245,6 +267,7 @@ proc push*(router: Router; target: string) =
     let excess = router.entries.len - routerHistoryLimit
     router.entries = router.entries[excess..^1]
   router.at = router.entries.high
+  router.changed()
 
 proc replace*(router: Router; target: string) =
   ## Replaces the current history entry with target.
@@ -261,9 +284,11 @@ proc replace*(router: Router; target: string) =
     if previous.location == resolved.location:
       return
     var entry = RouteEntry(location: resolved.location)
-    if resolved.path == pathOf(previous.location):
+    entry.sharePages(previous, resolved.location)
+    if segmentsOf(resolved.location) == segmentsOf(previous.location):
       entry.title = previous.title
     router.entries[router.at] = entry
+    router.changed()
 
 proc go*(router: Router; distance: int) =
   ## Moves distance entries through history, bounded by its first and last.
@@ -277,6 +302,7 @@ proc go*(router: Router; distance: int) =
       (if distance >= last - router.at: last else: router.at + distance)
   if next != router.at:
     router.at = next
+    router.changed()
 
 proc back*(router: Router) =
   ## Shows the previous history entry when one exists.
@@ -293,6 +319,43 @@ func canGoBack*(router: Router): bool =
 func canGoForward*(router: Router): bool =
   ## Reports whether a later history entry exists.
   router != nil and router.at < router.entries.len - 1
+
+proc changed(router: Router) =
+  if router != nil and router.onChanged != nil:
+    router.onChanged()
+
+proc sharePages(entry: RouteEntry; previous: RouteEntry; location: string) =
+  if entry == nil or previous == nil:
+    return
+  let nextSegments = segmentsOf(location)
+  let previousSegments = segmentsOf(previous.location)
+  if nextSegments == previousSegments:
+    for page in previous.pages:
+      entry.pages.add(page)
+    for layout in previous.layouts:
+      entry.layouts.add(layout)
+    return
+  let levels = min(previous.pages.len, previous.layouts.len)
+  for level in 0..<levels:
+    let prefixLength = previous.layouts[level]
+    if prefixLength < 0 or prefixLength > nextSegments.len or
+        prefixLength > previousSegments.len:
+      break
+    var samePrefix = true
+    for index in 0..<prefixLength:
+      if nextSegments[index] != previousSegments[index]:
+        samePrefix = false
+        break
+    if not samePrefix:
+      break
+    entry.pages.add(previous.pages[level])
+    entry.layouts.add(prefixLength)
+
+proc pageIdentity(router: Router; entry: RouteEntry; level: int): uint64 =
+  while entry.pages.len <= level:
+    inc router.nextPageIdentity
+    entry.pages.add(router.nextPageIdentity)
+  entry.pages[level]
 
 func location*(router: Router): string =
   ## Returns the escaped path and query of the current history entry.

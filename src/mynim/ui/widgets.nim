@@ -351,13 +351,16 @@ proc primaryButton*(c: Context; label: string): Element =
   c.themedButton(label, primary = true)
 
 proc link*(c: Context; label, url: string): Element =
-  ## Creates accessible text that opens url in the system browser when clicked
-  ## or activated from the keyboard.
+  ## Creates accessible text that opens app paths in the active Router and
+  ## external URLs in the system browser.
   let open = c.openURL
+  let router = c.routeRouter
   result = c.text(label).textColor(c.theme.accent)
     .cursor(platform.cursorPointer)
     .onClick(proc() =
-      if url.len > 0 and open != nil:
+      if url.len > 0 and router != nil and isAppPath(url):
+        router.push(url)
+      elif url.len > 0 and open != nil:
         open(url, nil)
     )
   let node = result.node

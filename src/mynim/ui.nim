@@ -69,4 +69,5 @@ include mynim/ui/color_picker
 include mynim/ui/dialog
 include mynim/ui/combobox
 include mynim/ui/toast
+include mynim/ui/router_view
 include mynim/ui/runtime
