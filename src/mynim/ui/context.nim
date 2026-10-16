@@ -8,6 +8,8 @@ type
     theme: Theme
     reduceMotion: bool
     treeState: TreeState
+    accordion: AccordionBuild
+    accordionHeaders: Table[uint64, seq[uint64]]
     checkboxGroup: CheckboxGroupBuild
     segmentedToggles: bool
     pendingKey: string
@@ -39,6 +41,9 @@ type
 
   CheckboxGroupBuild = ref object
     boxes: seq[ptr bool]
+
+  AccordionBuild = ref object
+    headers, last: seq[uint64]
 
   UiAction = object
     handle: HandleState
@@ -92,6 +97,8 @@ type
     keyframes: Table[uint64, Table[string, ScalarSequence]]
     frameNow: MonoTime
     committedRects: seq[Rect]
+    lastBounds: Table[uint64, Rect]
+    trackedBounds: HashSet[uint64]
     focusIdentity: uint64
     focusActive: bool
     invalidate: proc() {.closure.}
@@ -352,6 +359,8 @@ proc newContext*(): Context =
   new(result.owner)
   result.owner.idSlots = initTable[uint64, int]()
   result.owner.identityParents = initTable[uint64, uint64]()
+  result.owner.lastBounds = initTable[uint64, Rect]()
+  result.owner.trackedBounds = initHashSet[uint64]()
   result.owner.previousInteraction = initTable[uint64, uint8]()
   result.owner.keyedSeen = initHashSet[string]()
   result.owner.pendingNotices = initTable[uint64, uint8]()
@@ -368,6 +377,7 @@ proc newContext*(): Context =
     initTable[uint64, Table[string, ColorMotion]]()
   result.owner.keyframes =
     initTable[uint64, Table[string, ScalarSequence]]()
+  result.accordionHeaders = initTable[uint64, seq[uint64]]()
   result.theme = lightTheme()
 
 proc multiplyWrap(a, b: uint64): uint64 {.inline.} =
@@ -697,6 +707,8 @@ proc retire(owner: ElementOwner) =
   owner.colorMotions.clear()
   owner.keyframes.clear()
   owner.committedRects = @[]
+  owner.lastBounds.clear()
+  owner.trackedBounds.clear()
   owner.focusIdentity = 0
   owner.focusActive = false
   owner.invalidate = nil
@@ -983,6 +995,8 @@ proc build*(c: Context; view: proc(c: Context) {.closure.}) =
     new(c.owner)
     c.owner.idSlots = initTable[uint64, int]()
     c.owner.identityParents = initTable[uint64, uint64]()
+    c.owner.lastBounds = initTable[uint64, Rect]()
+    c.owner.trackedBounds = initHashSet[uint64]()
     c.owner.previousInteraction = initTable[uint64, uint8]()
     c.owner.keyedSeen = initHashSet[string]()
     c.owner.pendingNotices = initTable[uint64, uint8]()
@@ -999,6 +1013,8 @@ proc build*(c: Context; view: proc(c: Context) {.closure.}) =
       initTable[uint64, Table[string, ColorMotion]]()
     c.owner.keyframes =
       initTable[uint64, Table[string, ScalarSequence]]()
+    c.accordion = nil
+    c.accordionHeaders.clear()
   inc c.owner.generation
   c.owner.frameNow = getMonoTime()
   c.owner.animating = false
@@ -1042,6 +1058,19 @@ proc build*(c: Context; view: proc(c: Context) {.closure.}) =
       if node.parent >= 0:
         c.owner.identityParents[node.identity] =
           c.owner.nodes[int(node.parent)].identity
+    var staleBounds: seq[uint64]
+    for identity in c.owner.trackedBounds:
+      if not c.owner.idSlots.hasKey(identity):
+        staleBounds.add(identity)
+    for identity in staleBounds:
+      c.owner.trackedBounds.excl(identity)
+      c.owner.lastBounds.del(identity)
+    var staleAccordions: seq[uint64]
+    for identity in c.accordionHeaders.keys:
+      if not c.owner.idSlots.hasKey(identity):
+        staleAccordions.add(identity)
+    for identity in staleAccordions:
+      c.accordionHeaders.del(identity)
     var staleAnimations: seq[uint64]
     for identity in c.owner.animations.keys:
       if not c.owner.idSlots.hasKey(identity):
@@ -1086,4 +1115,6 @@ proc close*(c: Context) =
   if c == nil or c.owner.closed:
     return
   c.owner.actions.setLen(0)
+  c.accordion = nil
+  c.accordionHeaders.clear()
   c.owner.retire()

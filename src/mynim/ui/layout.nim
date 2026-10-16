@@ -2022,6 +2022,9 @@ proc layoutAt(c: Context; bounds: Rect; now: MonoTime;
       result.animating = state.finishList(first, last) or result.animating
       updateListReorderTarget(c.owner.nodes, result.rects, state, slot)
   c.owner.committedRects = result.rects
+  for slot, node in c.owner.nodes:
+    if node.identity in c.owner.trackedBounds:
+      c.owner.lastBounds[node.identity] = result.rects[slot]
 
 proc layout*(c: Context; bounds: Rect): LayoutResult =
   ## Lays out the latest completed build inside bounds.
