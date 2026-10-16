@@ -6,4 +6,5 @@ import mynim/ui/chart/nearest
 import mynim/ui/chart/pie
 import mynim/ui/chart/time_scale
 import mynim/ui/chart/shapes
-export scales, stack, nearest, pie, time_scale, shapes
+import mynim/ui/chart/plot
+export scales, stack, nearest, pie, time_scale, shapes, plot

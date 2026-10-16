@@ -3424,6 +3424,13 @@ proc textSize*(e: Element; value: float32): Element =
     if n.hasText or n.textClient != nil:
       e.propagateTextAreaStyle()
 
+proc noWrap*(e: Element): Element =
+  ## Keeps text on one line, allowing it to extend beyond its element.
+  result = e
+  let n = e.node
+  if n != nil and n.hasText:
+    n.textNoWrap = true
+
 proc textColor*(e: Element; value: Color): Element =
   ## Sets the text color.
   result = e
