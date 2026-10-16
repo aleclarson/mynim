@@ -21,6 +21,7 @@ type
     openURL: proc(url: string; done: proc(err: ref CatchableError)) {.closure.}
     openMenu: proc(identity: uint64;
                    build: proc(menu: Menu) {.closure.}) {.closure.}
+    queueClick: proc(identity: uint64) {.closure.}
     hasPendingKey: bool
     themeEnabled, themeBackground: bool
 
@@ -307,6 +308,8 @@ type
       focusRingDisabled, scrollX, scrollY,
       revealInScroll, rightToLeft, directionSet: bool
     focusGroupSet, groupSelects: bool
+    toolbarCollapsed, toolbarMore: bool
+    toolbarState: ToolbarState
     modal, autoFocus: bool
     modalScopeIdentity, overlayOwnerIdentity: uint64
     dialogState: DialogState
@@ -946,6 +949,15 @@ proc effectivelyDisabled(owner: ElementOwner; slot: int): bool =
   var current = slot
   while current > 0 and current < owner.nodes.len:
     if owner.nodes[current].disabled:
+      return true
+    current = int(owner.nodes[current].parent)
+
+proc effectivelyToolbarCollapsed(owner: ElementOwner; slot: int): bool =
+  if owner == nil or slot <= 0 or slot >= owner.nodes.len:
+    return false
+  var current = slot
+  while current > 0 and current < owner.nodes.len:
+    if owner.nodes[current].toolbarCollapsed:
       return true
     current = int(owner.nodes[current].parent)
 

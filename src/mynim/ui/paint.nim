@@ -594,6 +594,8 @@ proc opacityOf(nodes: seq[ElementNode]; slot: int): float32 =
   var disabledSeen = false
   while current >= 0:
     let node = nodes[current]
+    if node.toolbarCollapsed:
+      return 0
     if node.opacitySet:
       result *= node.opacity
       if result == 0:

@@ -2007,6 +2007,115 @@ proc alignFormLabelBaselines(nodes: seq[ElementNode]; rects: var seq[Rect]) =
         pending.add(child)
         child = int(nodes[child].nextSibling)
 
+proc toolbarInnerText(nodes: seq[ElementNode]; root: int): string =
+  var pending = @[root]
+  while pending.len > 0:
+    let slot = pending.pop()
+    let node = nodes[slot]
+    if node.accessHidden:
+      continue
+    if node.hasText:
+      if node.textValue.len > 0:
+        if result.len > 0:
+          result.add(' ')
+        result.add(node.textValue)
+      continue
+    var children: seq[int]
+    var child = int(node.firstChild)
+    while child >= 0:
+      children.add(child)
+      child = int(nodes[child].nextSibling)
+    for index in countdown(children.high, 0):
+      pending.add(children[index])
+
+proc appendToolbarItems(owner: ElementOwner; nodes: seq[ElementNode];
+                        slot: int; items: var seq[ToolbarMenuItem]) =
+  let node = nodes[slot]
+  if node.clickHandler != nil:
+    let label = if node.label.len > 0: node.label
+      else: toolbarInnerText(nodes, slot)
+    items.add(ToolbarMenuItem(
+      identity: node.identity,
+      label: label,
+      toggle: node.accessRole in {platform.roleToggleButton,
+        platform.roleSwitch, platform.roleRadio},
+      checked: (node.accessExtraStates and platform.accessChecked) !=
+        platform.AccessStates(0),
+      disabled: owner.effectivelyDisabled(slot),
+      menuBuilder: node.menuBuilder))
+    return
+  var child = int(node.firstChild)
+  while child >= 0:
+    appendToolbarItems(owner, nodes, child, items)
+    child = int(nodes[child].nextSibling)
+
+proc updateToolbarOverflow(owner: ElementOwner; natural: seq[NaturalSize];
+                           rects: seq[Rect]): bool =
+  if owner == nil:
+    return
+  for slot in 1..<owner.nodes.len:
+    let node = owner.nodes[slot]
+    let state = node.toolbarState
+    if state == nil:
+      continue
+    var children: seq[int]
+    var more = -1
+    var child = int(node.firstChild)
+    while child >= 0:
+      let childNode = owner.nodes[child]
+      if childNode.toolbarMore:
+        more = child
+      elif not childNode.absolute:
+        children.add(child)
+      child = int(childNode.nextSibling)
+    if more < 0:
+      state.items.setLen(0)
+      continue
+
+    let contentWidth = max(rects[slot].w - node.contentInsetX, 0'f32)
+    let moreNode = owner.nodes[more]
+    let moreWidth = natural[more].w + moreNode.marginX
+    var total = 0'f32
+    for index, childSlot in children:
+      if index > 0:
+        total += node.gapX
+      total += natural[childSlot].w + owner.nodes[childSlot].marginX
+
+    var fits = children.len
+    if total > contentWidth + 0.5'f32:
+      let room = contentWidth - moreWidth - node.gapX
+      var used = 0'f32
+      fits = 0
+      while fits < children.len:
+        let childSlot = children[fits]
+        var width = natural[childSlot].w + owner.nodes[childSlot].marginX
+        if fits > 0:
+          width += node.gapX
+        if used + width > room + 0.5'f32:
+          break
+        used += width
+        inc fits
+
+    var items: seq[ToolbarMenuItem]
+    var previousGroup = false
+    for childIndex in fits..<children.len:
+      let childSlot = children[childIndex]
+      let first = items.len
+      owner.appendToolbarItems(owner.nodes, childSlot, items)
+      let group = items.len - first > 1
+      if items.len > first and (group or previousGroup):
+        items[first].startsGroup = true
+      if items.len > first:
+        previousGroup = group
+      owner.nodes[childSlot].toolbarCollapsed = true
+      owner.nodes[childSlot].absolute = true
+      result = true
+    state.items = items
+    if fits == children.len:
+      owner.nodes[more].toolbarCollapsed = true
+      owner.nodes[more].absolute = true
+      result = true
+
 proc layoutAt(c: Context; bounds: Rect; now: MonoTime;
               reduceMotion: bool): LayoutResult =
   ## Lays out the latest completed build inside bounds.
@@ -2037,6 +2146,12 @@ proc layoutAt(c: Context; bounds: Rect; now: MonoTime;
   c.owner.gridScratch.occupied.setLen(0)
   c.owner.gridScratch.contributions.setLen(0)
   c.owner.gridScratch.values.setLen(0)
+  for slot in 1..<c.owner.nodes.len:
+    if c.owner.nodes[slot].toolbarCollapsed:
+      c.owner.nodes[slot].toolbarCollapsed = false
+      c.owner.nodes[slot].absolute = false
+    if c.owner.nodes[slot].toolbarState != nil:
+      c.owner.nodes[slot].toolbarState.items.setLen(0)
   shapeText(c.owner.nodes)
   alignFormLabels(c.owner.nodes)
   discard measureTree(c.owner.nodes, c.owner.natural, c.owner.gridScratch)
@@ -2060,6 +2175,30 @@ proc layoutAt(c: Context; bounds: Rect; now: MonoTime;
         c.owner.flexSizes, c.owner.flexBases, c.owner.flexMin,
         c.owner.flexMax, c.owner.flexFactors, c.owner.flexSlots,
         c.owner.flexLines, c.owner.gridScratch, 0, result.root)
+    if c.owner.updateToolbarOverflow(c.owner.natural, c.owner.rectScratch):
+      discard measureTree(c.owner.nodes, c.owner.natural,
+        c.owner.gridScratch)
+      if c.owner.nodes.applyTableFits(c.owner.natural):
+        discard measureTree(c.owner.nodes, c.owner.natural,
+          c.owner.gridScratch)
+      var stable = false
+      for attempt in 0..2:
+        placeNode(c.owner.nodes, c.owner.natural, c.owner.rectScratch,
+          c.owner.flexSizes, c.owner.flexBases, c.owner.flexMin,
+          c.owner.flexMax, c.owner.flexFactors, c.owner.flexSlots,
+          c.owner.flexLines, c.owner.gridScratch, 0, result.root)
+        let textChanged = shapeTextToBounds(c.owner.nodes,
+          c.owner.rectScratch)
+        let sizesChanged = measureTree(c.owner.nodes, c.owner.natural,
+          c.owner.gridScratch, c.owner.rectScratch)
+        if not textChanged and not sizesChanged:
+          stable = true
+          break
+      if not stable:
+        placeNode(c.owner.nodes, c.owner.natural, c.owner.rectScratch,
+          c.owner.flexSizes, c.owner.flexBases, c.owner.flexMin,
+          c.owner.flexMax, c.owner.flexFactors, c.owner.flexSlots,
+          c.owner.flexLines, c.owner.gridScratch, 0, result.root)
     for slot in 0..<result.rects.len:
       result.rects[slot] = c.owner.rectScratch[slot]
       let node = c.owner.nodes[slot]
@@ -2250,6 +2389,7 @@ proc targetAt(layout: LayoutResult; x, y: float32): Element =
       else:
         orderIndex
     if slot > 0 and layout.owner.inActiveModalScope(slot) and
+        not layout.owner.effectivelyToolbarCollapsed(slot) and
         not layout.pointerTransparent(slot) and
         layout.rects[slot].contains(x, y) and
         layout.insideClips(slot, x, y):
@@ -2464,6 +2604,7 @@ proc slotsAt(layout: LayoutResult; x, y: float32): seq[int] =
     return
   for slot in 1..<layout.rects.len:
     if layout.owner.inActiveModalScope(slot) and
+        not layout.owner.effectivelyToolbarCollapsed(slot) and
         not layout.pointerTransparent(slot) and
         layout.rects[slot].contains(x, y) and
         layout.insideClips(slot, x, y):
@@ -2585,7 +2726,8 @@ proc dispatchAccessTreeAction(layout: LayoutResult; id: uint64;
   for slot in 1..<layout.owner.nodes.len:
     if uint64(slot + 1) != id:
       continue
-    if layout.owner.effectivelyDisabled(slot):
+    if layout.owner.effectivelyDisabled(slot) or
+        layout.owner.effectivelyToolbarCollapsed(slot):
       return false
     let node = layout.owner.nodes[slot]
     if node.treeAccessAction != nil:
@@ -2604,7 +2746,8 @@ proc dispatchAccessPress(layout: LayoutResult; id: uint64): bool =
   for slot in 1..<layout.owner.nodes.len:
     if uint64(slot + 1) != id:
       continue
-    if layout.owner.effectivelyDisabled(slot):
+    if layout.owner.effectivelyDisabled(slot) or
+        layout.owner.effectivelyToolbarCollapsed(slot):
       return false
     let handler = layout.owner.nodes[slot].clickHandler
     if handler == nil:

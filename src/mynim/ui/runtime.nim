@@ -201,7 +201,8 @@ proc focusableSlot(layout: LayoutResult; slot: int): bool =
       layout.generation != owner.generation or slot <= 0 or
       slot >= owner.nodes.len:
     return false
-  if owner.effectivelyDisabled(slot):
+  if owner.effectivelyDisabled(slot) or
+      owner.effectivelyToolbarCollapsed(slot):
     return false
   let node = owner.nodes[slot]
   node.focusable or node.clickHandler != nil
@@ -558,7 +559,8 @@ proc accessibilityTree(layout: LayoutResult;
     index = -1
   for slot in 1..<owner.nodes.len:
     let node = owner.nodes[slot]
-    if node.accessHidden or not owner.inActiveModalScope(slot):
+    if node.accessHidden or not owner.inActiveModalScope(slot) or
+        owner.effectivelyToolbarCollapsed(slot):
       continue
     let isDisabled = owner.effectivelyDisabled(slot)
     let image = node.bitmap != nil or node.vector != nil
@@ -1871,6 +1873,16 @@ proc renderFrame(rt: Runtime; presentFrame = true) =
   rt.context.openMenu = proc(identity: uint64;
       build: proc(menu: Menu) {.closure.}) =
     rt.showMenuButton(identity, build)
+  rt.context.queueClick = proc(identity: uint64) =
+    let owner = rt.context.owner
+    if owner == nil or not owner.idSlots.hasKey(identity):
+      return
+    let slot = owner.idSlots[identity]
+    if slot > 0 and slot < owner.nodes.len and
+        owner.nodes[slot].clickHandler != nil and
+        not owner.effectivelyDisabled(slot) and
+        slot notin rt.clickedSlots:
+      rt.clickedSlots.add(slot)
   rt.context.themeEnabled = true
   rt.context.themeBackground = false
 
@@ -2094,7 +2106,8 @@ proc showMenuButton(rt: Runtime; identity: uint64;
   let owner = rt.frameLayout.owner
   let slot = owner.idSlots.getOrDefault(identity, -1)
   if slot <= 0 or slot >= rt.frameLayout.rects.len or
-      owner.effectivelyDisabled(slot):
+      owner.effectivelyDisabled(slot) or
+      owner.effectivelyToolbarCollapsed(slot):
     return
   let node = owner.nodes[slot]
   let bounds = rt.frameLayout.rects[slot]
@@ -2239,7 +2252,8 @@ proc event(rt: Runtime; ev: platform.SurfaceEvent): bool =
       let owner = rt.context.owner
       if owner != nil and rt.focusSlot > 0 and
           rt.focusSlot < owner.nodes.len and
-          not owner.effectivelyDisabled(rt.focusSlot):
+          not owner.effectivelyDisabled(rt.focusSlot) and
+          not owner.effectivelyToolbarCollapsed(rt.focusSlot):
         let stepHandler = owner.nodes[rt.focusSlot].accessStepHandler
         if stepHandler != nil:
           let step = owner.nodes[rt.focusSlot].accessStep
@@ -2702,7 +2716,8 @@ proc event(rt: Runtime; ev: platform.SurfaceEvent): bool =
       let owner = rt.frameLayout.owner
       if owner != nil and slot > 0 and slot < owner.nodes.len and
           owner.nodes[slot].slider and
-          not owner.effectivelyDisabled(slot):
+          not owner.effectivelyDisabled(slot) and
+          not owner.effectivelyToolbarCollapsed(slot):
         let node = owner.nodes[slot]
         let identity = node.identity
         let current = owner.pendingSliderValues.getOrDefault(identity,
@@ -2721,7 +2736,8 @@ proc event(rt: Runtime; ev: platform.SurfaceEvent): bool =
         result = true
       elif owner != nil and slot > 0 and slot < owner.nodes.len and
           owner.nodes[slot].accessStepHandler != nil and
-          not owner.effectivelyDisabled(slot):
+          not owner.effectivelyDisabled(slot) and
+          not owner.effectivelyToolbarCollapsed(slot):
         let node = owner.nodes[slot]
         let handler = node.accessStepHandler
         rt.focusSlot = slot
@@ -2776,7 +2792,8 @@ proc event(rt: Runtime; ev: platform.SurfaceEvent): bool =
       let slot = int(ev.id - 1)
       let owner = rt.frameLayout.owner
       if owner != nil and slot > 0 and slot < owner.nodes.len and
-          not owner.effectivelyDisabled(slot):
+          not owner.effectivelyDisabled(slot) and
+          not owner.effectivelyToolbarCollapsed(slot):
         let node = owner.nodes[slot]
         if node.colorPlane:
           try:

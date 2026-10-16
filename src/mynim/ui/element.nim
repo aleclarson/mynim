@@ -94,6 +94,15 @@ type
     animation: Animation
     initialized, changed: bool
 
+  ToolbarMenuItem = object
+    identity: uint64
+    label: string
+    toggle, checked, disabled, startsGroup: bool
+    menuBuilder: proc(menu: Menu) {.closure.}
+
+  ToolbarState = ref object
+    items: seq[ToolbarMenuItem]
+
   ScrollState* = ref object ## Persistent offset for one scroll container.
     offsetX, offsetY: float32
     maxX, maxY: float32
