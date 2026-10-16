@@ -107,6 +107,23 @@ type
     open, filtering, hasPendingChoice, tokenField,
       pendingTokenSubmission: bool
 
+  Toast* = object ## A message shown in the window's toast viewport.
+    id*: string
+    title*, description*, kind*: string
+    timeout*: Duration
+    action*: string
+    onAction*, onClose*: proc() {.closure.}
+    data*: RootRef ## Optional reference for custom toast views.
+
+  ToastEntry = object
+    toast: Toast
+    identity: uint64
+    spent: Duration
+    started: MonoTime
+
+  ToastState = object
+    hovered, focused: bool
+
   TooltipState = object
     hover, focus, shown, dismissed: uint64
     hoverSince, focusSince, lastShown: MonoTime
@@ -126,6 +143,12 @@ type
     numberInputStates: Table[uint64, NumberInputState]
     popoverStates: Table[uint64, PopoverState]
     comboBoxStates: Table[uint64, ComboBoxState]
+    toasts: seq[ToastEntry]
+    toastState: ToastState
+    announcements: seq[string]
+    nextToastIdentity: uint64
+    toastViewportGeneration: uint32
+    accessibilityActive, toastsPaused: bool
     tooltips: TooltipState
     rangeSliderDrags: Table[uint64, int8]
     pendingTextCallbacks: Table[uint64, seq[proc() {.closure.}]]
@@ -433,6 +456,7 @@ proc newContext*(): Context =
   result.owner.numberInputStates = initTable[uint64, NumberInputState]()
   result.owner.popoverStates = initTable[uint64, PopoverState]()
   result.owner.comboBoxStates = initTable[uint64, ComboBoxState]()
+  result.owner.toastState = ToastState()
   result.owner.rangeSliderDrags = initTable[uint64, int8]()
   result.owner.pendingTextCallbacks =
     initTable[uint64, seq[proc() {.closure.}]]()
@@ -755,6 +779,15 @@ proc setTheme*(c: Context; value: Theme) =
   if c.owner.inBuild and c.owner.nodes.len > 0:
     c.owner.nodes[0].background = resolved.background
 
+proc announce*(c: Context; text: string) =
+  ## Asks assistive technology to read text once, without moving focus.
+  if c == nil or c.owner == nil or c.owner.closed or
+      not c.owner.accessibilityActive or text.len == 0:
+    return
+  c.owner.announcements.add(text)
+  if c.owner.invalidate != nil:
+    c.owner.invalidate()
+
 proc retire(owner: ElementOwner) =
   owner.closed = true
   owner.inBuild = false
@@ -773,6 +806,10 @@ proc retire(owner: ElementOwner) =
   owner.numberInputStates.clear()
   owner.popoverStates.clear()
   owner.comboBoxStates.clear()
+  owner.toasts.setLen(0)
+  owner.announcements.setLen(0)
+  owner.toastState = ToastState()
+  owner.accessibilityActive = false
   owner.rangeSliderDrags.clear()
   owner.pendingTextCallbacks.clear()
   owner.pendingTextSubmitCallbacks.clear()
@@ -1068,6 +1105,7 @@ proc children*(e: Element; build: proc() {.closure.}): Element =
     owner.parent = previous
 
 proc buildTooltips(c: Context)
+proc buildToasts(c: Context)
 
 proc build*(c: Context; view: proc(c: Context) {.closure.}) =
   ## Runs one view build pass. Elements made in view expire when it returns.
@@ -1090,6 +1128,13 @@ proc build*(c: Context; view: proc(c: Context) {.closure.}) =
     c.owner.numberInputStates = initTable[uint64, NumberInputState]()
     c.owner.popoverStates = initTable[uint64, PopoverState]()
     c.owner.comboBoxStates = initTable[uint64, ComboBoxState]()
+    c.owner.toastState = ToastState()
+    c.owner.toasts.setLen(0)
+    c.owner.announcements.setLen(0)
+    c.owner.nextToastIdentity = 0
+    c.owner.toastViewportGeneration = 0
+    c.owner.toastsPaused = false
+    c.owner.accessibilityActive = false
     c.owner.rangeSliderDrags = initTable[uint64, int8]()
     c.owner.pendingTextCallbacks =
       initTable[uint64, seq[proc() {.closure.}]]()
@@ -1134,6 +1179,7 @@ proc build*(c: Context; view: proc(c: Context) {.closure.}) =
     if view != nil:
       view(c)
     c.buildTooltips()
+    c.buildToasts()
     for index in 0..<c.owner.actions.len:
       if c.owner.actions[index].kind == actionShortcut and
           c.owner.actions[index].handle != nil:

@@ -670,8 +670,12 @@ proc accessibilityTree(layout: LayoutResult;
 
 proc updateAccessibility(rt: Runtime) =
   if rt.accessibilityOn and rt.conn.surface != nil:
-    rt.conn.surface.updateAccessibility(
-      rt.frameLayout.accessibilityTree(rt.focusSlot))
+    let owner = rt.context.owner
+    var tree = rt.frameLayout.accessibilityTree(rt.focusSlot)
+    if owner != nil and owner.announcements.len > 0:
+      tree.announcements = owner.announcements
+      owner.announcements.setLen(0)
+    rt.conn.surface.updateAccessibility(tree)
 
 proc cancelKeyPress(rt: Runtime) =
   rt.keyPressSlot = -1
@@ -2384,6 +2388,7 @@ proc event(rt: Runtime; ev: platform.SurfaceEvent): bool =
     false
   of platform.accessibilityOn:
     rt.accessibilityOn = true
+    rt.context.owner.accessibilityActive = true
     rt.updateAccessibility()
     true
   of platform.accessAction:
