@@ -36,6 +36,12 @@ type
     bindings: seq[HandleBinding]
     pending: bool
 
+  FindBarState = ref object
+    focus: Handle
+    pendingStep: int
+    lastQuery: string
+    wasOpen, pendingClose: bool
+
   HandleBinding = ref object
     owner: ElementOwner
     identity, requestIdentity, handleIdentity: uint64
@@ -220,6 +226,7 @@ type
     animations: Table[uint64, Table[string, ScalarAnimation]]
     colorMotions: Table[uint64, Table[string, ColorMotion]]
     keyframes: Table[uint64, Table[string, ScalarSequence]]
+    findBarStates: Table[uint64, FindBarState]
     routers: seq[Router]
     frameNow: MonoTime
     committedRects: seq[Rect]
@@ -560,6 +567,7 @@ proc newContext*(): Context =
     initTable[uint64, Table[string, ColorMotion]]()
   result.owner.keyframes =
     initTable[uint64, Table[string, ScalarSequence]]()
+  result.owner.findBarStates = initTable[uint64, FindBarState]()
   result.accordionHeaders = initTable[uint64, seq[uint64]]()
   result.theme = lightTheme()
 
@@ -913,6 +921,7 @@ proc retire(owner: ElementOwner) =
   owner.animations.clear()
   owner.colorMotions.clear()
   owner.keyframes.clear()
+  owner.findBarStates.clear()
   owner.committedRects = @[]
   owner.lastBounds.clear()
   owner.trackedBounds.clear()
@@ -1272,6 +1281,7 @@ proc build*(c: Context; view: proc(c: Context) {.closure.}) =
       initTable[uint64, Table[string, ColorMotion]]()
     c.owner.keyframes =
       initTable[uint64, Table[string, ScalarSequence]]()
+    c.owner.findBarStates = initTable[uint64, FindBarState]()
     c.accordion = nil
     c.accordionHeaders.clear()
   inc c.owner.generation
