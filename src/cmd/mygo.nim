@@ -4,6 +4,7 @@ import std/os
 import ./build
 import ./doctor
 import ./init
+import ./i18n_check
 import ./skills
 
 const
@@ -19,6 +20,7 @@ Commands:
   init            create a native UI project
   install-skills  install the MyNim maintenance skill
   build           compile a native project for this machine
+  i18n            check message catalogs
   doctor          check that the development environment is ready
   version         print the MyGo version
   help            print this help
@@ -52,8 +54,12 @@ proc run(args: seq[string]): int =
     if args.len > 1:
       return runBuild(args[1 .. ^1])
     return runBuild(@[])
+  of "i18n":
+    if args.len > 1:
+      return runI18n(args[1 .. ^1])
+    return runI18n(@[])
   of "vet", "migrate-ui", "generate", "gen",
-     "dev", "i18n", "keygen":
+     "dev", "keygen":
     stderr.writeLine("mygo: command \"" & args[0] & "\" is not ported yet")
     return 1
   else:
