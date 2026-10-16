@@ -413,6 +413,69 @@ proc isWithinNode(owner: ElementOwner; ancestor, slot: int): bool =
     current = int(owner.nodes[current].parent)
   false
 
+proc comboBoxKey(rt: Runtime; key: platform.Key;
+                 mods: platform.Modifiers): bool =
+  if mods != 0:
+    return false
+  let owner = rt.frameLayout.owner
+  let slot = rt.focusSlot
+  if owner == nil or slot <= 0 or slot >= owner.nodes.len:
+    return false
+  let node = owner.nodes[slot]
+  if not node.comboBoxInput or node.comboBoxState == nil:
+    return false
+  let state = node.comboBoxState
+  case key
+  of platform.keyDown:
+    if not state.open:
+      state.open = true
+      state.filtering = false
+      state.highlight = if state.options.len > 0: 0 else: -1
+      state.pointerRevision = owner.pointerRevision
+    elif state.visibleOptions.len > 0:
+      state.highlight = min(max(state.highlight + 1, 0),
+        state.visibleOptions.high)
+    rt.keyboardFocusVisible = true
+    rt.requestFrame()
+    true
+  of platform.keyUp:
+    if not state.open:
+      state.open = true
+      state.filtering = false
+      state.highlight = state.options.high
+      state.pointerRevision = owner.pointerRevision
+    elif state.visibleOptions.len > 0:
+      state.highlight = if state.highlight < 0:
+          state.visibleOptions.high
+        else:
+          max(state.highlight - 1, 0)
+    rt.keyboardFocusVisible = true
+    rt.requestFrame()
+    true
+  of platform.keyEnter:
+    if state.open and state.highlight >= 0 and
+        state.highlight < state.visibleOptions.len:
+      state.pendingChoice = state.visibleOptions[state.highlight]
+      state.hasPendingChoice = true
+      state.open = false
+      state.filtering = false
+      state.highlight = -1
+      rt.keyboardFocusVisible = true
+      rt.requestFrame()
+      return true
+    false
+  of platform.keyEscape:
+    if not state.open:
+      return false
+    state.open = false
+    state.filtering = false
+    state.highlight = -1
+    rt.keyboardFocusVisible = true
+    rt.requestFrame()
+    true
+  else:
+    false
+
 proc dismissPopover(rt: Runtime): bool =
   let owner = rt.frameLayout.owner
   if owner == nil:
@@ -512,6 +575,11 @@ proc accessibilityTree(layout: LayoutResult;
     accessible.states = accessible.states or node.accessExtraStates
     accessible.actions = accessible.actions or node.accessExtraActions
     accessible.level = node.accessLevel
+    accessible.posInSet = node.accessPosInSet
+    accessible.setSize = node.accessSetSize
+    if node.comboBoxInput and node.comboBoxState != nil and
+        node.comboBoxState.open:
+      accessible.states = accessible.states or platform.accessExpanded
     if isDisabled:
       accessible.states = accessible.states or platform.accessDisabled
     if node.slider:
@@ -578,6 +646,21 @@ proc accessibilityTree(layout: LayoutResult;
       accessible.actions = accessible.actions or platform.actionPress
     result.nodes.add(accessible)
     accessIndex[slot] = result.nodes.high
+
+  for slot in 1..<owner.nodes.len:
+    let node = owner.nodes[slot]
+    if not node.comboBoxInput or node.comboBoxState == nil or
+        not node.comboBoxState.open:
+      continue
+    let state = node.comboBoxState
+    if state.highlight < 0 or state.highlight >= state.itemIdentities.len:
+      continue
+    let itemSlot = owner.idSlots.getOrDefault(
+      state.itemIdentities[state.highlight], -1)
+    if itemSlot > 0 and itemSlot < accessIndex.len and
+        accessIndex[itemSlot] >= 0:
+      result.focus = uint64(itemSlot + 1)
+      break
 
 proc updateAccessibility(rt: Runtime) =
   if rt.accessibilityOn and rt.conn.surface != nil:
@@ -1889,6 +1972,8 @@ proc event(rt: Runtime; ev: platform.SurfaceEvent): bool =
       return false
     if ev.key == platform.keyEscape and ev.mods == 0 and rt.dismissPopover():
       return true
+    if rt.comboBoxKey(ev.key, ev.mods):
+      return true
     if rt.sliderKey(ev.key, ev.mods):
       return true
     if ev.mods == 0 and ev.key in {platform.keyUp, platform.keyDown}:
@@ -2025,6 +2110,8 @@ proc event(rt: Runtime; ev: platform.SurfaceEvent): bool =
         platform.TextRange(start: caret, `end`: caret))
     true
   of platform.pointerMove:
+    if rt.frameLayout.owner != nil:
+      inc rt.frameLayout.owner.pointerRevision
     if rt.scrollbarDrag.state != nil:
       rt.pointerX = float32(ev.x)
       rt.pointerY = float32(ev.y)

@@ -96,6 +96,15 @@ type
     anchorIdentity: uint64
     open, pendingDismiss: bool
 
+  ComboBoxState = ref object
+    query, lastSelected, pendingChoice, shownOption: string
+    options, visibleOptions: seq[string]
+    itemIdentities: seq[uint64]
+    scroll: ScrollState
+    pointerRevision: uint64
+    highlight: int
+    open, filtering, hasPendingChoice: bool
+
   TooltipState = object
     hover, focus, shown, dismissed: uint64
     hoverSince, focusSince, lastShown: MonoTime
@@ -114,6 +123,7 @@ type
     stepperRepeats: Table[uint64, StepperRepeat]
     numberInputStates: Table[uint64, NumberInputState]
     popoverStates: Table[uint64, PopoverState]
+    comboBoxStates: Table[uint64, ComboBoxState]
     tooltips: TooltipState
     rangeSliderDrags: Table[uint64, int8]
     pendingTextCallbacks: Table[uint64, seq[proc() {.closure.}]]
@@ -140,6 +150,7 @@ type
       focusVisibleSlots: seq[int]
     generation: uint32
     parent: int32
+    pointerRevision: uint64
     inBuild, reduceMotion, animating: bool
     hasFrame: bool
     closed: bool
@@ -227,7 +238,8 @@ type
       listRowFocusVisible, listRowHeader, listRowPinnedHeader: bool
     textMaxLines: int
     listRowAction: bool
-    slider, sliderVertical, rating, stepper, numberInput, rangeSlider,
+    slider, sliderVertical, rating, stepper, numberInput, comboBoxRoot,
+      comboBoxInput, rangeSlider,
       rangeSliderThumb, splitPane, splitHandle, splitVertical: bool
     rangeSliderHandle: int8
     sliderLow, sliderHigh, sliderValue, sliderStep: float64
@@ -241,9 +253,11 @@ type
       valueChangedInBuild: bool
     label: string
     accessDescription: string
+    accessPosInSet, accessSetSize: int
     tooltipText: string
     tooltipBuild: proc(tip: Element) {.closure.}
     popoverState: PopoverState
+    comboBoxState: ComboBoxState
     labelTargetSlot, fieldLabelSlot, fieldContentSlot,
       fieldControlSlot, focusTargetSlot: int32
     textValue: string
@@ -416,6 +430,7 @@ proc newContext*(): Context =
   result.owner.stepperRepeats = initTable[uint64, StepperRepeat]()
   result.owner.numberInputStates = initTable[uint64, NumberInputState]()
   result.owner.popoverStates = initTable[uint64, PopoverState]()
+  result.owner.comboBoxStates = initTable[uint64, ComboBoxState]()
   result.owner.rangeSliderDrags = initTable[uint64, int8]()
   result.owner.pendingTextCallbacks =
     initTable[uint64, seq[proc() {.closure.}]]()
@@ -755,6 +770,7 @@ proc retire(owner: ElementOwner) =
   owner.stepperRepeats.clear()
   owner.numberInputStates.clear()
   owner.popoverStates.clear()
+  owner.comboBoxStates.clear()
   owner.rangeSliderDrags.clear()
   owner.pendingTextCallbacks.clear()
   owner.pendingTextSubmitCallbacks.clear()
@@ -1071,6 +1087,7 @@ proc build*(c: Context; view: proc(c: Context) {.closure.}) =
     c.owner.stepperRepeats = initTable[uint64, StepperRepeat]()
     c.owner.numberInputStates = initTable[uint64, NumberInputState]()
     c.owner.popoverStates = initTable[uint64, PopoverState]()
+    c.owner.comboBoxStates = initTable[uint64, ComboBoxState]()
     c.owner.rangeSliderDrags = initTable[uint64, int8]()
     c.owner.pendingTextCallbacks =
       initTable[uint64, seq[proc() {.closure.}]]()
@@ -1194,6 +1211,14 @@ proc build*(c: Context; view: proc(c: Context) {.closure.}) =
         stalePopovers.add(identity)
     for identity in stalePopovers:
       c.owner.popoverStates.del(identity)
+    var staleComboBoxes: seq[uint64]
+    for identity in c.owner.comboBoxStates.keys:
+      let slot = c.owner.idSlots.getOrDefault(identity, -1)
+      if slot <= 0 or slot >= c.owner.nodes.len or
+          not c.owner.nodes[slot].comboBoxRoot:
+        staleComboBoxes.add(identity)
+    for identity in staleComboBoxes:
+      c.owner.comboBoxStates.del(identity)
     built = true
   finally:
     c.owner.inBuild = false
