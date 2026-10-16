@@ -1,4 +1,285 @@
-## Theme-styled controls built on the stateful bases.
+## Text helpers and theme-styled controls built on the stateful bases.
+
+type
+  TextFormatKind = enum
+    tfOther, tfString, tfChar, tfSigned, tfUnsigned, tfFloat, tfBool
+  ## One value accepted by textf's heterogeneous argument list.
+  TextFormatArg* = object
+    kind: TextFormatKind
+    text: string
+    signedValue: int64
+    unsignedValue: uint64
+    floatValue: float64
+    boolValue: bool
+
+proc toTextFormatArg*[T](value: T): TextFormatArg =
+  ## Converts a value for textf's format string.
+  result.text = $value
+  when T is string:
+    result.kind = tfString
+    result.text = value
+  elif T is cstring:
+    result.kind = tfString
+    result.text = $value
+  elif T is char:
+    result.kind = tfChar
+  elif T is bool:
+    result.kind = tfBool
+    result.boolValue = value
+  elif T is SomeSignedInt:
+    result.kind = tfSigned
+    result.signedValue = int64(value)
+  elif T is SomeUnsignedInt:
+    result.kind = tfUnsigned
+    result.unsignedValue = uint64(value)
+  elif T is SomeFloat:
+    result.kind = tfFloat
+    result.floatValue = float64(value)
+  else:
+    result.kind = tfOther
+
+proc textFormatType(value: TextFormatArg): string =
+  case value.kind
+  of tfString: "string"
+  of tfChar: "int32"
+  of tfSigned: "int"
+  of tfUnsigned: "uint"
+  of tfFloat: "float64"
+  of tfBool: "bool"
+  of tfOther: "value"
+
+proc radixDigits(value: uint64; radix: uint64; uppercase: bool): string =
+  const digits = "0123456789abcdef"
+  const upperDigits = "0123456789ABCDEF"
+  var n = value
+  while n > 0:
+    let digit = int(n mod radix)
+    result.add(if uppercase: upperDigits[digit] else: digits[digit])
+    n = n div radix
+  if result.len == 0:
+    result = "0"
+  result.reverse()
+
+proc quoteText(value: string): string =
+  result.add('"')
+  for ch in value:
+    case ch
+    of '\\': result.add("\\\\")
+    of '"': result.add("\\\"")
+    of '\n': result.add("\\n")
+    of '\r': result.add("\\r")
+    of '\t': result.add("\\t")
+    of '\b': result.add("\\b")
+    of '\f': result.add("\\f")
+    else: result.add(ch)
+  result.add('"')
+
+proc formatRune(codepoint: int64): string =
+  if codepoint < 0 or codepoint > 0x10ffff or
+      codepoint in 0xd800'i64 .. 0xdfff'i64:
+    return "\uFFFD"
+  $Rune(int(codepoint))
+
+proc formatRune(codepoint: uint64): string =
+  if codepoint > 0x10ffff'u64:
+    return "\uFFFD"
+  formatRune(int64(codepoint))
+
+proc formatTextArg(value: TextFormatArg; verb: char; flags: set[char];
+                   width, precision: int): string =
+  var body = ""
+  var prefix = ""
+  var sign = ""
+  var numeric = false
+  var valid = true
+
+  case verb
+  of 'v':
+    body = value.text
+    numeric = value.kind in {tfSigned, tfUnsigned, tfFloat}
+  of 'T':
+    body = value.textFormatType()
+  of 's':
+    if value.kind in {tfString, tfChar, tfOther}:
+      body = value.text
+    else:
+      valid = false
+  of 't':
+    if value.kind == tfBool:
+      body = if value.boolValue: "true" else: "false"
+    else:
+      valid = false
+  of 'q':
+    if value.kind in {tfString, tfChar}:
+      body = quoteText(value.text)
+    elif value.kind in {tfSigned, tfUnsigned}:
+      let runeText = if value.kind == tfSigned:
+          formatRune(value.signedValue)
+        else:
+          formatRune(value.unsignedValue)
+      body = quoteText(runeText)
+    else:
+      valid = false
+  of 'c':
+    if value.kind in {tfSigned, tfUnsigned}:
+      body = if value.kind == tfSigned:
+          formatRune(value.signedValue)
+        else:
+          formatRune(value.unsignedValue)
+    else:
+      valid = false
+  of 'd', 'b', 'o', 'x', 'X':
+    if value.kind in {tfSigned, tfUnsigned}:
+      numeric = true
+      var magnitude: uint64
+      if value.kind == tfSigned:
+        if value.signedValue < 0:
+          sign = "-"
+          magnitude = uint64(-(value.signedValue + 1)) + 1'u64
+        else:
+          magnitude = uint64(value.signedValue)
+      else:
+        magnitude = value.unsignedValue
+      case verb
+      of 'd': body = $magnitude
+      of 'b':
+        body = radixDigits(magnitude, 2, false)
+        if '#' in flags: prefix = "0b"
+      of 'o':
+        body = radixDigits(magnitude, 8, false)
+        if '#' in flags and body[0] != '0': prefix = "0"
+      of 'x', 'X':
+        body = radixDigits(magnitude, 16, verb == 'X')
+        if '#' in flags:
+          prefix = if verb == 'X': "0X" else: "0x"
+      else: discard
+      if precision > body.len:
+        body = repeat('0', precision - body.len) & body
+    elif value.kind in {tfString, tfChar} and verb in {'x', 'X'}:
+      for ch in value.text:
+        let byteDigits = radixDigits(uint64(ord(ch)), 16, verb == 'X')
+        if byteDigits.len == 1:
+          body.add('0')
+        body.add(byteDigits)
+      if precision >= 0 and value.text.len > precision:
+        body.setLen(precision * 2)
+    else:
+      valid = false
+  of 'f', 'F', 'e', 'E', 'g', 'G':
+    if value.kind == tfFloat:
+      numeric = true
+      let mode = if verb in {'e', 'E'}: ffScientific
+        elif verb in {'g', 'G'}: ffDefault else: ffDecimal
+      let digits = if precision < 0: 6 else: min(precision, 32)
+      body = formatFloat(value.floatValue, mode, digits)
+      if verb in {'E', 'G'}:
+        for i in 0 ..< body.len:
+          if body[i] == 'e': body[i] = 'E'
+      if verb in {'g', 'G'} and '#' notin flags:
+        let exponent = body.find({'e', 'E'})
+        let mantissaEnd = if exponent < 0: body.len else: exponent
+        var endIndex = mantissaEnd
+        while endIndex > 0 and body[endIndex - 1] == '0':
+          dec endIndex
+        if endIndex > 0 and body[endIndex - 1] == '.':
+          dec endIndex
+        if endIndex < mantissaEnd:
+          body = if exponent < 0: body[0 ..< endIndex]
+            else: body[0 ..< endIndex] & body[mantissaEnd .. ^1]
+      if body.len > 0 and body[0] == '-':
+        sign = "-"
+        body = body[1 .. ^1]
+    else:
+      valid = false
+  else:
+    valid = false
+
+  if not valid:
+    return "%!" & $verb & "(" & value.textFormatType() & "=" &
+      value.text & ")"
+
+  if verb == 'v' and numeric and body.len > 0 and body[0] == '-':
+    sign = "-"
+    body = body[1 .. ^1]
+  if numeric and sign.len == 0:
+    if '+' in flags: sign = "+"
+    elif ' ' in flags: sign = " "
+  if verb == 's' and precision >= 0 and body.len > precision:
+    body.setLen(precision)
+
+  let missing = max(width - sign.len - prefix.len - body.len, 0)
+  if '-' in flags:
+    return sign & prefix & body & repeat(' ', missing)
+  if '0' in flags and numeric and precision < 0:
+    return sign & prefix & repeat('0', missing) & body
+  repeat(' ', missing) & sign & prefix & body
+
+proc formatText(format: string; args: openArray[TextFormatArg]): string =
+  var i = 0
+  var nextArg = 0
+  while i < format.len:
+    if format[i] != '%':
+      result.add(format[i])
+      inc i
+      continue
+    let start = i
+    inc i
+    if i < format.len and format[i] == '%':
+      result.add('%')
+      inc i
+      continue
+
+    var argIndex = nextArg
+    if i < format.len and format[i] == '[':
+      inc i
+      var oneBased = 0
+      while i < format.len and format[i] in Digits:
+        oneBased = min(oneBased * 10 + ord(format[i]) - ord('0'), 100_000)
+        inc i
+      if i < format.len and format[i] == ']' and oneBased > 0:
+        argIndex = oneBased - 1
+        inc i
+    var flags: set[char] = {}
+    while i < format.len and format[i] in {'#', '0', '+', '-', ' '}:
+      flags.incl(format[i])
+      inc i
+    var width = 0
+    while i < format.len and format[i] in Digits:
+      width = min(width * 10 + ord(format[i]) - ord('0'), 100_000)
+      inc i
+    var precision = -1
+    if i < format.len and format[i] == '.':
+      inc i
+      precision = 0
+      while i < format.len and format[i] in Digits:
+        precision = min(precision * 10 + ord(format[i]) - ord('0'), 32)
+        inc i
+    if i >= format.len:
+      result.add(format[start .. ^1])
+      break
+    let verb = format[i]
+    inc i
+    if verb == '%':
+      result.add('%')
+      continue
+    nextArg = argIndex + 1
+    if argIndex < 0 or argIndex >= args.len:
+      result.add("%!" & $verb & "(MISSING)")
+    else:
+      result.add(formatTextArg(args[argIndex], verb, flags, width, precision))
+
+  if nextArg < args.len:
+    result.add("%!(EXTRA ")
+    for index in nextArg ..< args.len:
+      if index > nextArg:
+        result.add(", ")
+      result.add(args[index].textFormatType() & "=" & args[index].text)
+    result.add(')')
+
+proc textf*(c: Context; format: string;
+            args: varargs[TextFormatArg, toTextFormatArg]): Element =
+  ## Adds text formatted with common fmt.Sprintf verbs, width and precision.
+  c.text(formatText(format, args))
 
 proc themedButton(c: Context; label: string; primary: bool): Element =
   let theme = c.theme
