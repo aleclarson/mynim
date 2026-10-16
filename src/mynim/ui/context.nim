@@ -382,6 +382,7 @@ type
     slider, sliderVertical, rating, stepper, numberInput, comboBoxRoot,
       comboBoxInput, rangeSlider,
       rangeSliderThumb, splitPane, splitHandle, splitVertical,
+      splitDivider,
       dateControl, timeControlRoot, colorPlane, colorPickerRoot: bool
     rangeSliderHandle: int8
     sliderLow, sliderHigh, sliderValue, sliderStep: float64

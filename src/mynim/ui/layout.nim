@@ -2132,6 +2132,49 @@ proc gridColumns(width, minWidth, gap: float32; itemCount: int): int =
     return limit
   max(int(fit), 1)
 
+proc alignSplitHandles(nodes: var seq[ElementNode]; rects: var seq[Rect]) =
+  for slot in 1..<min(nodes.len, rects.len):
+    if not nodes[slot].splitHandle:
+      continue
+    let parent = int(nodes[slot].parent)
+    if parent <= 0 or parent >= nodes.len:
+      continue
+    var divider = -1
+    var child = int(nodes[parent].firstChild)
+    while child >= 0 and child < nodes.len:
+      if nodes[child].splitDivider:
+        divider = child
+        break
+      child = int(nodes[child].nextSibling)
+    if divider < 0 or divider >= rects.len:
+      continue
+
+    let bar = rects[divider]
+    var handle = rects[slot]
+    if nodes[slot].splitVertical:
+      handle.x = bar.x
+      handle.y = bar.y - (handle.h - bar.h) / 2
+      handle.w = bar.w
+    else:
+      handle.x = bar.x - (handle.w - bar.w) / 2
+      handle.y = bar.y
+      handle.h = bar.h
+    rects[slot] = handle
+
+    var root = slot
+    while root > 0 and root < nodes.len and not nodes[root].splitPane:
+      root = int(nodes[root].parent)
+    if root <= 0 or root >= rects.len:
+      continue
+    let bounds = rects[root]
+    let position = if nodes[slot].splitVertical:
+        bar.y - bounds.y
+      elif nodes[slot].rightToLeft:
+        bounds.x + bounds.w - bar.x - bar.w
+      else:
+        bar.x - bounds.x
+    nodes[slot].sliderValue = float64(position)
+
 proc layoutAt(c: Context; bounds: Rect; now: MonoTime;
               reduceMotion: bool): LayoutResult =
   ## Lays out the latest completed build inside bounds.
@@ -2344,6 +2387,7 @@ proc layoutAt(c: Context; bounds: Rect; now: MonoTime;
         current = int(c.owner.nodes[current].parent)
       if current == slot:
         result.rects[descendant].y += delta
+  alignSplitHandles(c.owner.nodes, result.rects)
   placeInlineText(c.owner.nodes, result.rects)
   c.owner.committedRects = result.rects
   for slot, node in c.owner.nodes:
