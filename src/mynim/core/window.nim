@@ -2092,7 +2092,8 @@ proc attachContent*(w: Window) =
     window: RootRef(w),
     clipboard: backend().clipboard(),
     startDataDrag: proc(data: Data; local: RootRef; opts: DragOptions;
-        x, y: float64) = discard w.startDataDrag(data, local, opts, x, y),
+        x, y: float64): ref CatchableError =
+      w.startDataDrag(data, local, opts, x, y),
     cancelDataDrag: proc() = w.cancelDataDrag(),
     startDrag: proc() =
       if w.native != nil:

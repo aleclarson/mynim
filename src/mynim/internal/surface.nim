@@ -32,7 +32,7 @@ type
     ## startDataDrag connects a UI source to the core's process-local
     ## registry. local never leaves the process.
     startDataDrag*: proc(data: Data, local: RootRef, opts: DragOptions,
-                         x, y: float64) {.closure.}
+                         x, y: float64): ref CatchableError {.closure.}
     cancelDataDrag*: proc() {.closure.}
     ## isDark reports the system's dark appearance, and preferences the
     ## settings of the desktop that controls follow, which themeChanged

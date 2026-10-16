@@ -400,6 +400,8 @@ type
     textInputHandler: proc(text: string) {.closure.}
     dropDataTarget, fileDropTarget: bool
     dropDataOptions: transfer.DropOptions
+    dragDataProvider: proc(): transfer.Data {.closure.}
+    dragDataOptions: transfer.DragOptions
     tableState: ListState
     tableColumnId: string
     tableColumnIndex: int

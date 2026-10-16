@@ -30,6 +30,9 @@ type
     lastTextInput: platform.TextInputState
     inputComposition: platform.InputComposition
     pointerX, pointerY: float32
+    pressX, pressY: float32
+    dragCandidateIdentity: uint64
+    nativeDragStarted: bool
     splitPointerOffset: float64
     hasPointer: bool
     hoverSlots, pressHoverSlots, pressedSlots, clickedSlots: seq[int]
@@ -2301,6 +2304,96 @@ proc autoScrollGridReorder(rt: Runtime; state: GridState): bool =
   scroll.offsetY = min(max(old + delta, 0'f32), scroll.maxY)
   scroll.offsetY != old
 
+proc dragCandidate(rt: Runtime; target: Element): uint64 =
+  let owner = rt.frameLayout.owner
+  if target.owner == nil or target.owner != owner or
+      target.generation != rt.frameLayout.generation:
+    return
+  var slot = int(target.slot)
+  while slot > 0 and slot < owner.nodes.len:
+    let node = owner.nodes[slot]
+    if node.dragDataProvider != nil and not owner.effectivelyDisabled(slot):
+      return node.identity
+    slot = int(node.parent)
+
+proc dragPreview(rt: Runtime; slot: int; startX, startY: float32):
+    tuple[img: sourceImage.Image, hotspot: sourceImage.Point] =
+  let layout = rt.frameLayout
+  if slot <= 0 or slot >= layout.rects.len or not rt.hasScene:
+    return
+  let rect = layout.rects[slot]
+  let left = max(0'f32, rect.x)
+  let top = max(0'f32, rect.y)
+  let right = min(rect.x + rect.w, layout.root.w)
+  let bottom = min(rect.y + rect.h, layout.root.h)
+  let width = min(int(right - left), 512)
+  let height = min(int(bottom - top), 512)
+  if width <= 0 or height <= 0:
+    return
+  var renderer: raster.Renderer
+  discard renderer.render(rt.frameScene)
+  let source = renderer.image
+  let pixels = source.rgba()
+  let scale = rt.frameScene.scale
+  let preview = sourceImage.RgbaImage(pix: newSeq[uint8](width * height * 4),
+    stride: width * 4, rect: sourceImage.rect(0, 0, width, height))
+  for y in 0..<height:
+    for x in 0..<width:
+      let sx = int((left + float32(x)) * scale)
+      let sy = int((top + float32(y)) * scale)
+      if sx < 0 or sy < 0 or sx >= source.w or sy >= source.h:
+        continue
+      let sourceOffset = (sy * source.w + sx) * 4
+      let to = (y * width + x) * 4
+      preview.pix[to] = pixels[sourceOffset]
+      preview.pix[to + 1] = pixels[sourceOffset + 1]
+      preview.pix[to + 2] = pixels[sourceOffset + 2]
+      preview.pix[to + 3] = pixels[sourceOffset + 3]
+  result.img = preview
+  result.hotspot = sourceImage.Point(
+    x: min(max(int(startX - left), 0), width - 1),
+    y: min(max(int(startY - top), 0), height - 1))
+
+proc startDataDragFromPress(rt: Runtime): bool =
+  if rt.nativeDragStarted or rt.dragCandidateIdentity == 0 or
+      rt.pressTarget.owner != rt.frameLayout.owner:
+    return false
+  let dx = rt.pointerX - rt.pressX
+  let dy = rt.pointerY - rt.pressY
+  if dx * dx + dy * dy < 16:
+    return false
+  let owner = rt.frameLayout.owner
+  let identity = rt.dragCandidateIdentity
+  if owner == nil or not owner.idSlots.hasKey(identity):
+    return false
+  let slot = owner.idSlots[identity]
+  if slot <= 0 or slot >= owner.nodes.len or owner.effectivelyDisabled(slot):
+    return false
+  let node = owner.nodes[slot]
+  if node.dragDataProvider == nil:
+    return false
+  var options = node.dragDataOptions
+  if options.preview == nil:
+    let (preview, hotspot) = rt.dragPreview(slot, rt.pressX, rt.pressY)
+    options.preview = preview
+    options.hotspot = hotspot
+  let data = node.dragDataProvider()
+  rt.nativeDragStarted = true
+  rt.dragCandidateIdentity = 0
+  rt.pressTarget = Element()
+  rt.pressMods = 0
+  rt.pressHoverSlots.setLen(0)
+  rt.refreshPointer()
+  let startErr = if rt.conn.startDataDrag != nil:
+      rt.conn.startDataDrag(data, nil, options, float64(rt.pointerX),
+        float64(rt.pointerY))
+    else:
+      platform.errUnsupported()
+  if startErr != nil and options.done != nil:
+    options.done(transfer.Result(err: startErr))
+  rt.requestFrame()
+  true
+
 proc event(rt: Runtime; ev: platform.SurfaceEvent): bool =
   if rt.closed:
     return false
@@ -2561,6 +2654,8 @@ proc event(rt: Runtime; ev: platform.SurfaceEvent): bool =
           rt.frameLayout.rects, rt.pointerX):
         rt.requestFrame()
       return false
+    if rt.startDataDragFromPress():
+      return true
     if rt.pressTarget.owner == rt.frameLayout.owner:
       let owner = rt.frameLayout.owner
       let pressSlot = int(rt.pressTarget.slot)
@@ -2599,6 +2694,10 @@ proc event(rt: Runtime; ev: platform.SurfaceEvent): bool =
     rt.cancelKeyPress()
     rt.pointerX = float32(ev.x)
     rt.pointerY = float32(ev.y)
+    rt.pressX = rt.pointerX
+    rt.pressY = rt.pointerY
+    rt.dragCandidateIdentity = 0
+    rt.nativeDragStarted = false
     rt.splitPointerOffset = 0
     rt.hasPointer = true
     discard rt.dismissPopoverOutside(rt.pointerX, rt.pointerY)
@@ -2610,6 +2709,7 @@ proc event(rt: Runtime; ev: platform.SurfaceEvent): bool =
       rt.requestFrame()
       return true
     rt.pressTarget = rt.frameLayout.targetAt(rt.pointerX, rt.pointerY)
+    rt.dragCandidateIdentity = rt.dragCandidate(rt.pressTarget)
     rt.pressMods = ev.mods
     rt.pressHoverSlots = rt.frameLayout.slotsAt(rt.pointerX, rt.pointerY)
     if rt.pressTarget.owner == rt.frameLayout.owner and
@@ -2695,6 +2795,17 @@ proc event(rt: Runtime; ev: platform.SurfaceEvent): bool =
   of platform.pointerUp:
     if ev.button != 0:
       return false
+    if rt.nativeDragStarted:
+      rt.nativeDragStarted = false
+      rt.dragCandidateIdentity = 0
+      rt.pressTarget = Element()
+      rt.pressMods = 0
+      rt.pressHoverSlots.setLen(0)
+      rt.pointerX = float32(ev.x)
+      rt.pointerY = float32(ev.y)
+      rt.refreshPointer()
+      rt.requestFrame()
+      return true
     let previousHover = rt.hoverSlots
     let previousPressed = rt.pressedSlots
     rt.pointerX = float32(ev.x)
@@ -2806,6 +2917,7 @@ proc event(rt: Runtime; ev: platform.SurfaceEvent): bool =
       rt.clickedSlots.add(clickedSlot)
     rt.pressTarget = Element()
     rt.pressMods = 0
+    rt.dragCandidateIdentity = 0
     rt.splitPointerOffset = 0
     rt.pressHoverSlots.setLen(0)
     rt.refreshPointer()
@@ -2950,6 +3062,8 @@ proc event(rt: Runtime; ev: platform.SurfaceEvent): bool =
     rt.context.owner.rangeSliderDrags.clear()
     rt.pressTarget = Element()
     rt.pressMods = 0
+    rt.dragCandidateIdentity = 0
+    rt.nativeDragStarted = false
     rt.splitPointerOffset = 0
     rt.pressHoverSlots.setLen(0)
     rt.refreshPointer()
