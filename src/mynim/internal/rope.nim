@@ -223,7 +223,7 @@ proc lineStart*(n: Node; line: int): int =
       n = n.right
   var from0 = 0
   for i in 0 ..< line:
-    from0 += n.text.find('\n', from0) + 1
+    from0 = n.text.find('\n', from0) + 1
   result + from0
 
 proc read*(n: Node; start, stop: int; o: var string) =

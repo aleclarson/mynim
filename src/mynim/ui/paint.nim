@@ -317,12 +317,48 @@ proc paintText(s: scene.Scene; node: ElementNode; textColor: Color;
     s.ops.add(scene.Op(kind: scene.opGlyphs, first: int32(start),
       last: int32(s.glyphs.len), opacity: opacity))
 
-proc paintTextSelection(s: scene.Scene; node: ElementNode; rect, root: Rect;
+proc paintTextSelection(s: scene.Scene; owner: ElementOwner;
+                        node: ElementNode; rect, root: Rect;
                         scale, opacity: float32) =
+  var client: TextFieldClient
+  var selectionColor = node.textSelectionColor
+  if node.textAreaOwner of TextFieldClient:
+    let parent = int(node.parent)
+    if owner == nil or parent <= 0 or parent >= owner.nodes.len or
+        not owner.nodes[parent].focused or node.shapedText == nil:
+      return
+    client = TextFieldClient(node.textAreaOwner)
+    selectionColor = owner.nodes[parent].textSelectionColor
+    discard client.syncTextAreaBuffer()
+    let range = client.fieldRange()
+    if range.start == range.`end`:
+      return
+    let firstRune = client.bufferSnapshot.runeOffset(range.start)
+    let pastLastRune = client.bufferSnapshot.runeOffset(range.`end`)
+    let line = client.bufferSnapshot.lineRange(node.textAreaLine)
+    if pastLastRune < line.start or firstRune > line.`end` or
+        (firstRune == line.`end` and pastLastRune == firstRune):
+      return
+    let localStart = max(firstRune - line.start, 0)
+    let localEnd = min(pastLastRune - line.start,
+      line.`end` - line.start + 1)
+    let originX = rect.x + node.pad[3] + node.border[3]
+    let originY = rect.y + node.pad[0] + node.border[0]
+    for selected in node.shapedText.appendSelection(@[], localStart,
+        max(localStart, localEnd), false):
+      let selectedRect = Rect(x: originX + selected.x,
+        y: originY + selected.y, w: selected.w, h: selected.h)
+      s.ops.add(scene.Op(kind: scene.opFill,
+        rect: selectedRect.sceneRect(root, scale),
+        color: sceneColor(selectionColor), paint: scene.paintSolid,
+        opacity: opacity))
+      s.ops[^1].wide = s.addWide(wideColors(selectionColor, transparent,
+        transparent))
+    return
   if not node.focused or not (node.textClient of TextFieldClient) or
       node.shapedText == nil:
     return
-  let client = TextFieldClient(node.textClient)
+  client = TextFieldClient(node.textClient)
   let range = client.fieldRange()
   let originX = rect.x + node.pad[3] + node.border[3]
   let originY = rect.y + node.pad[0] + node.border[0]
@@ -332,17 +368,20 @@ proc paintTextSelection(s: scene.Scene; node: ElementNode; rect, root: Rect;
     for selected in node.shapedText.appendSelection(@[], first, pastLast, false):
       let selectedRect = Rect(x: originX + selected.x,
         y: originY + selected.y, w: selected.w, h: selected.h)
-      let color = node.textSelectionColor
       s.ops.add(scene.Op(kind: scene.opFill,
         rect: selectedRect.sceneRect(root, scale),
-        color: sceneColor(color), paint: scene.paintSolid, opacity: opacity))
-      s.ops[^1].wide = s.addWide(wideColors(color, transparent, transparent))
+        color: sceneColor(selectionColor), paint: scene.paintSolid,
+        opacity: opacity))
+      s.ops[^1].wide = s.addWide(wideColors(selectionColor, transparent,
+        transparent))
 
 proc paintTextCaret(s: scene.Scene; node: ElementNode; rect, root: Rect;
                     scale, opacity: float32) =
   if not node.focused or not (node.textClient of TextFieldClient):
     return
   let client = TextFieldClient(node.textClient)
+  if client.multiline:
+    return
   let (caret, _, _) = client.boundsForRange(platform.TextRange(
     start: client.caret, `end`: client.caret))
   let caretRect = Rect(x: rect.x + float32(caret.x),
@@ -780,8 +819,8 @@ proc paintScene*(layout: LayoutResult; scale = 1'f32;
           (node.clipX or node.clipY)
         if clipFieldText:
           result.ops.add(layout.clipOp(slot, scale))
-        result.paintTextSelection(node, layout.rects[slot], layout.root,
-                                  scale, opacity)
+        result.paintTextSelection(layout.owner, node, layout.rects[slot],
+                                  layout.root, scale, opacity)
         result.paintText(node, layout.owner.nodes.effectiveTextColor(slot),
           layout.rects[slot], layout.root, scale, opacity, system)
         result.paintTextCaret(node, layout.rects[slot], layout.root,
@@ -793,6 +832,18 @@ proc paintScene*(layout: LayoutResult; scale = 1'f32;
         result.paintSvg(node, layout.rects[slot], layout.root, scale, opacity)
         for _ in 0..<clipCount:
           result.ops.add(scene.Op(kind: scene.opPopClip))
+
+      for slot in layout.owner.paintSlots:
+        let node = layout.owner.nodes[slot]
+        if not node.focused or not (node.textClient of TextFieldClient):
+          continue
+        let client = TextFieldClient(node.textClient)
+        if not client.multiline or not (node.clipX or node.clipY):
+          continue
+        result.ops.add(layout.clipOp(slot, scale))
+        result.paintTextCaret(node, layout.rects[slot], layout.root,
+                              scale, opacityOf(layout.owner.nodes, slot))
+        result.ops.add(scene.Op(kind: scene.opPopClip))
 
       for slot in layout.owner.paintSlots:
         let node = layout.owner.nodes[slot]

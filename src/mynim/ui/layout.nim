@@ -2634,51 +2634,75 @@ proc margin*(e: Element; vertical, horizontal: float32): Element =
 proc margin*(e: Element; top, right, bottom, left: float32): Element =
   e.setMargin([top, right, bottom, left])
 
+proc propagateTextAreaStyle(e: Element) =
+  let node = e.node
+  if node == nil or node.textClient == nil or e.owner == nil:
+    return
+  var slot = int(node.firstChild)
+  while slot > 0 and slot < e.owner.nodes.len:
+    let next = int(e.owner.nodes[slot].nextSibling)
+    var child = addr e.owner.nodes[slot]
+    if child.textAreaOwner != node.textClient:
+      slot = next
+      continue
+    child[].textStyle = node.textStyle
+    child[].textColor = node.textColor
+    child[].textColorSet = node.textColorSet
+    child[].textAlign = node.textAlign
+    child[].rightToLeft = node.rightToLeft
+    slot = next
+
 proc textSize*(e: Element; value: float32): Element =
   ## Sets the text font size in DIPs; zero selects the system default.
   result = e
   let n = e.node
-  if n != nil and n.hasText:
+  if n != nil and (n.hasText or n.textClient != nil):
     n.textStyle.size = if classify(value) notin {fcNan, fcInf, fcNegInf}:
         max(value, 0'f32)
       else:
         0'f32
+    e.propagateTextAreaStyle()
 
 proc textColor*(e: Element; value: Color): Element =
   ## Sets the text color.
   result = e
   let n = e.node
-  if n != nil and n.hasText:
+  if n != nil and (n.hasText or n.textClient != nil):
     n.textColor = value
     n.textColorSet = true
+    e.propagateTextAreaStyle()
 
 proc textFamily*(e: Element; value: string): Element =
   ## Selects a font family for the text.
   result = e
   let n = e.node
-  if n != nil and n.hasText:
+  if n != nil and (n.hasText or n.textClient != nil):
     n.textStyle.family = value
+    e.propagateTextAreaStyle()
 
 proc textWeight*(e: Element; value: int): Element =
   ## Sets the text font weight from 100 to 900; zero selects the default.
   result = e
   let n = e.node
-  if n != nil and n.hasText:
+  if n != nil and (n.hasText or n.textClient != nil):
     n.textStyle.weight = if value <= 0: 0 else: max(100, min(value, 900))
+    e.propagateTextAreaStyle()
 
 proc textItalic*(e: Element; value = true): Element =
   ## Toggles italic text.
   result = e
   let n = e.node
-  if n != nil and n.hasText:
+  if n != nil and (n.hasText or n.textClient != nil):
     n.textStyle.italic = value
+    e.propagateTextAreaStyle()
 
 proc textAlign*(e: Element; value: Align): Element =
   ## Aligns text to Start, Center, or End within its element.
   result = e
   let n = e.node
-  if n != nil and n.hasText:
+  if n != nil and (n.hasText or n.textClient != nil):
     n.textAlign = value
+    e.propagateTextAreaStyle()
 
 proc onClick*(e: Element; handler: proc() {.closure.}): Element =
   ## Runs handler for pointer clicks and Enter/Space activation on e.

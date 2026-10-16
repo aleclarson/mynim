@@ -750,6 +750,23 @@ proc inputRange(rt: Runtime; first, pastLast: int): platform.TextRange =
 proc updateTextInput(rt: Runtime) =
   if rt.closed or rt.conn.surface == nil:
     return
+  let frameOwner = rt.frameLayout.owner
+  if frameOwner != nil and
+      rt.frameLayout.rects.len == frameOwner.nodes.len:
+    var areaLayoutChanged = false
+    for slot in 1..<frameOwner.nodes.len:
+      let node = frameOwner.nodes[slot]
+      if node.textClient of TextFieldClient and
+          TextFieldClient(node.textClient).multiline:
+        let field = TextFieldClient(node.textClient)
+        field.insetX = node.pad[3] + node.border[3]
+        field.insetY = node.pad[0] + node.border[0]
+        field.style = node.textStyle
+        field.rightToLeft = node.rightToLeft
+        areaLayoutChanged = field.captureAreaLayout(frameOwner,
+          rt.frameLayout.rects, slot) or areaLayoutChanged
+    if areaLayoutChanged:
+      rt.requestFrame()
   var focusedClient: platform.TextInputClient
   var focusedSlot = -1
   if rt.surfaceFocused and rt.frameLayout.focusableSlot(rt.focusSlot):
@@ -824,7 +841,8 @@ proc textFieldKey(rt: Runtime; key: platform.Key;
   if key == platform.keyA and
       mods in {platform.modCtrl, platform.modSuper}:
     client.anchor = 0
-    client.caret = platform.utf16Len(client.text)
+    client.caret = client.fieldUtf16Len()
+    client.areaHasDesiredX = false
     rt.keyboardFocusVisible = true
     rt.updateTextInput()
     rt.requestFrame()
@@ -832,12 +850,25 @@ proc textFieldKey(rt: Runtime; key: platform.Key;
 
   let extend = mods == platform.modShift
   if (mods == 0 or extend) and
-      key in {platform.keyLeft, platform.keyRight, platform.keyHome,
-              platform.keyEnd}:
+      (key in {platform.keyLeft, platform.keyRight, platform.keyHome,
+               platform.keyEnd} or
+       (client.multiline and key in {platform.keyUp, platform.keyDown})):
     discard client.fieldMove(key, extend)
     rt.keyboardFocusVisible = true
     rt.updateTextInput()
     rt.requestFrame()
+    return true
+
+  if client.multiline and key == platform.keyEnter and mods == 0:
+    if client.readOnly:
+      return true
+    if rt.textInputAdapter == nil:
+      return false
+    let replacement = new platform.TextRange
+    replacement[] = client.fieldRange()
+    rt.keyboardFocusVisible = true
+    rt.inputComposition.reset()
+    rt.textInputAdapter.replaceText(replacement, "\n")
     return true
 
   if (mods == 0 or extend) and
@@ -857,6 +888,23 @@ proc textFieldKey(rt: Runtime; key: platform.Key;
     return true
   false
 
+proc textInputSlot(owner: ElementOwner; slot: int): int =
+  result = -1
+  if owner == nil or slot <= 0 or slot >= owner.nodes.len:
+    return
+  var current = slot
+  while current > 0 and current < owner.nodes.len:
+    let node = owner.nodes[current]
+    if node.textClient of TextFieldClient:
+      return current
+    if node.textAreaOwner of TextFieldClient:
+      let parent = int(node.parent)
+      if parent > 0 and parent < owner.nodes.len and
+          owner.nodes[parent].textClient == node.textAreaOwner:
+        return parent
+      return
+    current = int(node.parent)
+
 proc updatePointerCursor(rt: Runtime) =
   var cursor = platform.cursorDefault
   if rt.hasPointer:
@@ -865,7 +913,7 @@ proc updatePointerCursor(rt: Runtime) =
       let node = rt.frameLayout.owner.nodes[int(target.slot)]
       if node.tableResizeHandle:
         cursor = platform.cursorResizeEW
-      elif node.textClient != nil:
+      elif node.textClient != nil or node.textAreaOwner != nil:
         cursor = platform.cursorText
   if not rt.hasPointerCursor or rt.pointerCursor != cursor:
     rt.conn.surface.setCursor(cursor)
@@ -1447,18 +1495,20 @@ proc event(rt: Runtime; ev: platform.SurfaceEvent): bool =
     rt.hasPointer = true
     rt.refreshPointer()
     if rt.pressTarget.owner == rt.frameLayout.owner:
-      let slot = int(rt.pressTarget.slot)
-      let node = rt.frameLayout.owner.nodes[slot]
-      if node.textClient of TextFieldClient:
-        let rect = rt.frameLayout.rects[slot]
-        let client = TextFieldClient(node.textClient)
-        client.insetX = node.pad[3] + node.border[3]
-        client.insetY = node.pad[0] + node.border[0]
-        if client.fieldPointerSelection(
-            float64(rt.pointerX - rect.x), float64(rt.pointerY - rect.y),
-            extend = true):
-          rt.updateTextInput()
-          rt.requestFrame()
+      let owner = rt.frameLayout.owner
+      let slot = owner.textInputSlot(int(rt.pressTarget.slot))
+      if slot >= 0:
+        let node = owner.nodes[slot]
+        if node.textClient of TextFieldClient:
+          let rect = rt.frameLayout.rects[slot]
+          let client = TextFieldClient(node.textClient)
+          client.insetX = node.pad[3] + node.border[3]
+          client.insetY = node.pad[0] + node.border[0]
+          if client.fieldPointerSelection(
+              float64(rt.pointerX - rect.x), float64(rt.pointerY - rect.y),
+              extend = true):
+            rt.updateTextInput()
+            rt.requestFrame()
     if rt.listReorder != nil and
         rt.listReorder.updateListReorder(rt.pointerX, rt.pointerY):
       rt.listReorderTarget(rt.listReorder)
@@ -1523,10 +1573,14 @@ proc event(rt: Runtime; ev: platform.SurfaceEvent): bool =
       if sliderSlot >= 0:
         slot = sliderSlot
         discard rt.queueSliderPointer(sliderSlot)
-      let targetNode = rt.frameLayout.owner.nodes[slot]
+      var targetNode = rt.frameLayout.owner.nodes[slot]
       if targetNode.listState != nil and targetNode.listRowIndex >= 0 and
           not targetNode.listRowHeader:
         slot = int(targetNode.listState.frameSlot)
+      let textSlot = rt.frameLayout.owner.textInputSlot(slot)
+      if textSlot >= 0:
+        slot = textSlot
+      targetNode = rt.frameLayout.owner.nodes[slot]
       if rt.frameLayout.focusableSlot(slot):
         rt.focusSlot = slot
         rt.keyboardFocusVisible = false

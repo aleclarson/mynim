@@ -175,6 +175,8 @@ type
     textColor, textSelectionColor: Color
     shapedText: textStack.Layout
     textClient: platform.TextInputClient
+    textAreaOwner: platform.TextInputClient
+    textAreaLine: int
     clickHandler: proc(mods: platform.Modifiers) {.closure.}
     accessRole: platform.AccessRole
     accessSort: platform.AccessStates

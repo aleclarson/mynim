@@ -11,6 +11,17 @@ type TextFieldClient = ref object of platform.TextInputClient
   placeholderColor: Color
   style: textStack.Style
   shaped: textStack.Layout
+  multiline, areaInitialized: bool
+  areaScroll: ScrollState
+  areaHeights: ParagraphHeightIndex
+  areaLineHeights: seq[float32]
+  areaLayouts: Table[int, textStack.Layout]
+  areaFirst, areaPastLast: int
+  areaWidth, areaHeight, areaLineHeight: float32
+  areaHasLayout, areaHasDesiredX: bool
+  areaDesiredX: float32
+  areaLastStyle: textStack.Style
+  areaLastRightToLeft: bool
 
 proc runeIndexAtUtf16(value: string; offset: int): int =
   let byteOffset = platform.utf16ByteOffset(value, max(offset, 0))
@@ -46,8 +57,233 @@ proc rebuildFieldLayout(client: TextFieldClient) =
     text: client.text, style: client.style, noWrap: true,
     keepSpaces: true, rtl: client.rightToLeft))
 
+proc resetAreaCache(client: TextFieldClient; lineCount: int) =
+  client.areaLineHeights = newSeq[float32](max(lineCount, 0))
+  client.areaHeights.reset(client.areaLineHeights)
+  if client.areaLineHeight > 0:
+    client.areaHeights.setEstimate(float64(client.areaLineHeight))
+  client.areaLayouts.clear()
+
+proc syncTextAreaBuffer(client: TextFieldClient): bool =
+  if not client.multiline or client.boundBuffer == nil:
+    return false
+  let snapshot = client.boundBuffer.snapshot()
+  if client.areaInitialized and
+      snapshot.version() == client.bufferSnapshot.version():
+    return false
+  let initial = not client.areaInitialized
+  client.bufferSnapshot = snapshot
+  client.text.setLen(0)
+  client.lastBoundValue.setLen(0)
+  client.hasMark = false
+  client.nativeChanged = false
+  if initial:
+    client.caret = snapshot.utf16Len()
+    client.anchor = client.caret
+  else:
+    client.caret = min(client.caret, snapshot.utf16Len())
+    client.anchor = min(client.anchor, snapshot.utf16Len())
+  client.areaInitialized = true
+  client.resetAreaCache(snapshot.lineCount())
+  result = true
+
+proc fieldRuneLen(client: TextFieldClient): int =
+  if client.multiline:
+    discard client.syncTextAreaBuffer()
+    client.bufferSnapshot.len()
+  else:
+    client.text.runeLen
+
+proc fieldUtf16Len(client: TextFieldClient): int =
+  if client.multiline:
+    discard client.syncTextAreaBuffer()
+    client.bufferSnapshot.utf16Len()
+  else:
+    platform.utf16Len(client.text)
+
+proc fieldRuneIndex(client: TextFieldClient; unit: int): int =
+  if client.multiline:
+    discard client.syncTextAreaBuffer()
+    client.bufferSnapshot.runeOffset(unit)
+  else:
+    runeIndexAtUtf16(client.text, unit)
+
+proc fieldUtf16Offset(client: TextFieldClient; rune: int): int =
+  if client.multiline:
+    discard client.syncTextAreaBuffer()
+    client.bufferSnapshot.utf16Offset(rune)
+  else:
+    utf16UnitAtRune(client.text, rune)
+
+proc setAreaParagraphHeight(client: TextFieldClient; paragraph: int;
+                            height: float32): bool =
+  if paragraph < 0 or paragraph >= client.areaLineHeights.len:
+    return false
+  let height = max(height, client.areaLineHeight)
+  let old = client.areaLineHeights[paragraph]
+  if abs(old - height) < 0.5'f32:
+    return false
+  if old <= 0:
+    client.areaHeights.add(paragraph, float64(height), -1)
+  else:
+    client.areaHeights.add(paragraph, float64(height - old), 0)
+  client.areaLineHeights[paragraph] = height
+  result = true
+
+proc areaParagraphLayout(client: TextFieldClient; paragraph: int):
+    textStack.Layout =
+  discard client.syncTextAreaBuffer()
+  if paragraph < 0 or paragraph >= client.bufferSnapshot.lineCount():
+    return
+  if client.areaLayouts.hasKey(paragraph):
+    return client.areaLayouts[paragraph]
+  let text = client.bufferSnapshot.line(paragraph)
+  let params = textStack.Params(text: text, style: client.style,
+    width: max(client.areaWidth, 1'f32), keepSpaces: true,
+    rtl: client.rightToLeft)
+  result = textStack.shared().layout(params)
+  client.areaLayouts[paragraph] = result
+  let height = max(result.height, client.areaLineHeight)
+  discard client.setAreaParagraphHeight(paragraph, height)
+
+proc revealAreaCaret(client: TextFieldClient) =
+  if not client.multiline or client.areaScroll == nil or
+      client.areaHeight <= 0:
+    return
+  discard client.syncTextAreaBuffer()
+  let rune = client.bufferSnapshot.runeOffset(client.caret)
+  let paragraph = client.bufferSnapshot.lineAt(rune)
+  let lineRange = client.bufferSnapshot.lineRange(paragraph)
+  let layout = client.areaParagraphLayout(paragraph)
+  let (_, y, height) = layout.caret(rune - lineRange.start)
+  let top = float32(client.areaHeights.top(paragraph)) + y
+  let bottom = top + max(height, client.areaLineHeight)
+  let viewTop = client.areaScroll.offsetY
+  if top < viewTop:
+    client.areaScroll.offsetY = max(top, 0'f32)
+  elif bottom > viewTop + client.areaHeight:
+    client.areaScroll.offsetY = max(bottom - client.areaHeight, 0'f32)
+
+proc areaContentHeight(client: TextFieldClient): float32 =
+  float32(max(client.areaHeights.top(client.areaLineHeights.len), 0.0))
+
+proc prepareAreaWindow(client: TextFieldClient; viewportHeight: float32) =
+  let count = client.bufferSnapshot.lineCount()
+  if count == 0:
+    client.areaFirst = 0
+    client.areaPastLast = 0
+    return
+  let overscan = max(client.areaLineHeight * 2, 1'f32)
+  let scroll = if client.areaScroll == nil: 0'f32
+    else: client.areaScroll.offsetY
+  let firstY = max(float64(scroll - overscan), 0.0)
+  let lastY = float64(scroll + max(viewportHeight, client.areaLineHeight) + overscan)
+  let first = client.areaHeights.at(firstY)
+  var pastLast = first
+  while pastLast < count and client.areaHeights.top(pastLast) < lastY:
+    inc pastLast
+  if pastLast <= first:
+    pastLast = min(first + 1, count)
+  client.areaFirst = first
+  client.areaPastLast = pastLast
+
+proc captureAreaLayout(client: TextFieldClient; owner: ElementOwner;
+                       rects: seq[Rect]; parentSlot: int): bool =
+  if owner == nil or parentSlot <= 0 or parentSlot >= owner.nodes.len or
+      rects.len != owner.nodes.len:
+    return false
+  let parent = owner.nodes[parentSlot]
+  let box = rects[parentSlot]
+  let width = max(box.w - parent.contentInsetX, 1'f32)
+  let height = max(box.h - parent.contentInsetY, 0'f32)
+  let oldContentHeight = client.areaContentHeight()
+  let newLayout = not client.areaHasLayout or
+    abs(width - client.areaWidth) >= 0.5'f32 or
+    client.areaLastStyle != client.style or
+    client.areaLastRightToLeft != client.rightToLeft
+  if newLayout:
+    client.areaWidth = width
+    client.areaLastStyle = client.style
+    client.areaLastRightToLeft = client.rightToLeft
+    let line = textStack.shared().layout(textStack.Params(text: " ",
+      style: client.style, width: width, keepSpaces: true,
+      rtl: client.rightToLeft))
+    client.areaLineHeight = max(line.height, max(client.style.size, 1'f32))
+    client.resetAreaCache(client.bufferSnapshot.lineCount())
+    client.areaHeights.setEstimate(float64(client.areaLineHeight))
+    client.areaHasLayout = true
+    result = true
+  if abs(height - client.areaHeight) >= 0.5'f32:
+    client.areaHeight = height
+    result = true
+  for slot in 1..<owner.nodes.len:
+    let row = owner.nodes[slot]
+    if row.textAreaOwner != client or row.textAreaLine < 0 or
+        row.textAreaLine >= client.areaLineHeights.len:
+      continue
+    if row.shapedText != nil:
+      result = client.setAreaParagraphHeight(row.textAreaLine,
+        row.shapedText.height) or result
+      client.areaLayouts[row.textAreaLine] = row.shapedText
+  let totals = client.areaHeights.totals()
+  let measured = client.areaLineHeights.len - totals.unknown
+  if measured > 0:
+    client.areaHeights.setEstimate(totals.measured / float64(measured))
+  var expired: seq[int]
+  for paragraph in client.areaLayouts.keys:
+    if paragraph < client.areaFirst - 128 or
+        paragraph >= client.areaPastLast + 128:
+      expired.add(paragraph)
+  for paragraph in expired:
+    client.areaLayouts.del(paragraph)
+  result = result or abs(client.areaContentHeight() - oldContentHeight) >= 0.5'f32
+
+proc invalidateAreaEdit(client: TextFieldClient; before: TextSnapshot;
+                        after: TextSnapshot; replaced: platform.TextRange;
+                        inserted: string) =
+  let startRune = before.runeOffset(replaced.start)
+  let endRune = before.runeOffset(replaced.`end`)
+  let firstLine = before.lineAt(startRune)
+  let lastLine = before.lineAt(endRune)
+  client.bufferSnapshot = after
+  if before.lineCount() != after.lineCount():
+    client.resetAreaCache(after.lineCount())
+    return
+  let insertedRunes = inserted.runeLen
+  let afterLine = after.lineAt(startRune + insertedRunes)
+  let last = min(client.areaLineHeights.len - 1,
+    max(lastLine, afterLine))
+  for paragraph in firstLine..last:
+    client.areaLineHeights[paragraph] = 0
+    client.areaLayouts.del(paragraph)
+  client.areaHeights.reset(client.areaLineHeights)
+  if client.areaLineHeight > 0:
+    client.areaHeights.setEstimate(float64(client.areaLineHeight))
+  client.areaHasDesiredX = false
+
+proc replaceAreaText(client: TextFieldClient; range: platform.TextRange;
+                     value: string): bool =
+  discard client.syncTextAreaBuffer()
+  let before = client.bufferSnapshot
+  let edit = client.boundBuffer.replaceUtf16IfCurrent(before, range, value)
+  if not edit.committed:
+    discard client.syncTextAreaBuffer()
+    return
+  client.invalidateAreaEdit(before, edit.snapshot, edit.replacedRange, value)
+  let startRune = before.runeOffset(edit.replacedRange.start)
+  client.caret = edit.snapshot.utf16Offset(startRune + value.runeLen)
+  client.anchor = client.caret
+  client.hasMark = false
+  client.nativeChanged = false
+  client.revealAreaCaret()
+  result = true
+
 method textForRange*(client: TextFieldClient; r: platform.TextRange):
     tuple[s: string, actual: platform.TextRange] =
+  if client.multiline:
+    discard client.syncTextAreaBuffer()
+    let (text, actual) = client.bufferSnapshot.textForRange(r)
+    return (text, actual)
   let requested = platform.normalizeTextRange(r)
   let firstByte = platform.utf16ByteOffset(client.text, requested.start)
   let pastLastByte = platform.utf16ByteOffset(client.text, requested.`end`)
@@ -57,6 +293,8 @@ method textForRange*(client: TextFieldClient; r: platform.TextRange):
   (client.text[firstByte ..< pastLastByte], actual)
 
 method selection*(client: TextFieldClient): platform.TextSelection =
+  if client.multiline:
+    discard client.syncTextAreaBuffer()
   client.fieldSelection()
 
 method markedRange*(client: TextFieldClient):
@@ -66,6 +304,11 @@ method markedRange*(client: TextFieldClient):
 method replaceText*(client: TextFieldClient; r: ref platform.TextRange;
                     value: string) =
   if client.readOnly:
+    return
+  if client.multiline:
+    let target = if r == nil: client.fieldRange()
+      else: platform.normalizeTextRange(r[])
+    discard client.replaceAreaText(target, value)
     return
   let target = if r == nil: client.fieldRange()
     else: platform.normalizeTextRange(r[])
@@ -83,6 +326,23 @@ method replaceText*(client: TextFieldClient; r: ref platform.TextRange;
 method setMarkedText*(client: TextFieldClient; r: ref platform.TextRange;
                       value: string; selected: platform.TextRange) =
   if client.readOnly:
+    return
+  if client.multiline:
+    discard client.syncTextAreaBuffer()
+    let target = if client.hasMark: client.mark
+      elif r == nil: client.fieldRange()
+      else: platform.normalizeTextRange(r[])
+    if not client.replaceAreaText(target, value):
+      return
+    let start = client.caret - platform.utf16Len(value)
+    client.mark = platform.TextRange(start: start,
+      `end`: client.caret)
+    client.hasMark = true
+    let normalizedSelection = platform.normalizeTextRange(selected)
+    client.anchor = start + min(normalizedSelection.start,
+      platform.utf16Len(value))
+    client.caret = start + min(normalizedSelection.`end`,
+      platform.utf16Len(value))
     return
   let target = if r == nil: client.fieldRange()
     else: platform.normalizeTextRange(r[])
@@ -109,6 +369,28 @@ method unmarkText*(client: TextFieldClient) =
 
 method boundsForRange*(client: TextFieldClient; r: platform.TextRange):
     tuple[bounds: platform.RectF, actual: platform.TextRange, ok: bool] =
+  if client.multiline:
+    discard client.syncTextAreaBuffer()
+    let requested = platform.normalizeTextRange(r)
+    let first = client.bufferSnapshot.runeOffset(requested.start)
+    let last = client.bufferSnapshot.runeOffset(requested.`end`)
+    let actual = platform.TextRange(
+      start: client.bufferSnapshot.utf16Offset(first),
+      `end`: client.bufferSnapshot.utf16Offset(last))
+    let paragraph = client.bufferSnapshot.lineAt(first)
+    let lineRange = client.bufferSnapshot.lineRange(paragraph)
+    let layout = client.areaParagraphLayout(paragraph)
+    let local = max(0, min(first - lineRange.start,
+      client.bufferSnapshot.line(paragraph).runeLen))
+    let (x, y, height) = layout.caret(local)
+    let scroll = if client.areaScroll == nil: 0'f32
+      else: client.areaScroll.offsetY
+    result = (platform.RectF(
+      x: float64(client.insetX + x),
+      y: float64(client.insetY + client.areaHeights.top(paragraph) -
+        float64(scroll) + float64(y)),
+      w: 1, h: float64(max(height, 1'f32))), actual, true)
+    return
   let requested = platform.normalizeTextRange(r)
   let startByte = platform.utf16ByteOffset(client.text, requested.start)
   let endByte = platform.utf16ByteOffset(client.text, requested.`end`)
@@ -123,6 +405,19 @@ method boundsForRange*(client: TextFieldClient; r: platform.TextRange):
 
 method indexForPoint*(client: TextFieldClient; x, y: float64):
     tuple[i: int, ok: bool] =
+  if client.multiline:
+    discard client.syncTextAreaBuffer()
+    let scroll = if client.areaScroll == nil: 0'f32
+      else: client.areaScroll.offsetY
+    let contentY = max(y - float64(client.insetY) + float64(scroll), 0.0)
+    let paragraph = client.areaHeights.at(contentY)
+    let layout = client.areaParagraphLayout(paragraph)
+    let top = client.areaHeights.top(paragraph)
+    let local = layout.indexAt(float32(x - float64(client.insetX)),
+      float32(contentY - top))
+    let lineRange = client.bufferSnapshot.lineRange(paragraph)
+    result = (client.bufferSnapshot.utf16Offset(lineRange.start + local), true)
+    return
   let index = client.shaped.indexAt(float32(x) - client.insetX,
                                     float32(y) - client.insetY)
   (utf16UnitAtRune(client.text, index), true)
@@ -190,6 +485,18 @@ proc finishTextField(c: Context; e: Element; client: TextFieldClient) =
   client.insetX = node[].pad[3] + node[].border[3]
   client.insetY = node[].pad[0] + node[].border[0]
 
+proc leaveTextAreaMode(client: TextFieldClient) =
+  if not client.multiline:
+    return
+  client.multiline = false
+  client.boundBuffer = nil
+  client.bufferSnapshot = TextSnapshot()
+  client.areaInitialized = false
+  client.areaHasLayout = false
+  client.areaHasDesiredX = false
+  client.areaScroll = nil
+  client.areaLayouts.clear()
+
 proc textInputBase*(c: Context; value: var string): Element =
   ## Creates an unstyled single-line text field. It copies native edits into
   ## value on the next build before running that field's change/submit actions.
@@ -198,6 +505,7 @@ proc textInputBase*(c: Context; value: var string): Element =
   if node == nil:
     return
   let client = result.acquireTextField(value)
+  client.leaveTextAreaMode()
 
   if client.boundBuffer != nil:
     client.boundBuffer = nil
@@ -226,6 +534,7 @@ proc textInputBufferBase*(c: Context; buffer: TextBuffer): Element =
   if node == nil:
     return
   let client = result.acquireTextField("")
+  client.leaveTextAreaMode()
   if client.boundBuffer != buffer:
     client.boundBuffer = buffer
     client.bufferSnapshot = buffer.snapshot()
@@ -249,6 +558,73 @@ proc textInputBufferBase*(c: Context; buffer: TextBuffer): Element =
     return
   c.finishTextField(result, client)
 
+proc textAreaBufferBase*(c: Context; buffer: TextBuffer): Element =
+  ## Creates an unstyled multiline editor over an indexed text buffer.
+  buffer.requireTextBuffer()
+  result = c.newTextFieldElement()
+  let node = result.node
+  if node == nil:
+    return
+  let client = result.acquireTextField("")
+  if not client.multiline or client.boundBuffer != buffer:
+    client.multiline = true
+    client.boundBuffer = buffer
+    client.areaScroll = newScrollState()
+    client.areaHasLayout = false
+    client.areaLineHeight = 0
+    client.areaLayouts = initTable[int, textStack.Layout]()
+    client.areaInitialized = false
+  discard client.syncTextAreaBuffer()
+  node[].textColor = c.theme.text
+  node[].textColorSet = true
+  node[].textStyle.family = c.theme.font
+  node[].textStyle.size = c.theme.fontSize
+  node[].textSelectionColor = c.theme.selection
+  client.style = node[].textStyle
+  client.rightToLeft = node[].rightToLeft
+  if client.areaLineHeight <= 0:
+    let sample = textStack.shared().layout(textStack.Params(text: " ",
+      style: client.style, keepSpaces: true, rtl: client.rightToLeft))
+    client.areaLineHeight = max(sample.height, max(client.style.size, 1'f32))
+    client.areaHeights.setEstimate(float64(client.areaLineHeight))
+  let viewportHeight = max(client.areaHeight, c.theme.space(20))
+  client.prepareAreaWindow(viewportHeight)
+  node[].textClient = client
+  node[].focusable = true
+  node[].hasText = false
+  node[].textValue.setLen(0)
+  node[].scrollY = true
+  node[].scrollState = client.areaScroll
+  node[].clipX = true
+  node[].clipY = true
+  let snapshot = client.bufferSnapshot
+  let count = snapshot.lineCount()
+  let first = client.areaFirst
+  let pastLast = client.areaPastLast
+  let top = client.areaHeights.top(first).float32
+  let bottom = max(client.areaContentHeight() -
+    client.areaHeights.top(pastLast).float32, 0'f32)
+  let lineHeight = client.areaLineHeight
+  discard result.children(proc() =
+    if top > 0:
+      discard c.box().height(top).shrink(0)
+    for line in first..<pastLast:
+      let paragraph = c.text(snapshot.line(line)).shrink(0)
+        .minHeight(lineHeight)
+      if paragraph.node != nil:
+        paragraph.node[].textAreaOwner = client
+        paragraph.node[].textAreaLine = line
+        paragraph.node[].textStyle = node[].textStyle
+        paragraph.node[].textColor = node[].textColor
+        paragraph.node[].textColorSet = node[].textColorSet
+        paragraph.node[].textAlign = node[].textAlign
+        paragraph.node[].rightToLeft = node[].rightToLeft
+    if pastLast < count and bottom > 0:
+      discard c.box().height(bottom).shrink(0)
+  )
+  if not result.deliverTextFieldCallbacks():
+    return
+
 proc themeTextInput(c: Context; e: Element): Element =
   let theme = c.theme
   result = e
@@ -261,6 +637,16 @@ proc themeTextInput(c: Context; e: Element): Element =
     node[].borderColor = if result.focused(): theme.accent
       elif result.hovered(): theme.border.mix(theme.text, 0.2'f32)
       else: theme.border
+    if node[].textClient of TextFieldClient:
+      let client = TextFieldClient(node[].textClient)
+      client.insetX = node[].pad[3] + node[].border[3]
+      client.insetY = node[].pad[0] + node[].border[0]
+
+proc textAreaBuffer*(c: Context; buffer: TextBuffer): Element =
+  ## Creates a themed multiline editor backed by indexed text storage.
+  let theme = c.theme
+  result = c.themeTextInput(c.textAreaBufferBase(buffer))
+  discard result.minHeight(theme.space(20))
 
 proc textInput*(c: Context; value: var string): Element =
   ## Creates a themed single-line text input editing value. Native edits are
@@ -295,19 +681,22 @@ proc textSelection*(e: Element): tuple[start, `end`: int] =
   ## Returns the selected rune range, or the caret when both indices match.
   let client = e.fieldClient()
   if client != nil:
-    result = (runeIndexAtUtf16(client.text, min(client.anchor, client.caret)),
-              runeIndexAtUtf16(client.text, max(client.anchor, client.caret)))
+    result = (client.fieldRuneIndex(min(client.anchor, client.caret)),
+              client.fieldRuneIndex(max(client.anchor, client.caret)))
 
 proc setTextSelection*(e: Element; start, `end`: int): Element =
   ## Selects a rune range or places the caret at start when the indices match.
   result = e
   let client = e.fieldClient()
   if client != nil:
-    let first = max(0, min(start, client.text.runeLen))
-    let pastLast = max(0, min(`end`, client.text.runeLen))
-    client.anchor = utf16UnitAtRune(client.text, first)
-    client.caret = utf16UnitAtRune(client.text, pastLast)
+    let count = client.fieldRuneLen()
+    let first = max(0, min(start, count))
+    let pastLast = max(0, min(`end`, count))
+    client.anchor = client.fieldUtf16Offset(first)
+    client.caret = client.fieldUtf16Offset(pastLast)
     client.hasMark = false
+    client.areaHasDesiredX = false
+    client.revealAreaCaret()
     if e.owner.invalidate != nil:
       e.owner.invalidate()
 
@@ -324,10 +713,81 @@ proc fieldPointerSelection(client: TextFieldClient; x, y: float64;
   if not extend:
     client.anchor = index
   client.caret = index
+  client.areaHasDesiredX = false
+  client.revealAreaCaret()
   true
 
 proc fieldMove(client: TextFieldClient; key: platform.Key;
                extend: bool): bool =
+  if client.multiline:
+    discard client.syncTextAreaBuffer()
+    let snapshot = client.bufferSnapshot
+    let selection = client.fieldRange()
+    let current = snapshot.runeOffset(client.caret)
+    var nextRune = current
+    var keepDesiredX = false
+    if not extend and selection.start != selection.`end` and
+        key in {platform.keyLeft, platform.keyRight}:
+      let unit = if key == platform.keyLeft: selection.start
+        else: selection.`end`
+      nextRune = snapshot.runeOffset(unit)
+    else:
+      let paragraph = snapshot.lineAt(current)
+      let lineRange = snapshot.lineRange(paragraph)
+      let local = current - lineRange.start
+      let layout = client.areaParagraphLayout(paragraph)
+      case key
+      of platform.keyLeft, platform.keyRight:
+        let direction = if key == platform.keyLeft: -1 else: 1
+        let moved = layout.moveCaret(textStack.CaretPosition(index: local,
+          affinity: textStack.Downstream), direction).index
+        nextRune = lineRange.start + moved
+        if moved == local and
+            (if direction < 0: current > 0 else: current < snapshot.len()):
+          nextRune = current + direction
+        client.areaHasDesiredX = false
+      of platform.keyHome, platform.keyEnd:
+        let visualLine = layout.lineAt(local)
+        let target = layout.lines[visualLine]
+        nextRune = lineRange.start +
+          (if key == platform.keyHome: target.start else: target.`end`)
+        client.areaHasDesiredX = false
+      of platform.keyUp, platform.keyDown:
+        let visualLine = layout.lineAt(local)
+        if not client.areaHasDesiredX:
+          let (x, _, _) = layout.caret(local)
+          client.areaDesiredX = x
+          client.areaHasDesiredX = true
+        let direction = if key == platform.keyUp: -1 else: 1
+        var targetParagraph = paragraph
+        var targetLine = visualLine + direction
+        if targetLine < 0 and targetParagraph > 0:
+          dec targetParagraph
+          targetLine = client.areaParagraphLayout(targetParagraph).lines.high
+        elif targetLine >= layout.lines.len and
+            targetParagraph + 1 < snapshot.lineCount():
+          inc targetParagraph
+          targetLine = 0
+        let targetLayout = client.areaParagraphLayout(targetParagraph)
+        targetLine = max(0, min(targetLine, targetLayout.lines.high))
+        let targetMetrics = targetLayout.lines[targetLine]
+        let targetLocal = targetLayout.indexAt(client.areaDesiredX,
+          targetMetrics.y + targetMetrics.height / 2)
+        let targetRange = snapshot.lineRange(targetParagraph)
+        nextRune = targetRange.start + targetLocal
+        keepDesiredX = true
+      else:
+        return false
+    nextRune = max(0, min(nextRune, snapshot.len()))
+    let next = snapshot.utf16Offset(nextRune)
+    if not extend:
+      client.anchor = next
+    client.caret = next
+    if not keepDesiredX:
+      client.areaHasDesiredX = false
+    client.revealAreaCaret()
+    return true
+
   let selection = client.fieldRange()
   var nextRune: int
   if not extend and selection.start != selection.`end` and
@@ -359,6 +819,30 @@ proc fieldDeleteRange(client: TextFieldClient; key: platform.Key):
     tuple[r: platform.TextRange, ok: bool] =
   result.r = client.fieldRange()
   if result.r.start != result.r.`end`:
+    result.ok = true
+    return
+  if client.multiline:
+    discard client.syncTextAreaBuffer()
+    let snapshot = client.bufferSnapshot
+    let current = snapshot.runeOffset(client.caret)
+    if current < 0 or current > snapshot.len():
+      return
+    let direction = if key == platform.keyBackspace: -1 else: 1
+    let paragraph = snapshot.lineAt(current)
+    let lineRange = snapshot.lineRange(paragraph)
+    let local = current - lineRange.start
+    let layout = client.areaParagraphLayout(paragraph)
+    let moved = layout.moveCaret(textStack.CaretPosition(index: local,
+      affinity: textStack.Downstream), direction).index
+    var next = lineRange.start + moved
+    if moved == local and
+        (if direction < 0: current > 0 else: current < snapshot.len()):
+      next = current + direction
+    if next == current:
+      return
+    let first = snapshot.utf16Offset(min(current, next))
+    let pastLast = snapshot.utf16Offset(max(current, next))
+    result.r = platform.TextRange(start: first, `end`: pastLast)
     result.ok = true
     return
   let current = runeIndexAtUtf16(client.text, client.caret)

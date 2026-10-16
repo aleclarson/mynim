@@ -1,4 +1,4 @@
-import std/assertions
+import std/[assertions, strutils]
 
 include "../src/mynim.nim"
 import mynim/internal/platform as platform
@@ -33,6 +33,18 @@ doAssert buffer.lineRange(1) == (3, 4)
 doAssert buffer.lineAt(3) == 1
 doAssert buffer.utf16Offset(2) == 3
 doAssert buffer.runeOffset(2) == 1
+
+let multipleLines = ui.newTextBuffer("abc\ndef\nxyz")
+doAssert multipleLines.lineRange(0) == (0, 3)
+doAssert multipleLines.lineRange(1) == (4, 7)
+doAssert multipleLines.lineRange(2) == (8, 11)
+doAssert multipleLines.lineAt(8) == 2
+
+let manyLines = ui.newTextBuffer(repeat("x\n", 3000) & "tail")
+doAssert manyLines.lineCount() == 3001
+doAssert manyLines.lineRange(2999) == (5998, 5999)
+doAssert manyLines.lineRange(3000) == (6000, 6004)
+doAssert manyLines.lineAt(6000) == 3000
 
 let (selected, actual) = buffer.textForRange(platform.TextRange(
   start: 1, `end`: 3))
