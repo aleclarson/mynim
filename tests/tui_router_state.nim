@@ -54,6 +54,31 @@ doAssert router.location() == "/",
 let normalized = ui.newRouter("/a/./b/../c")
 doAssert normalized.path() == "/a/c"
 
+let routes = ui.newRouter("/notes/42/edit?tab=info")
+let route = routes.route()
+doAssert route.path() == "/notes/42/edit"
+doAssert route.match("/notes/{id}/edit")
+doAssert route.param("id") == "42"
+doAssert route.query("tab") == "info"
+route.title("Edit note")
+doAssert routes.title() == "Edit note"
+doAssert not route.match("/users/{id}")
+doAssert route.param("id") == "42",
+  "a failed match should leave the last successful parameters intact"
+
+let escapedRoute = ui.newRouter("/files/a%2Fb").route()
+doAssert escapedRoute.match("/files/{name}")
+doAssert escapedRoute.param("name") == "a/b"
+let emptyRest = ui.newRouter("/files").route()
+doAssert emptyRest.match("/files/{path...}")
+doAssert emptyRest.param("path") == ""
+var badRestPatternRejected = false
+try:
+  discard route.match("/{rest...}/edit")
+except ValueError:
+  badRestPatternRejected = true
+doAssert badRestPatternRejected
+
 let branch = ui.newRouter("/one")
 branch.push("/two")
 branch.push("/three")

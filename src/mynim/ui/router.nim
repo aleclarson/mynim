@@ -1,12 +1,21 @@
 ## URL history state for the native UI Router.
 
 type
-  RouteEntry = object
-    location: string
+  RouteEntry = ref object
+    location, title: string
 
   Router* = ref object
     entries: seq[RouteEntry]
     at: int
+
+  RouteParam = tuple[name, value: string]
+
+  Route* = ref object
+    router: Router
+    entry: RouteEntry
+    segments: seq[string]
+    params, baseParams: seq[RouteParam]
+    rest: int
 
 const routerHistoryLimit = 100
 
@@ -20,6 +29,20 @@ proc pathOf(location: string): string =
     if path.len == 0: "/" else: path
   except ValueError:
     "/"
+
+proc pathParts(path: string): seq[string] =
+  let clean = path.strip(chars = {'/'})
+  if clean.len > 0:
+    result = clean.split('/')
+
+proc segmentsOf(location: string): seq[string] =
+  var parsed: uri.Uri
+  try:
+    parsed = uri.parseUri(location)
+  except ValueError:
+    return
+  for part in pathParts(parsed.path):
+    result.add(uri.decodeUrl(part, decodePlus = false))
 
 proc escapeUriPart(value: string; query: bool): string =
   var i = 0
@@ -125,6 +148,84 @@ proc newRouter*(initialPath = "/"): Router =
   ## Creates a URL history showing initialPath.
   new(result)
   result.replace(initialPath)
+
+proc route*(router: Router): Route =
+  ## Returns a route for the current location, for matching path patterns.
+  let entry = router.current()
+  new(result)
+  result.router = router
+  result.entry = entry
+  result.segments = segmentsOf(entry.location)
+  result.rest = -1
+
+func path*(route: Route): string =
+  ## Returns the route path, without query; escaped slashes stay in their part
+  ## for matching and are decoded in this display value.
+  if route == nil: "/" else: "/" & route.segments.join("/")
+
+proc match*(route: Route; pattern: string): bool =
+  ## Matches exact path segments, `{name}` wildcards, or a final `{name...}`
+  ## wildcard that takes the remaining path. Failed matches keep prior params.
+  if route == nil:
+    return false
+  let parts = pathParts(pattern)
+  var params: seq[RouteParam]
+  for index, part in parts:
+    if part.len >= 2 and part[0] == '{' and part[^1] == '}':
+      let name = part[1..^2]
+      if name.endsWith("..."):
+        if index != parts.high:
+          raise newException(ValueError,
+            "ui: {" & name & "} does not end the pattern " & pattern)
+        let wildcardName = if name.len <= 3: "" else: name[0..<name.len - 3]
+        let firstRest = min(index, route.segments.len)
+        params.add((wildcardName,
+          route.segments[firstRest..<route.segments.len].join("/")))
+        route.params = params
+        route.rest = min(index, route.segments.len)
+        return true
+      if index >= route.segments.len:
+        return false
+      params.add((name, route.segments[index]))
+    elif index >= route.segments.len or route.segments[index] != part:
+      return false
+  if parts.len != route.segments.len:
+    return false
+  route.params = params
+  route.rest = -1
+  true
+
+func param*(route: Route; name: string): string =
+  ## Returns a wildcard value from the last successful match.
+  if route == nil:
+    return ""
+  for params in [route.params, route.baseParams]:
+    if params.len > 0:
+      for index in countdown(params.high, 0):
+        if params[index].name == name:
+          return params[index].value
+
+proc query*(route: Route; name: string): string =
+  ## Returns the first decoded value for a query parameter in this route.
+  if route == nil or route.entry == nil:
+    return ""
+  var parsed: uri.Uri
+  try:
+    parsed = uri.parseUri(route.entry.location)
+  except ValueError:
+    return ""
+  for key, value in uri.decodeQuery(parsed.query):
+    if key == name:
+      return value
+
+proc title*(route: Route; title: string) =
+  ## Sets this page's title for history controls and accessibility.
+  if route != nil and route.entry != nil:
+    route.entry.title = title
+
+func title*(router: Router): string =
+  ## Returns the title set by the current route view.
+  if router == nil: "" else: router.current().title
 
 proc push*(router: Router; target: string) =
   ## Navigates to target and adds a history entry; relative paths use the
