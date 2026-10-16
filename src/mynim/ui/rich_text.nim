@@ -69,3 +69,25 @@ proc richText*(c: Context; spans: varargs[Span]): Element =
     ending += span.text.runeLen
     node.textSpanEnds.add(ending)
   node.textSpanStyles = encodeRichTextSpans(node.textSpans)
+
+proc measureText*(c: Context; width: float32; spans: varargs[Span]):
+    tuple[width, height: float32] =
+  ## Measures styled spans in DIPs; zero width wraps only at newlines.
+  if c == nil or c.owner == nil or c.owner.closed or not c.owner.inBuild:
+    return
+  var text = ""
+  var normalized = newSeqOfCap[Span](spans.len)
+  for source in spans:
+    let span = normalizeRichTextSpan(source)
+    normalized.add(span)
+    text.add(span.text)
+  var style: textStack.Style
+  if c.themeEnabled:
+    if c.theme.font.len > 0:
+      style.family = c.theme.font
+    style.size = c.theme.fontSize
+  let shaped = textStack.shared().layout(textStack.Params(
+    text: text, style: style,
+    width: if width.finiteRichText: max(width, 0'f32) else: 0'f32,
+    spans: encodeRichTextSpans(normalized)))
+  (shaped.width, shaped.height)
