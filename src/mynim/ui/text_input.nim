@@ -1,5 +1,7 @@
 ## Bound single-line text fields backed by the platform text-input client.
 
+const maxTextUndoSteps = 200
+
 type
   TextAreaUndoEntry = object
     before, after: TextSnapshot
@@ -142,7 +144,7 @@ proc recordTextFieldEdit(client: TextFieldClient; before, after: string;
     client.textUndo.add(TextFieldUndoEntry(before: before, after: after,
       beforeAnchor: beforeAnchor, beforeCaret: beforeCaret,
       afterAnchor: client.anchor, afterCaret: client.caret))
-  if client.textUndo.len > 200:
+  if client.textUndo.len > maxTextUndoSteps:
     client.textUndo.delete(0)
   client.textRedo.setLen(0)
   client.textUndoGroupOpen = groupable
@@ -224,6 +226,8 @@ proc recordAreaEdit(client: TextFieldClient; before, after: TextSnapshot;
     client.areaUndo.add(TextAreaUndoEntry(before: before, after: after,
       beforeAnchor: beforeAnchor, beforeCaret: beforeCaret,
       afterAnchor: client.anchor, afterCaret: client.caret))
+  if client.areaUndo.len > maxTextUndoSteps:
+    client.areaUndo.delete(0)
   client.areaRedo.setLen(0)
   client.areaUndoGroupOpen = groupable
 
