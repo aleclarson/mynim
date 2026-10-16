@@ -79,6 +79,12 @@ type
     generation: uint32
     initialized: bool
 
+  StepperRepeat = object
+    started: MonoTime
+    repeats: int64
+    direction: int8
+    initialized: bool
+
   ElementOwner = ref object
     nodes: seq[ElementNode]
     idSlots: Table[uint64, int]
@@ -89,6 +95,7 @@ type
     actions: seq[UiAction]
     pendingNotices: Table[uint64, uint8]
     pendingSliderValues: Table[uint64, float64]
+    stepperRepeats: Table[uint64, StepperRepeat]
     pendingTextCallbacks: Table[uint64, seq[proc() {.closure.}]]
     pendingTextSubmitCallbacks: Table[uint64, seq[proc() {.closure.}]]
     textInputClients: Table[uint64, platform.TextInputClient]
@@ -192,7 +199,7 @@ type
     hasText, textNoWrap, textColorSet, textOverlay, listRowSelected,
       listRowFocusVisible, listRowHeader, listRowPinnedHeader: bool
     listRowAction: bool
-    slider, sliderVertical, rating: bool
+    slider, sliderVertical, rating, stepper: bool
     sliderLow, sliderHigh, sliderValue, sliderStep: float64
     hasAccessRange: bool
     accessMin, accessMax, accessNow: float64
@@ -367,6 +374,7 @@ proc newContext*(): Context =
   result.owner.keyedSeen = initHashSet[string]()
   result.owner.pendingNotices = initTable[uint64, uint8]()
   result.owner.pendingSliderValues = initTable[uint64, float64]()
+  result.owner.stepperRepeats = initTable[uint64, StepperRepeat]()
   result.owner.pendingTextCallbacks =
     initTable[uint64, seq[proc() {.closure.}]]()
   result.owner.pendingTextSubmitCallbacks =
@@ -702,6 +710,7 @@ proc retire(owner: ElementOwner) =
   owner.actions = @[]
   owner.pendingNotices.clear()
   owner.pendingSliderValues.clear()
+  owner.stepperRepeats.clear()
   owner.pendingTextCallbacks.clear()
   owner.pendingTextSubmitCallbacks.clear()
   owner.textInputClients.clear()
@@ -1003,6 +1012,7 @@ proc build*(c: Context; view: proc(c: Context) {.closure.}) =
     c.owner.keyedSeen = initHashSet[string]()
     c.owner.pendingNotices = initTable[uint64, uint8]()
     c.owner.pendingSliderValues = initTable[uint64, float64]()
+    c.owner.stepperRepeats = initTable[uint64, StepperRepeat]()
     c.owner.pendingTextCallbacks =
       initTable[uint64, seq[proc() {.closure.}]]()
     c.owner.pendingTextSubmitCallbacks =
@@ -1091,6 +1101,14 @@ proc build*(c: Context; view: proc(c: Context) {.closure.}) =
         staleKeyframes.add(identity)
     for identity in staleKeyframes:
       c.owner.keyframes.del(identity)
+    var staleStepperRepeats: seq[uint64]
+    for identity in c.owner.stepperRepeats.keys:
+      let slot = c.owner.idSlots.getOrDefault(identity, -1)
+      if slot <= 0 or slot >= c.owner.nodes.len or
+          not c.owner.nodes[slot].stepper:
+        staleStepperRepeats.add(identity)
+    for identity in staleStepperRepeats:
+      c.owner.stepperRepeats.del(identity)
     built = true
   finally:
     c.owner.inBuild = false

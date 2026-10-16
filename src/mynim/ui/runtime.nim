@@ -1232,7 +1232,7 @@ proc queueSliderPointer(rt: Runtime; slot: int;
       classify(rt.pointerY) in {fcNan, fcInf, fcNegInf}:
     return false
   let node = owner.nodes[slot]
-  if node.rating and not activateRating:
+  if node.stepper or (node.rating and not activateRating):
     return false
   let bounds = layout.rects[slot]
   var fraction: float32
@@ -1284,6 +1284,24 @@ proc sliderKey(rt: Runtime; key: platform.Key;
   let step = if node.sliderStep > 0: node.sliderStep else: range / 100
   let pageStep = max(step, range / 10)
   var value = current
+  if node.stepper:
+    case key
+    of platform.keyLeft:
+      value += (if node.rightToLeft: step else: -step)
+    of platform.keyRight:
+      value += (if node.rightToLeft: -step else: step)
+    of platform.keyDown:
+      value -= step
+    of platform.keyUp:
+      value += step
+    of platform.keyHome:
+      value = node.sliderLow
+    of platform.keyEnd:
+      value = node.sliderHigh
+    else:
+      return false
+    discard rt.queueSliderValue(rt.focusSlot, value)
+    return true
   case key
   of platform.keyLeft:
     value += (if node.rightToLeft and not node.sliderVertical: step else: -step)
