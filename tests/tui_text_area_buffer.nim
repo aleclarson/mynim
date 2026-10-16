@@ -212,5 +212,18 @@ doAssert native.send(platform.SurfaceEvent(kind: platform.keyPressed,
 doAssert native.frame()
 doAssert $buffer == "AeZ"
 
+compositionClient.setMarkedText(nil, "",
+  platform.TextRange(start: 0, `end`: 0))
+compositionClient.unmarkText()
+doAssert $buffer == "AeZ"
+doAssert native.send(platform.SurfaceEvent(kind: platform.keyPressed,
+  key: platform.keyZ, mods: platform.modSuper))
+doAssert native.frame()
+doAssert $buffer == "AéZ"
+doAssert native.send(platform.SurfaceEvent(kind: platform.keyPressed,
+  key: platform.keyZ, mods: platform.modSuper or platform.modShift))
+doAssert native.frame()
+doAssert $buffer == "AeZ"
+
 win.destroy()
 loop.shutdown()
