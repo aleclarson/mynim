@@ -2813,6 +2813,122 @@ proc event(rt: Runtime; ev: platform.SurfaceEvent): bool =
         rt.pressedSlots != previousPressed:
       rt.requestFrame()
     return result
+  of platform.fileDragOver:
+    let previous = rt.context.owner.fileOverIdentity
+    let previousHover = rt.hoverSlots
+    rt.pointerX = float32(ev.x)
+    rt.pointerY = float32(ev.y)
+    rt.hasPointer = true
+    let slot = rt.frameLayout.fileDropTargetAt(rt.pointerX, rt.pointerY)
+    let identity = if slot > 0:
+        rt.frameLayout.owner.nodes[slot].identity
+      else:
+        0'u64
+    rt.context.owner.fileOverIdentity = identity
+    rt.refreshPointer()
+    if previous != identity or previousHover != rt.hoverSlots:
+      rt.requestFrame()
+    identity != 0
+  of platform.fileDragLeave:
+    if rt.context.owner.fileOverIdentity != 0:
+      rt.context.owner.fileOverIdentity = 0
+      rt.requestFrame()
+    false
+  of platform.fileDrop:
+    rt.context.owner.fileOverIdentity = 0
+    rt.pointerX = float32(ev.x)
+    rt.pointerY = float32(ev.y)
+    rt.hasPointer = true
+    let slot = rt.frameLayout.fileDropTargetAt(rt.pointerX, rt.pointerY)
+    if slot <= 0 or ev.files.len == 0:
+      return false
+    let identity = rt.frameLayout.owner.nodes[slot].identity
+    if rt.context.owner.pendingFileDrops.hasKey(identity):
+      rt.context.owner.pendingFileDrops[identity].add(ev.files)
+    else:
+      rt.context.owner.pendingFileDrops[identity] = @(ev.files)
+    rt.context.owner.pendingDropGeneration = rt.context.owner.generation + 1
+    rt.requestFrame()
+    true
+  of platform.dataDragOver:
+    let owner = rt.frameLayout.owner
+    if owner == nil or ev.drag == nil:
+      if ev.drag != nil:
+        ev.drag.operation = transfer.None
+        ev.drag.formats = @[]
+      return false
+    let previousHover = rt.hoverSlots
+    rt.pointerX = float32(ev.x)
+    rt.pointerY = float32(ev.y)
+    rt.hasPointer = true
+    let target = rt.frameLayout.dataDropTargetAt(rt.pointerX, rt.pointerY,
+      ev.drag)
+    let identity = if target.slot > 0:
+        owner.nodes[target.slot].identity
+      else:
+        0'u64
+    let offerChanged = owner.dataOverOffer.formats != ev.drag.offer.formats or
+      owner.dataOverOffer.operations != ev.drag.offer.operations or
+      owner.dataOverOffer.suggested != ev.drag.offer.suggested
+    let changed = owner.dataOverIdentity != identity or offerChanged
+    owner.dataOverIdentity = identity
+    if identity != 0:
+      owner.dataOverOffer = ev.drag.offer
+      owner.dataOverOffer.formats = @(ev.drag.offer.formats)
+      ev.drag.operation = target.operation
+      ev.drag.formats = target.formats
+    else:
+      owner.dataOverOffer = transfer.Offer()
+      ev.drag.operation = transfer.None
+      ev.drag.formats = @[]
+    rt.refreshPointer()
+    if changed or previousHover != rt.hoverSlots:
+      rt.requestFrame()
+    identity != 0
+  of platform.dataDragLeave:
+    let owner = rt.context.owner
+    if owner.dataOverIdentity != 0 or owner.fileOverIdentity != 0:
+      owner.dataOverIdentity = 0
+      owner.fileOverIdentity = 0
+      owner.dataOverOffer = transfer.Offer()
+      rt.requestFrame()
+    false
+  of platform.dataDrop:
+    let owner = rt.frameLayout.owner
+    if owner == nil:
+      if ev.drag != nil:
+        ev.drag.operation = transfer.None
+        ev.drag.formats = @[]
+      return false
+    owner.dataOverIdentity = 0
+    owner.dataOverOffer = transfer.Offer()
+    if ev.drag == nil:
+      return false
+    rt.pointerX = float32(ev.x)
+    rt.pointerY = float32(ev.y)
+    rt.hasPointer = true
+    let target = rt.frameLayout.dataDropTargetAt(rt.pointerX, rt.pointerY,
+      ev.drag)
+    if target.slot <= 0:
+      ev.drag.operation = transfer.None
+      ev.drag.formats = @[]
+      rt.requestFrame()
+      return false
+    let (data, err) = ev.drag.data.materialize(target.formats)
+    if err != nil:
+      ev.drag.operation = transfer.None
+      ev.drag.formats = @[]
+      rt.requestFrame()
+      return false
+    let identity = owner.nodes[target.slot].identity
+    owner.pendingDataDrops[identity] = transfer.Drop(data: data,
+      operation: target.operation)
+    owner.pendingDropGeneration = owner.generation + 1
+    ev.drag.operation = target.operation
+    ev.drag.formats = target.formats
+    rt.refreshPointer()
+    rt.requestFrame()
+    true
   of platform.surfaceBlur:
     let previousPressed = rt.pressedSlots
     let previousFocusVisible = rt.keyboardFocusVisible

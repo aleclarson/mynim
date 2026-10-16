@@ -227,6 +227,11 @@ type
     colorMotions: Table[uint64, Table[string, ColorMotion]]
     keyframes: Table[uint64, Table[string, ScalarSequence]]
     findBarStates: Table[uint64, FindBarState]
+    pendingDataDrops: Table[uint64, transfer.Drop]
+    pendingFileDrops: Table[uint64, seq[string]]
+    dataOverIdentity, fileOverIdentity: uint64
+    dataOverOffer: transfer.Offer
+    pendingDropGeneration: uint32
     routers: seq[Router]
     frameNow: MonoTime
     committedRects: seq[Rect]
@@ -393,6 +398,8 @@ type
     treeAccessAction: TreeAccessAction
     treeAccessFocus: TreeAccessFocus
     textInputHandler: proc(text: string) {.closure.}
+    dropDataTarget, fileDropTarget: bool
+    dropDataOptions: transfer.DropOptions
     tableState: ListState
     tableColumnId: string
     tableColumnIndex: int
@@ -568,6 +575,8 @@ proc newContext*(): Context =
   result.owner.keyframes =
     initTable[uint64, Table[string, ScalarSequence]]()
   result.owner.findBarStates = initTable[uint64, FindBarState]()
+  result.owner.pendingDataDrops = initTable[uint64, transfer.Drop]()
+  result.owner.pendingFileDrops = initTable[uint64, seq[string]]()
   result.accordionHeaders = initTable[uint64, seq[uint64]]()
   result.theme = lightTheme()
 
@@ -922,6 +931,12 @@ proc retire(owner: ElementOwner) =
   owner.colorMotions.clear()
   owner.keyframes.clear()
   owner.findBarStates.clear()
+  owner.pendingDataDrops.clear()
+  owner.pendingFileDrops.clear()
+  owner.dataOverIdentity = 0
+  owner.fileOverIdentity = 0
+  owner.dataOverOffer = transfer.Offer()
+  owner.pendingDropGeneration = 0
   owner.committedRects = @[]
   owner.lastBounds.clear()
   owner.trackedBounds.clear()
@@ -1282,6 +1297,8 @@ proc build*(c: Context; view: proc(c: Context) {.closure.}) =
     c.owner.keyframes =
       initTable[uint64, Table[string, ScalarSequence]]()
     c.owner.findBarStates = initTable[uint64, FindBarState]()
+    c.owner.pendingDataDrops = initTable[uint64, transfer.Drop]()
+    c.owner.pendingFileDrops = initTable[uint64, seq[string]]()
     c.accordion = nil
     c.accordionHeaders.clear()
   inc c.owner.generation
@@ -1330,6 +1347,17 @@ proc build*(c: Context; view: proc(c: Context) {.closure.}) =
         c.owner.actions[index].handle = nil
     for slot, node in c.owner.nodes:
       c.owner.idSlots[node.identity] = slot
+    if c.owner.dataOverIdentity != 0:
+      let slot = c.owner.idSlots.getOrDefault(c.owner.dataOverIdentity, -1)
+      if slot <= 0 or slot >= c.owner.nodes.len or
+          not c.owner.nodes[slot].dropDataTarget:
+        c.owner.dataOverIdentity = 0
+        c.owner.dataOverOffer = transfer.Offer()
+    if c.owner.fileOverIdentity != 0:
+      let slot = c.owner.idSlots.getOrDefault(c.owner.fileOverIdentity, -1)
+      if slot <= 0 or slot >= c.owner.nodes.len or
+          not c.owner.nodes[slot].fileDropTarget:
+        c.owner.fileOverIdentity = 0
     c.owner.identityParents.clear()
     for node in c.owner.nodes:
       if node.parent >= 0:
@@ -1447,6 +1475,10 @@ proc build*(c: Context; view: proc(c: Context) {.closure.}) =
     c.owner.pendingNotices.clear()
     c.owner.pendingTextCallbacks.clear()
     c.owner.pendingTextSubmitCallbacks.clear()
+    if c.owner.pendingDropGeneration == c.owner.generation:
+      c.owner.pendingDataDrops.clear()
+      c.owner.pendingFileDrops.clear()
+      c.owner.pendingDropGeneration = 0
     if built:
       c.owner.pendingSliderValues.clear()
       c.owner.pendingColorPlanes.clear()

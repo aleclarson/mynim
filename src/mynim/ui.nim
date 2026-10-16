@@ -8,6 +8,7 @@ import mynim/internal/scene as scene
 import mynim/internal/platform
 import mynim/internal/surface
 import mynim/internal/raster as raster
+import mynim/transfer as transfer
 import mynim/internal/text as textStack
 import mynim/i18n as i18n
 import mynim/internal/l10n as l10n
@@ -70,5 +71,6 @@ include mynim/ui/dialog
 include mynim/ui/combobox
 include mynim/ui/toast
 include mynim/ui/findbar
+include mynim/ui/drop
 include mynim/ui/router_view
 include mynim/ui/runtime
