@@ -80,7 +80,8 @@ proc shapeText(nodes: var seq[ElementNode]) =
       else:
         textStack.Start
     node.shapedText = system.layout(textStack.Params(text: node.textValue,
-      style: node.textStyle, align: alignment, rtl: node.rightToLeft,
+      style: node.textStyle, maxLines: node.textMaxLines,
+      align: alignment, rtl: node.rightToLeft,
       keepSpaces: true, noWrap: node.textNoWrap))
 
 proc shapeTextToBounds(nodes: var seq[ElementNode]; rects: seq[Rect]): bool =

@@ -49,6 +49,7 @@ include mynim/ui/table
 include mynim/ui/outline
 include mynim/ui/tree
 include mynim/ui/form
+include mynim/ui/breadcrumb
 include mynim/ui/search_field
 include mynim/ui/tooltip
 include mynim/ui/runtime

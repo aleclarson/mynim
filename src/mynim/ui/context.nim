@@ -210,6 +210,7 @@ type
     # Overlay text is painted but excluded from the node's natural size.
     hasText, textNoWrap, textColorSet, textOverlay, listRowSelected,
       listRowFocusVisible, listRowHeader, listRowPinnedHeader: bool
+    textMaxLines: int
     listRowAction: bool
     slider, sliderVertical, rating, stepper, rangeSlider,
       rangeSliderThumb: bool
