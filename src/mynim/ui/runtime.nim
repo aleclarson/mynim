@@ -427,7 +427,7 @@ proc accessibilityTree(layout: LayoutResult;
       else:
         platform.roleGroup
     var label = node.label
-    if label.len == 0 and node.hasText:
+    if label.len == 0 and node.hasText and not node.textOverlay:
       label = node.textValue
     let parentSlot = int(node.parent)
     let parent = if parentSlot >= 0: accessIndex[parentSlot] else: -1
@@ -453,6 +453,7 @@ proc accessibilityTree(layout: LayoutResult;
       let (value, _) = node.textClient.textForRange(platform.TextRange(
         start: 0, `end`: high(int)))
       accessible.value = value
+      accessible.placeholder = node.placeholder
       if node.textClient of TextFieldClient and
           TextFieldClient(node.textClient).readOnly:
         accessible.states = accessible.states or platform.accessReadOnly

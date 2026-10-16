@@ -161,8 +161,9 @@ type
     clipX, clipY, hasFollowScroll: bool
     followScrollSlot: int32
     gridCol, gridRow, gridColSpan, gridRowSpan: int
-    hasText, textNoWrap, textColorSet, listRowSelected, listRowFocusVisible,
-      listRowHeader, listRowPinnedHeader: bool
+    # Overlay text is painted but excluded from the node's natural size.
+    hasText, textNoWrap, textColorSet, textOverlay, listRowSelected,
+      listRowFocusVisible, listRowHeader, listRowPinnedHeader: bool
     listRowAction: bool
     slider, sliderVertical: bool
     sliderLow, sliderHigh, sliderValue, sliderStep: float64
@@ -171,6 +172,7 @@ type
       valueChangedInBuild: bool
     label: string
     textValue: string
+    placeholder: string
     textStyle: textStack.Style
     textColor, textSelectionColor: Color
     shapedText: textStack.Layout

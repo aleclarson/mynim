@@ -549,7 +549,7 @@ proc measureTree(nodes: seq[ElementNode]; natural: var seq[NaturalSize];
     let previous = natural[slot]
     let node = nodes[slot]
     var contentW, contentH: float32
-    if node.hasText and node.shapedText != nil:
+    if node.hasText and not node.textOverlay and node.shapedText != nil:
       contentW = node.shapedText.width
       contentH = node.shapedText.height
     if node.bitmap != nil and node.bitmap.image != nil:

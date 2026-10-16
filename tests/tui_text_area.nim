@@ -13,15 +13,19 @@ app.handleReady()
 
 var areaText = "abc\ndef\nxyz"
 var baseText = "base\nvalue"
+var emptyText = ""
 var changeActions = 0
 var changedValues: seq[string]
 let uiContent = ui.newContent(proc(ctx: ui.Context) =
   discard ctx.textArea(areaText).size(180, 70).label("Document")
+    .placeholder("Document hint")
     .onChange(proc() =
       inc changeActions
       changedValues.add(areaText)
     )
   discard ctx.textAreaBase(baseText).size(180, 50).label("Base")
+  discard ctx.textArea(emptyText).size(180, 50).label("Empty")
+    .placeholder("Write something")
 )
 let win = newWindow(WindowOptions(width: 220, height: 150, hidden: true,
   content: uiContent))
@@ -34,6 +38,10 @@ for node in native.accessibility()[0].nodes:
   if node.role == platform.roleTextField and node.label == "Document":
     fieldId = node.id
     doAssert node.value == areaText
+    doAssert node.placeholder == "Document hint"
+  if node.role == platform.roleTextField and node.label == "Empty":
+    doAssert node.value.len == 0
+    doAssert node.placeholder == "Write something"
 doAssert fieldId != 0
 doAssert native.send(platform.SurfaceEvent(kind: platform.accessAction,
   id: fieldId, action: platform.accessFocus))

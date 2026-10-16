@@ -482,6 +482,7 @@ proc finishTextField(c: Context; e: Element; client: TextFieldClient) =
     else:
       c.theme.text
   node[].textColorSet = true
+  node[].placeholder = client.placeholder
   node[].textStyle.family = c.theme.font
   node[].textStyle.size = c.theme.fontSize
   node[].clipX = true
@@ -514,6 +515,20 @@ proc initializeTextArea(client: TextFieldClient; buffer: TextBuffer) =
   client.areaStringBound = false
   client.areaStringChanged = false
   client.areaStringValue.setLen(0)
+
+proc updateTextAreaPlaceholder(client: TextFieldClient; e: Element) =
+  let node = e.node
+  if node == nil:
+    return
+  let show = client.bufferSnapshot.len() == 0 and client.placeholder.len > 0
+  node[].placeholder = client.placeholder
+  node[].hasText = show
+  node[].textOverlay = show
+  node[].textNoWrap = false
+  node[].textValue = if show: client.placeholder else: ""
+  if show:
+    node[].textColor = client.placeholderColor
+    node[].textColorSet = true
 
 proc textInputBase*(c: Context; value: var string): Element =
   ## Creates an unstyled single-line text field. It copies native edits into
@@ -615,6 +630,7 @@ proc textAreaCore(c: Context; buffer: TextBuffer;
   node[].textSelectionColor = c.theme.selection
   client.style = node[].textStyle
   client.rightToLeft = node[].rightToLeft
+  client.placeholderColor = c.theme.textMuted
   if client.areaLineHeight <= 0:
     let sample = textStack.shared().layout(textStack.Params(text: " ",
       style: client.style, keepSpaces: true, rtl: client.rightToLeft))
@@ -624,8 +640,7 @@ proc textAreaCore(c: Context; buffer: TextBuffer;
   client.prepareAreaWindow(viewportHeight)
   node[].textClient = client
   node[].focusable = true
-  node[].hasText = false
-  node[].textValue.setLen(0)
+  client.updateTextAreaPlaceholder(result)
   node[].scrollY = true
   node[].scrollState = client.areaScroll
   node[].clipX = true
@@ -713,7 +728,10 @@ proc placeholder*(e: Element; value: string): Element =
   let node = e.node
   if client != nil and node != nil:
     client.placeholder = value
-    if client.text.len == 0:
+    node[].placeholder = value
+    if client.multiline:
+      client.updateTextAreaPlaceholder(e)
+    elif client.text.len == 0:
       node[].textValue = value
       node[].textColor = client.placeholderColor
       node[].textColorSet = true
