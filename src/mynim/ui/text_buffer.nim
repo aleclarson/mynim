@@ -90,6 +90,73 @@ proc slice*(buffer: TextBuffer; start, pastLast: int): string =
   ## Returns a clamped half-open rune range of the current document.
   buffer.snapshot().slice(start, pastLast)
 
+proc editorWordRune(rune: Rune): bool =
+  isAlpha(rune) or lookupGeneralCategory(int32(rune)) == Nd or
+    int32(rune) == ord('_')
+
+proc nextWordRune(snapshot: TextSnapshot; index: int): int =
+  ## Returns the end of the next word, skipping punctuation and whitespace.
+  const chunkRunes = 128
+  result = max(0, min(index, snapshot.len()))
+  var inWord = false
+  while result < snapshot.len():
+    let pastLast = min(result + chunkRunes, snapshot.len())
+    let chunk = snapshot.slice(result, pastLast)
+    for rune in chunk.runes:
+      if editorWordRune(rune):
+        inWord = true
+      elif inWord:
+        return
+      inc result
+
+proc prevWordRune(snapshot: TextSnapshot; index: int): int =
+  ## Returns the start of the preceding word, skipping punctuation and space.
+  const chunkRunes = 128
+  result = max(0, min(index, snapshot.len()))
+  var inWord = false
+  while result > 0:
+    let first = max(result - chunkRunes, 0)
+    var runes: seq[Rune]
+    for rune in snapshot.slice(first, result).runes:
+      runes.add(rune)
+    var i = runes.len
+    while i > 0:
+      dec i
+      if editorWordRune(runes[i]):
+        inWord = true
+      elif inWord:
+        return
+      result = first + i
+
+proc nextWordRune(text: string; index: int): int =
+  ## Returns the end of the next word in a short, materialized field.
+  var runes: seq[Rune]
+  for rune in text.runes:
+    runes.add(rune)
+  result = max(0, min(index, runes.len))
+  var inWord = false
+  while result < runes.len:
+    if editorWordRune(runes[result]):
+      inWord = true
+    elif inWord:
+      return
+    inc result
+
+proc prevWordRune(text: string; index: int): int =
+  ## Returns the start of the preceding word in a short, materialized field.
+  var runes: seq[Rune]
+  for rune in text.runes:
+    runes.add(rune)
+  result = max(0, min(index, runes.len))
+  var inWord = false
+  while result > 0:
+    let previous = result - 1
+    if editorWordRune(runes[previous]):
+      inWord = true
+    elif inWord:
+      return
+    result = previous
+
 proc `$`*(snapshot: TextSnapshot): string =
   ## Materializes the snapshot as UTF-8 text.
   snapshot.slice(0, snapshot.len())

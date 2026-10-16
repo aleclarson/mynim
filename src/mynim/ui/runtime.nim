@@ -918,6 +918,21 @@ proc textFieldCommand(rt: Runtime; command: string): bool =
   else:
     false
 
+when defined(macosx):
+  proc deleteToParagraphEnd(rt: Runtime; client: TextFieldClient): bool =
+    if client.readOnly:
+      return true
+    let current = client.fieldRuneIndex(client.caret)
+    let paragraph = client.fieldParagraphRange(current)
+    var pastLast = paragraph.`end`
+    if pastLast == current and pastLast < client.fieldRuneLen():
+      inc pastLast
+    if current < pastLast:
+      rt.editTextField(client, platform.TextRange(
+        start: client.fieldUtf16Offset(current),
+        `end`: client.fieldUtf16Offset(pastLast)), "")
+    true
+
 proc textFieldKey(rt: Runtime; key: platform.Key;
                   mods: platform.Modifiers): bool =
   let owner = rt.frameLayout.owner
@@ -929,6 +944,40 @@ proc textFieldKey(rt: Runtime; key: platform.Key;
   let client = TextFieldClient(rawClient)
   if client.hasMark:
     return true
+
+  let extend = (mods and platform.modShift) != 0
+  when defined(macosx):
+    let emacsBaseMods = mods and not platform.modShift
+    if emacsBaseMods == platform.modCtrl:
+      case key
+      of platform.keyA, platform.keyE:
+        client.fieldMoveParagraphEdge(key == platform.keyE, extend)
+        rt.keyboardFocusVisible = true
+        rt.updateTextInput()
+        rt.requestFrame()
+        return true
+      of platform.keyK:
+        return rt.deleteToParagraphEnd(client)
+      of platform.keyB:
+        return rt.textFieldKey(platform.keyLeft,
+          if extend: platform.modShift else: 0)
+      of platform.keyF:
+        return rt.textFieldKey(platform.keyRight,
+          if extend: platform.modShift else: 0)
+      of platform.keyP:
+        return rt.textFieldKey(platform.keyUp,
+          if extend: platform.modShift else: 0)
+      of platform.keyN:
+        return rt.textFieldKey(platform.keyDown,
+          if extend: platform.modShift else: 0)
+      of platform.keyH:
+        return rt.textFieldKey(platform.keyBackspace,
+          if extend: platform.modShift else: 0)
+      of platform.keyD:
+        return rt.textFieldKey(platform.keyDelete,
+          if extend: platform.modShift else: 0)
+      else:
+        discard
 
   let command = when defined(macosx): platform.modSuper else: platform.modCtrl
   if client.multiline and key == platform.keyZ and
@@ -961,8 +1010,7 @@ proc textFieldKey(rt: Runtime; key: platform.Key;
   elif mods == (command or platform.modShift) and key == platform.keyV:
     return rt.textFieldCommand("pasteAndMatchStyle")
 
-  if key == platform.keyA and
-      mods in {platform.modCtrl, platform.modSuper}:
+  if key == platform.keyA and mods == command:
     client.anchor = 0
     client.caret = client.fieldUtf16Len()
     client.areaHasDesiredX = false
@@ -971,12 +1019,50 @@ proc textFieldKey(rt: Runtime; key: platform.Key;
     rt.requestFrame()
     return true
 
-  let extend = mods == platform.modShift
-  if (mods == 0 or extend) and
-      (key in {platform.keyLeft, platform.keyRight, platform.keyHome,
-               platform.keyEnd} or
-       (client.multiline and key in {platform.keyUp, platform.keyDown})):
-    discard client.fieldMove(key, extend)
+  let baseMods = mods and not platform.modShift
+  let wordMods = when defined(macosx): platform.modAlt
+    else: platform.modCtrl
+  let wordMove = baseMods == wordMods
+  let lineMove = when defined(macosx): baseMods == platform.modSuper
+    else: false
+  if key in {platform.keyLeft, platform.keyRight} and
+      (baseMods == 0 or wordMove or lineMove):
+    if lineMove:
+      let current = client.fieldRuneIndex(client.caret)
+      let rtl = client.fieldCaretRightToLeft(current)
+      let forward = if rtl: key == platform.keyLeft
+        else: key == platform.keyRight
+      discard client.fieldMove(
+        if forward: platform.keyEnd else: platform.keyHome, extend)
+    else:
+      discard client.fieldMove(key, extend, byWord = wordMove)
+    rt.keyboardFocusVisible = true
+    rt.updateTextInput()
+    rt.requestFrame()
+    return true
+
+  if key in {platform.keyHome, platform.keyEnd} and
+      baseMods in {0'u8, platform.modCtrl}:
+    discard client.fieldMove(key, extend,
+      documentEdge = baseMods == platform.modCtrl)
+    rt.keyboardFocusVisible = true
+    rt.updateTextInput()
+    rt.requestFrame()
+    return true
+
+  let documentVertical = when defined(macosx):
+      baseMods == platform.modSuper and
+        key in {platform.keyUp, platform.keyDown}
+    else:
+      false
+  if key in {platform.keyUp, platform.keyDown} and
+      (baseMods == 0 or documentVertical):
+    if documentVertical:
+      discard client.fieldMove(
+        if key == platform.keyUp: platform.keyHome else: platform.keyEnd,
+        extend, documentEdge = true)
+    else:
+      discard client.fieldMove(key, extend)
     rt.keyboardFocusVisible = true
     rt.updateTextInput()
     rt.requestFrame()
@@ -994,11 +1080,16 @@ proc textFieldKey(rt: Runtime; key: platform.Key;
     rt.textInputAdapter.replaceText(replacement, "\n")
     return true
 
-  if (mods == 0 or extend) and
-      key in {platform.keyBackspace, platform.keyDelete}:
+  let wordDelete = baseMods == wordMods
+  let lineDelete = when defined(macosx): baseMods == platform.modSuper
+    else: false
+  if key in {platform.keyBackspace, platform.keyDelete} and
+      (baseMods == 0 or wordDelete or
+       (lineDelete and key == platform.keyBackspace)):
     if client.readOnly:
       return true
-    let (range, ok) = client.fieldDeleteRange(key)
+    let (range, ok) = client.fieldDeleteRange(key,
+      byWord = wordDelete, toLineStart = lineDelete)
     if not ok:
       return true
     if rt.textInputAdapter == nil:

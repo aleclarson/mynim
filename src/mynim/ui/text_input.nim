@@ -207,6 +207,32 @@ proc fieldUtf16Offset(client: TextFieldClient; rune: int): int =
   else:
     utf16UnitAtRune(client.text, rune)
 
+proc fieldWordBoundary(client: TextFieldClient; rune: int;
+                       forward: bool): int =
+  if client.multiline:
+    discard client.syncTextAreaBuffer()
+    if forward:
+      return client.bufferSnapshot.nextWordRune(rune)
+    return client.bufferSnapshot.prevWordRune(rune)
+  if forward:
+    client.text.nextWordRune(rune)
+  else:
+    client.text.prevWordRune(rune)
+
+proc areaParagraphLayout(client: TextFieldClient; paragraph: int):
+    textStack.Layout
+
+proc fieldCaretRightToLeft(client: TextFieldClient; rune: int): bool =
+  if client.multiline:
+    discard client.syncTextAreaBuffer()
+    let paragraph = client.bufferSnapshot.lineAt(rune)
+    let layout = client.areaParagraphLayout(paragraph)
+    if layout.lines.len > 0:
+      return layout.lines[0].rtl
+  elif client.shaped != nil and client.shaped.lines.len > 0:
+    return client.shaped.lines[0].rtl
+  client.rightToLeft
+
 proc setAreaParagraphHeight(client: TextFieldClient; paragraph: int;
                             height: float32): bool =
   if paragraph < 0 or paragraph >= client.areaLineHeights.len:
@@ -902,7 +928,8 @@ proc fieldPointerSelection(client: TextFieldClient; x, y: float64;
   true
 
 proc fieldMove(client: TextFieldClient; key: platform.Key;
-               extend: bool): bool =
+               extend: bool; byWord = false;
+               documentEdge = false): bool =
   if client.multiline:
     client.areaUndoGroupOpen = false
     discard client.syncTextAreaBuffer()
@@ -911,7 +938,7 @@ proc fieldMove(client: TextFieldClient; key: platform.Key;
     let current = snapshot.runeOffset(client.caret)
     var nextRune = current
     var keepDesiredX = false
-    if not extend and selection.start != selection.`end` and
+    if not byWord and not extend and selection.start != selection.`end` and
         key in {platform.keyLeft, platform.keyRight}:
       let unit = if key == platform.keyLeft: selection.start
         else: selection.`end`
@@ -921,48 +948,58 @@ proc fieldMove(client: TextFieldClient; key: platform.Key;
       let lineRange = snapshot.lineRange(paragraph)
       let local = current - lineRange.start
       let layout = client.areaParagraphLayout(paragraph)
-      case key
-      of platform.keyLeft, platform.keyRight:
-        let direction = if key == platform.keyLeft: -1 else: 1
-        let moved = layout.moveCaret(textStack.CaretPosition(index: local,
-          affinity: textStack.Downstream), direction).index
-        nextRune = lineRange.start + moved
-        if moved == local and
-            (if direction < 0: current > 0 else: current < snapshot.len()):
-          nextRune = current + direction
+      if byWord:
+        let rtl = client.fieldCaretRightToLeft(current)
+        let forward = if rtl: key == platform.keyLeft
+          else: key == platform.keyRight
+        nextRune = client.fieldWordBoundary(current, forward)
         client.areaHasDesiredX = false
-      of platform.keyHome, platform.keyEnd:
-        let visualLine = layout.lineAt(local)
-        let target = layout.lines[visualLine]
-        nextRune = lineRange.start +
-          (if key == platform.keyHome: target.start else: target.`end`)
-        client.areaHasDesiredX = false
-      of platform.keyUp, platform.keyDown:
-        let visualLine = layout.lineAt(local)
-        if not client.areaHasDesiredX:
-          let (x, _, _) = layout.caret(local)
-          client.areaDesiredX = x
-          client.areaHasDesiredX = true
-        let direction = if key == platform.keyUp: -1 else: 1
-        var targetParagraph = paragraph
-        var targetLine = visualLine + direction
-        if targetLine < 0 and targetParagraph > 0:
-          dec targetParagraph
-          targetLine = client.areaParagraphLayout(targetParagraph).lines.high
-        elif targetLine >= layout.lines.len and
-            targetParagraph + 1 < snapshot.lineCount():
-          inc targetParagraph
-          targetLine = 0
-        let targetLayout = client.areaParagraphLayout(targetParagraph)
-        targetLine = max(0, min(targetLine, targetLayout.lines.high))
-        let targetMetrics = targetLayout.lines[targetLine]
-        let targetLocal = targetLayout.indexAt(client.areaDesiredX,
-          targetMetrics.y + targetMetrics.height / 2)
-        let targetRange = snapshot.lineRange(targetParagraph)
-        nextRune = targetRange.start + targetLocal
-        keepDesiredX = true
       else:
-        return false
+        case key
+        of platform.keyLeft, platform.keyRight:
+          let direction = if key == platform.keyLeft: -1 else: 1
+          let moved = layout.moveCaret(textStack.CaretPosition(index: local,
+            affinity: textStack.Downstream), direction).index
+          nextRune = lineRange.start + moved
+          if moved == local and
+              (if direction < 0: current > 0 else: current < snapshot.len()):
+            nextRune = current + direction
+          client.areaHasDesiredX = false
+        of platform.keyHome, platform.keyEnd:
+          if documentEdge:
+            nextRune = if key == platform.keyHome: 0 else: snapshot.len()
+          else:
+            let visualLine = layout.lineAt(local)
+            let target = layout.lines[visualLine]
+            nextRune = lineRange.start +
+              (if key == platform.keyHome: target.start else: target.`end`)
+          client.areaHasDesiredX = false
+        of platform.keyUp, platform.keyDown:
+          let visualLine = layout.lineAt(local)
+          if not client.areaHasDesiredX:
+            let (x, _, _) = layout.caret(local)
+            client.areaDesiredX = x
+            client.areaHasDesiredX = true
+          let direction = if key == platform.keyUp: -1 else: 1
+          var targetParagraph = paragraph
+          var targetLine = visualLine + direction
+          if targetLine < 0 and targetParagraph > 0:
+            dec targetParagraph
+            targetLine = client.areaParagraphLayout(targetParagraph).lines.high
+          elif targetLine >= layout.lines.len and
+              targetParagraph + 1 < snapshot.lineCount():
+            inc targetParagraph
+            targetLine = 0
+          let targetLayout = client.areaParagraphLayout(targetParagraph)
+          targetLine = max(0, min(targetLine, targetLayout.lines.high))
+          let targetMetrics = targetLayout.lines[targetLine]
+          let targetLocal = targetLayout.indexAt(client.areaDesiredX,
+            targetMetrics.y + targetMetrics.height / 2)
+          let targetRange = snapshot.lineRange(targetParagraph)
+          nextRune = targetRange.start + targetLocal
+          keepDesiredX = true
+        else:
+          return false
     nextRune = max(0, min(nextRune, snapshot.len()))
     let next = snapshot.utf16Offset(nextRune)
     if not extend:
@@ -975,32 +1012,76 @@ proc fieldMove(client: TextFieldClient; key: platform.Key;
 
   let selection = client.fieldRange()
   var nextRune: int
-  if not extend and selection.start != selection.`end` and
+  if not byWord and not extend and selection.start != selection.`end` and
       key in {platform.keyLeft, platform.keyRight}:
     let unit = if key == platform.keyLeft: selection.start else: selection.`end`
     nextRune = runeIndexAtUtf16(client.text, unit)
   else:
     let current = runeIndexAtUtf16(client.text, client.caret)
-    case key
-    of platform.keyLeft:
-      nextRune = client.shaped.moveCaret(
-        textStack.CaretPosition(index: current, affinity: textStack.Downstream), -1).index
-    of platform.keyRight:
-      nextRune = client.shaped.moveCaret(
-        textStack.CaretPosition(index: current, affinity: textStack.Downstream), 1).index
-    of platform.keyHome:
-      nextRune = 0
-    of platform.keyEnd:
-      nextRune = client.text.runeLen
+    if byWord:
+      let rtl = client.fieldCaretRightToLeft(current)
+      let forward = if rtl: key == platform.keyLeft
+        else: key == platform.keyRight
+      nextRune = client.fieldWordBoundary(current, forward)
     else:
-      return false
+      case key
+      of platform.keyLeft:
+        nextRune = client.shaped.moveCaret(
+          textStack.CaretPosition(index: current,
+            affinity: textStack.Downstream), -1).index
+      of platform.keyRight:
+        nextRune = client.shaped.moveCaret(
+          textStack.CaretPosition(index: current,
+            affinity: textStack.Downstream), 1).index
+      of platform.keyHome:
+        nextRune = 0
+      of platform.keyEnd:
+        nextRune = client.text.runeLen
+      of platform.keyUp:
+        nextRune = 0
+      of platform.keyDown:
+        nextRune = client.text.runeLen
+      else:
+        return false
   let next = utf16UnitAtRune(client.text, nextRune)
   if not extend:
     client.anchor = next
   client.caret = next
   true
 
-proc fieldDeleteRange(client: TextFieldClient; key: platform.Key):
+proc fieldVisualLineRange(client: TextFieldClient; rune: int):
+    tuple[start, `end`: int] =
+  if client.multiline:
+    discard client.syncTextAreaBuffer()
+    let paragraph = client.bufferSnapshot.lineAt(rune)
+    let lineRange = client.bufferSnapshot.lineRange(paragraph)
+    let local = rune - lineRange.start
+    let layout = client.areaParagraphLayout(paragraph)
+    let line = layout.lines[layout.lineAt(local)]
+    return (lineRange.start + line.start, lineRange.start + line.`end`)
+  (0, client.text.runeLen)
+
+when defined(macosx):
+  proc fieldParagraphRange(client: TextFieldClient; rune: int):
+      tuple[start, `end`: int] =
+    if client.multiline:
+      discard client.syncTextAreaBuffer()
+      return client.bufferSnapshot.lineRange(client.bufferSnapshot.lineAt(rune))
+    (0, client.text.runeLen)
+
+  proc fieldMoveParagraphEdge(client: TextFieldClient; toEnd, extend: bool) =
+    let current = client.fieldRuneIndex(client.caret)
+    let paragraph = client.fieldParagraphRange(current)
+    let rune = if toEnd: paragraph.`end` else: paragraph.start
+    let unit = client.fieldUtf16Offset(rune)
+    if not extend:
+      client.anchor = unit
+    client.caret = unit
+    client.areaHasDesiredX = false
+    client.revealAreaCaret()
+
+proc fieldDeleteRange(client: TextFieldClient; key: platform.Key;
+                      byWord = false; toLineStart = false):
     tuple[r: platform.TextRange, ok: bool] =
   result.r = client.fieldRange()
   if result.r.start != result.r.`end`:
@@ -1012,17 +1093,23 @@ proc fieldDeleteRange(client: TextFieldClient; key: platform.Key):
     let current = snapshot.runeOffset(client.caret)
     if current < 0 or current > snapshot.len():
       return
-    let direction = if key == platform.keyBackspace: -1 else: 1
-    let paragraph = snapshot.lineAt(current)
-    let lineRange = snapshot.lineRange(paragraph)
-    let local = current - lineRange.start
-    let layout = client.areaParagraphLayout(paragraph)
-    let moved = layout.moveCaret(textStack.CaretPosition(index: local,
-      affinity: textStack.Downstream), direction).index
-    var next = lineRange.start + moved
-    if moved == local and
-        (if direction < 0: current > 0 else: current < snapshot.len()):
-      next = current + direction
+    var next: int
+    if toLineStart:
+      next = client.fieldVisualLineRange(current).start
+    elif byWord:
+      next = client.fieldWordBoundary(current, key == platform.keyDelete)
+    else:
+      let direction = if key == platform.keyBackspace: -1 else: 1
+      let paragraph = snapshot.lineAt(current)
+      let lineRange = snapshot.lineRange(paragraph)
+      let local = current - lineRange.start
+      let layout = client.areaParagraphLayout(paragraph)
+      let moved = layout.moveCaret(textStack.CaretPosition(index: local,
+        affinity: textStack.Downstream), direction).index
+      next = lineRange.start + moved
+      if moved == local and
+          (if direction < 0: current > 0 else: current < snapshot.len()):
+        next = current + direction
     if next == current:
       return
     let first = snapshot.utf16Offset(min(current, next))
@@ -1031,10 +1118,16 @@ proc fieldDeleteRange(client: TextFieldClient; key: platform.Key):
     result.ok = true
     return
   let current = runeIndexAtUtf16(client.text, client.caret)
-  let direction = if key == platform.keyBackspace: -1 else: 1
-  let next = client.shaped.moveCaret(
-    textStack.CaretPosition(index: current, affinity: textStack.Downstream),
-    direction).index
+  var next: int
+  if toLineStart:
+    next = 0
+  elif byWord:
+    next = client.fieldWordBoundary(current, key == platform.keyDelete)
+  else:
+    let direction = if key == platform.keyBackspace: -1 else: 1
+    next = client.shaped.moveCaret(
+      textStack.CaretPosition(index: current, affinity: textStack.Downstream),
+      direction).index
   if next == current:
     return
   let unit = utf16UnitAtRune(client.text, next)

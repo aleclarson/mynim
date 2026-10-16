@@ -97,8 +97,10 @@ doAssert $buffer == "abc\ndefQé\nxyz"
 doAssert native.frame()
 doAssert changeActions == 4
 
+let selectAllMods = when defined(macosx): platform.modSuper
+  else: platform.modCtrl
 doAssert native.send(platform.SurfaceEvent(kind: platform.keyPressed,
-  key: platform.keyA, mods: platform.modCtrl))
+  key: platform.keyA, mods: selectAllMods))
 let selected = native.lastTextInput().client.selection().`range`
 doAssert selected.start == 0 and
   selected.`end` == platform.utf16Len($buffer)
