@@ -1,0 +1,3 @@
+interface:
+  display_name: "MyNim Maintenance"
+  short_description: "Maintain Nim apps with safe native UI lifetimes"

@@ -3,6 +3,7 @@
 import std/os
 import ./doctor
 import ./init
+import ./skills
 
 const
   version = "0.1.0"
@@ -14,10 +15,11 @@ Usage:
 
 Commands:
 
-  init       create a native UI project
-  doctor     check that the development environment is ready
-  version    print the MyGo version
-  help       print this help
+  init            create a native UI project
+  install-skills  install the MyNim maintenance skill
+  doctor          check that the development environment is ready
+  version         print the MyGo version
+  help            print this help
 
 Other MyGo commands are not ported yet.
 """
@@ -40,7 +42,11 @@ proc run(args: seq[string]): int =
     if args.len > 1:
       return runInit(args[1 .. ^1])
     return runInit(@[])
-  of "install-skills", "vet", "migrate-ui", "generate", "gen",
+  of "install-skills":
+    if args.len > 1:
+      return runInstallSkills(args[1 .. ^1])
+    return runInstallSkills(@[])
+  of "vet", "migrate-ui", "generate", "gen",
      "dev", "i18n", "build", "keygen":
     stderr.writeLine("mygo: command \"" & args[0] & "\" is not ported yet")
     return 1

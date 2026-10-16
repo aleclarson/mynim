@@ -26,6 +26,8 @@ proc testInit() =
   doAssert fileExists(project / "mygo.json")
   doAssert fileExists(project / "config.nims")
   doAssert fileExists(project / "resources" / "icon.png")
+  doAssert fileExists(project / ".agents" / "skills" / "mynim-maintenance" /
+    "SKILL.md")
   doAssert getFileSize(project / "resources" / "icon.png") > 0
   doAssert readFile(project / "src" / "main.nim").contains("Ada \\\"Counter\\\"")
   doAssert readFile(project / "config.nims").contains("/src\"")

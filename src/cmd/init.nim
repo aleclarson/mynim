@@ -2,6 +2,7 @@
 
 import std/[json, math, os, strutils]
 import mynim/image as imagePackage
+import ./skills
 
 const
   version = "0.1.0"
@@ -164,6 +165,7 @@ proc writeProject(dir, appName, packageName, local: string) =
     writeText(dir / "config.nims",
       "switch(\"path\", " & (local / "src").escape() & ")\n")
   writeBytes(dir / "resources" / "icon.png", defaultIcon())
+  installBundledSkills(dir)
 
 proc runInit*(args: seq[string]): int =
   var appName, packageOption, localOption = ""
