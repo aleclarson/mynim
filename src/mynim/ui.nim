@@ -42,6 +42,7 @@ include mynim/ui/rating
 include mynim/ui/stepper
 include mynim/ui/spinner
 include mynim/ui/avatar
+include mynim/ui/badge
 include mynim/ui/range_slider
 include mynim/ui/tabs
 include mynim/ui/table
