@@ -3,6 +3,51 @@
 proc gridItemKey(state: GridState; item: int): string =
   if state.itemKey == nil: $item else: state.itemKey(item)
 
+proc gridSelectionCount(state: GridState): int =
+  if state.externalKeySelection != nil:
+    state.externalKeySelection.len
+  elif state.externalIndexSelection != nil:
+    state.externalIndexSelection.len
+  else:
+    state.selectedKeys.len
+
+proc gridItemIsSelected(state: GridState; item: int): bool =
+  if state.externalKeySelection != nil:
+    state.externalKeySelection.has(state.gridItemKey(item))
+  elif state.externalIndexSelection != nil:
+    state.externalIndexSelection.has(item)
+  else:
+    state.selectedKeys.contains(state.gridItemKey(item))
+
+proc setGridItemSelected(state: GridState; item: int;
+                         selected: bool): bool =
+  let exists = state.gridItemIsSelected(item)
+  if exists == selected:
+    return false
+  if state.externalKeySelection != nil:
+    if selected:
+      state.externalKeySelection.add(state.gridItemKey(item))
+    else:
+      state.externalKeySelection.remove(state.gridItemKey(item))
+  elif state.externalIndexSelection != nil:
+    if selected:
+      state.externalIndexSelection.add(item)
+    else:
+      state.externalIndexSelection.remove(item)
+  if selected:
+    state.selectedKeys.incl(state.gridItemKey(item))
+  else:
+    state.selectedKeys.excl(state.gridItemKey(item))
+  true
+
+proc clearGridSelection(state: GridState): bool =
+  result = state.gridSelectionCount() > 0
+  state.selectedKeys.clear()
+  if state.externalKeySelection != nil:
+    state.externalKeySelection.clear()
+  if state.externalIndexSelection != nil:
+    state.externalIndexSelection.clear()
+
 proc findGridItemKey(state: GridState; key: string; nearItem: int): int =
   if state == nil or state.itemCount <= 0:
     return -1
@@ -88,6 +133,38 @@ proc newGridState*(selectable = false; itemKey: GridItemKey = nil;
   result.rows.rowAccess = proc(row: int): ListRowAccess =
     ListRowAccess(role: platform.roleGroup)
 
+proc bindSelection*(state: GridState;
+                    selection: var Selection[string]): GridState =
+  ## Binds app-owned selection to a grid with stable string item keys.
+  if state == nil:
+    raise newException(ValueError, "ui: grid state cannot be nil")
+  if state.itemKey == nil:
+    raise newException(ValueError,
+      "ui: string selection requires a grid itemKey")
+  selection.ensure()
+  state.externalKeySelection = selection
+  state.externalIndexSelection = nil
+  state.selectedKeys.clear()
+  state.selectable = true
+  state.multiSelectable = true
+  state
+
+proc bindSelection*(state: GridState;
+                    selection: var Selection[int]): GridState =
+  ## Binds app-owned selection to an unkeyed grid, using item indices as keys.
+  if state == nil:
+    raise newException(ValueError, "ui: grid state cannot be nil")
+  if state.itemKey != nil:
+    raise newException(ValueError,
+      "ui: integer selection requires a grid without itemKey")
+  selection.ensure()
+  state.externalKeySelection = nil
+  state.externalIndexSelection = selection
+  state.selectedKeys.clear()
+  state.selectable = true
+  state.multiSelectable = true
+  state
+
 func selected*(state: GridState): int =
   ## Returns the active item index, or -1 when no item is active.
   if state == nil: -1 else: state.selectedItem
@@ -97,7 +174,7 @@ proc isSelected*(state: GridState; item: int): bool =
   if state == nil or item < 0 or item >= state.itemCount:
     return false
   if state.multiSelectable:
-    state.selectedKeys.contains(state.gridItemKey(item))
+    state.gridItemIsSelected(item)
   else:
     state.selectedItem == item
 
@@ -114,9 +191,9 @@ proc chooseGridItem(state: GridState; item: int) =
     return
   var changed = state.selectedItem != item
   if item < 0:
-    if state.multiSelectable and state.selectedKeys.len > 0:
+    let hadSelection = state.clearGridSelection()
+    if state.multiSelectable and hadSelection:
       changed = true
-    state.selectedKeys.clear()
     state.selectedItem = -1
     state.selectedKey = ""
     state.selectedKeyValid = false
@@ -124,12 +201,13 @@ proc chooseGridItem(state: GridState; item: int) =
   else:
     let key = state.gridItemKey(item)
     if state.multiSelectable:
-      if state.selectedKeys.len != 1 or not state.selectedKeys.contains(key):
+      if state.gridSelectionCount() != 1 or
+          not state.gridItemIsSelected(item):
         changed = true
-      state.selectedKeys.clear()
-      state.selectedKeys.incl(key)
-    elif state.selectedKeys.len > 0:
-      state.selectedKeys.clear()
+      discard state.clearGridSelection()
+      discard state.setGridItemSelected(item, true)
+    elif state.gridSelectionCount() > 0:
+      discard state.clearGridSelection()
       changed = true
     state.selectedItem = item
     state.selectedKey = key
@@ -146,13 +224,9 @@ proc toggleGridItem(state: GridState; item: int) =
   if not state.multiSelectable:
     state.chooseGridItem(item)
     return
-  let key = state.gridItemKey(item)
-  if state.selectedKeys.contains(key):
-    state.selectedKeys.excl(key)
-  else:
-    state.selectedKeys.incl(key)
+  discard state.setGridItemSelected(item, not state.gridItemIsSelected(item))
   state.selectedItem = item
-  state.selectedKey = key
+  state.selectedKey = state.gridItemKey(item)
   state.selectedKeyValid = true
   state.setGridPivot(item)
   if state.rows != nil:
@@ -167,9 +241,9 @@ proc extendGridSelection(state: GridState; item: int) =
     return
   let first = min(state.selectionPivot, item)
   let last = max(state.selectionPivot, item)
-  state.selectedKeys.clear()
+  discard state.clearGridSelection()
   for selectedItem in first..last:
-    state.selectedKeys.incl(state.gridItemKey(selectedItem))
+    discard state.setGridItemSelected(selectedItem, true)
   state.selectedItem = item
   state.selectedKey = state.gridItemKey(item)
   state.selectedKeyValid = true
@@ -289,10 +363,10 @@ proc gridKey(state: GridState; key: platform.Key;
     const commandMask = platform.modCtrl
 
   if state.multiSelectable and key == platform.keyA and mods == commandMask:
-    let previousCount = state.selectedKeys.len
+    var changed = false
     for item in 0..<state.itemCount:
-      state.selectedKeys.incl(state.gridItemKey(item))
-    if state.selectedKeys.len != previousCount:
+      changed = state.setGridItemSelected(item, true) or changed
+    if changed:
       state.pendingChanged = true
     return true
 

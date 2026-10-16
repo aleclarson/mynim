@@ -301,6 +301,8 @@ type
     selectedKeyValid, selectionPivotKeyValid: bool
     selectionPivot, reorderOrigin, reorderTarget, reorderTargetCell: int
     selectedKeys: HashSet[string]
+    externalKeySelection: Selection[string]
+    externalIndexSelection: Selection[int]
     typedLabel: string
     typedAt: MonoTime
     reorderItems: seq[int]

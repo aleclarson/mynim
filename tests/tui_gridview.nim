@@ -104,6 +104,37 @@ doAssert responsiveState.columns == 3
 buildResponsive(400)
 doAssert responsiveState.visible().first == beforeResize.first
 
+block unkeyed_grid_shares_index_selection:
+  let context = ui.newContext()
+  var chosen: ui.Selection[int]
+  chosen.add(1)
+  let state = ui.newGridState().bindSelection(chosen)
+
+  context.build(proc(ctx: ui.Context) =
+    discard ctx.gridView(state, 4, 40, 20,
+      proc(item: int) = discard).size(100, 60)
+  )
+  discard context.layout(100, 60)
+  doAssert state.isSelected(1)
+
+  chosen.remove(1)
+  doAssert not state.isSelected(1)
+  state.toggleSelection(3)
+  doAssert chosen.has(3)
+  state.clearSelection()
+  doAssert chosen.len == 0
+
+block grid_selection_key_type_must_match_items:
+  var keyedSelection: ui.Selection[int]
+  let keyedState = ui.newGridState(itemKey = proc(item: int): string = $item)
+  doAssertRaises ValueError:
+    discard keyedState.bindSelection(keyedSelection)
+
+  var indexSelection: ui.Selection[string]
+  let indexState = ui.newGridState()
+  doAssertRaises ValueError:
+    discard indexState.bindSelection(indexSelection)
+
 var names = @[
   "Apple", "Apricot", "Banana", "Blueberry",
   "Cherry", "Clementine", "Date", "Elderberry"
@@ -117,6 +148,8 @@ let interactionState = ui.newGridState(multiSelectable = true,
   reorder = proc(items: seq[int]; beforeItem: int) =
     reorderItems = items
     reorderBefore = beforeItem)
+var appChosenItems: ui.Selection[string]
+discard interactionState.bindSelection(appChosenItems)
 let interactionContent = ui.newContent(proc(ctx: ui.Context) =
   let grid = ctx.gridView(interactionState, Natural(names.len), 100, 60,
     proc(item: int) =
@@ -151,11 +184,14 @@ else:
   const commandModifier = platform.modCtrl
 
 clickGrid(1)
+doAssert appChosenItems.has("Apricot")
 clickGrid(3, commandModifier)
+doAssert appChosenItems.has("Blueberry")
 doAssert interactionState.isSelected(1)
 doAssert interactionState.isSelected(3)
 clickGrid(6, platform.modShift)
 doAssert interactionState.selectedItems() == @[3, 4, 5, 6]
+doAssert appChosenItems.len == 4
 doAssert interactionNative.send(platform.SurfaceEvent(kind: platform.keyPressed,
   key: platform.keyUp, mods: platform.modShift))
 doAssert interactionNative.frame()
@@ -165,6 +201,7 @@ doAssert interactionNative.send(platform.SurfaceEvent(kind: platform.keyPressed,
   key: platform.keyA, mods: commandModifier))
 doAssert interactionNative.frame()
 doAssert interactionState.selectedItems().len == names.len
+doAssert appChosenItems.len == names.len
 doAssert interactionNative.send(platform.SurfaceEvent(kind: platform.accessibilityOn))
 let (interactionTree, _) = interactionNative.accessibility()
 var hasMultiSelectableList = false
@@ -180,6 +217,13 @@ for accessible in interactionTree.nodes:
     inc checkedGridItems
 doAssert hasMultiSelectableList
 doAssert checkedGridItems == names.len
+
+appChosenItems.clear()
+appChosenItems.add("Apple")
+interactionNative.requestFrame()
+doAssert interactionNative.frame()
+doAssert interactionState.selectedItems() == @[0],
+  "app-side selection changes should update the grid"
 
 doAssert interactionNative.send(platform.SurfaceEvent(kind: platform.textInput,
   text: "c"))
