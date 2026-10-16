@@ -1,6 +1,6 @@
 ## Persistent text buffers and byte-based positions for native code editors.
 
-import std/[algorithm, locks, strutils]
+import std/[algorithm, locks, strutils, unicode]
 import mynim/internal/platform as platform
 import mynim/ui as ui
 import mynim/ui/editor/syntax as syntax
@@ -710,6 +710,110 @@ proc indentationUnit(language: syntax.Language): string =
     else: language.tabSize
   repeat(' ', width)
 
+proc indentationColumn(text: string; tabSize: int): int =
+  let width = max(tabSize, 1)
+  for rune in text.runes:
+    if ord(rune) == ord('\t'):
+      result += width - result mod width
+    else:
+      inc result
+
+proc tabIndentation(text: string; language: syntax.Language): string =
+  if language != nil and language.hardTabs:
+    return "\t"
+  let width = if language == nil or language.tabSize <= 0: 4
+    else: language.tabSize
+  let column = text.indentationColumn(width)
+  repeat(' ', width - column mod width)
+
+proc outdentLength(line: string; tabSize: int): int =
+  let indent = line.leadingIndent()
+  if indent.startsWith("\t"):
+    return 1
+  var spaces = 0
+  while spaces < indent.len and indent[spaces] == ' ':
+    inc spaces
+  if spaces > 0:
+    let width = max(tabSize, 1)
+    result = min(spaces, (spaces - 1) mod width + 1)
+
+proc moveIndentOffset(offset: int; biasLeft: bool;
+                      edits: seq[Edit]): int =
+  var delta = 0
+  for edit in edits:
+    if offset < edit.start:
+      break
+    if edit.start == edit.pastLast:
+      if offset == edit.start and biasLeft:
+        return edit.start + delta
+      delta += edit.text.len
+    elif offset < edit.pastLast:
+      return edit.start + delta + (if biasLeft: 0 else: edit.text.len)
+    else:
+      delta += edit.text.len - (edit.pastLast - edit.start)
+  offset + delta
+
+proc indentSelection(state: State; outdent: bool) =
+  state.ensureState()
+  if state.readOnly:
+    return
+  let snapshot = state.buffer.snapshot()
+  let selection = state.caretSelection
+  let firstPos = snapshot.pos(selection.start())
+  let lastPos = snapshot.pos(selection.pastLast())
+  if selection.empty() and not outdent:
+    let line = snapshot.line(firstPos.line)
+    let prefix = line[0 ..< min(firstPos.column, line.len)]
+    state.insert(prefix.tabIndentation(state.buffer.language))
+    return
+
+  let language = state.buffer.language
+  let width = if language == nil or language.tabSize <= 0: 4
+    else: language.tabSize
+  var lastLine = lastPos.line
+  if not selection.empty() and lastLine > firstPos.line and
+      lastPos.column == 0:
+    dec lastLine
+  lastLine = max(firstPos.line, lastLine)
+  var edits: seq[Edit]
+  for lineIndex in firstPos.line .. lastLine:
+    let line = snapshot.line(lineIndex)
+    let lineStart = snapshot.offset(Pos(line: lineIndex, column: 0))
+    if outdent:
+      let count = line.outdentLength(width)
+      if count > 0:
+        edits.add(Edit(start: lineStart, pastLast: lineStart + count))
+    elif firstPos.line == lastLine or line.strip().len > 0:
+      edits.add(Edit(start: lineStart, pastLast: lineStart,
+        text: language.indentationUnit()))
+
+  if edits.len == 0:
+    return
+  var afterSelection: Selection
+  if selection.empty():
+    let caret = moveIndentOffset(selection.head, false, edits)
+    afterSelection = Selection(anchor: caret, head: caret)
+  else:
+    let move = proc(offset: int): int =
+      let atStartOfSelection = offset == selection.start() and
+        snapshot.pos(offset).column == 0
+      moveIndentOffset(offset, atStartOfSelection, edits)
+    afterSelection = Selection(anchor: move(selection.anchor),
+      head: move(selection.head))
+
+  state.buffer.transact(proc() =
+    for index in countdown(edits.high, 0):
+      state.buffer.edit(edits[index])
+  )
+  let after = state.buffer.snapshot()
+  afterSelection = Selection(
+    anchor: after.normalizeOffset(afterSelection.anchor),
+    head: after.normalizeOffset(afterSelection.head))
+  state.caretSelection = afterSelection
+  state.selectionPending = true
+  state.buffer.setEditOwner(state, snapshot, after, selection, afterSelection)
+  state.buffer.setSelectionAfter(state, afterSelection)
+
 proc insertNewline(state: State) =
   ## Inserts a newline with the current indentation and basic syntax hints.
   state.ensureState()
@@ -831,6 +935,13 @@ proc view*(c: ui.Context; state: State): ui.Element =
       state.selectionPending = false
   discard result.textAreaHistory(recordAreaEdit, undoArea, redoArea)
   discard result.onTextKey(proc(key: ui.TextKey): bool =
+    if key.key == platform.keyTab:
+      if (key.mods and not platform.modShift) != 0:
+        return false
+      if state.readOnly:
+        return false
+      state.indentSelection((key.mods and platform.modShift) != 0)
+      return true
     if key.key != platform.keyEnter or
         (key.mods and not platform.modShift) != 0:
       return false

@@ -103,6 +103,20 @@ proc enter(text: string; language: editor.Language; caret: int;
   doAssert native.frame()
   $editorState.buffer
 
+proc indentKey(text: string; language: editor.Language; anchor, head: int;
+               outdent = false): string =
+  editorState.readOnly = false
+  editorState.buffer.set(text)
+  editorState.buffer.setLanguage(language)
+  editorState.select(anchor, head)
+  discard native.send(platform.SurfaceEvent(kind: platform.surfaceResize))
+  doAssert native.frame()
+  doAssert native.send(platform.SurfaceEvent(kind: platform.keyPressed,
+    key: platform.keyTab,
+    mods: if outdent: platform.modShift else: 0))
+  doAssert native.frame()
+  $editorState.buffer
+
 let go = editor.languageNamed("go")
 let emptyPair = "func main() {}"
 doAssert enter(emptyPair, go, emptyPair.len - 1) == "func main() {\n\t\n}"
@@ -120,6 +134,33 @@ doAssert enter(python, editor.languageNamed("python"), python.len) ==
   "def f():\n    "
 doAssert enter("<", editor.languageNamed("xml"), 1) == "<\n"
 doAssert enter("", nil, 0, platform.modShift) == "\n"
+
+let javascript = editor.languageNamed("javascript")
+doAssert indentKey(" x", javascript, 1, 1) == "  x"
+let outdent = "      x"
+doAssert indentKey(outdent, editor.languageNamed("python"), 6, 6,
+  outdent = true) == "    x"
+doAssert editorState.cursor() == 4
+doAssert editorState.undo()
+doAssert $editorState.buffer == outdent
+doAssert editorState.cursor() == 6
+doAssert editorState.redo()
+doAssert $editorState.buffer == "    x"
+doAssert editorState.cursor() == 4
+let selectedLines = "one\n\n  two"
+let indentedLines = "  one\n\n    two"
+doAssert indentKey(selectedLines, javascript, 0, selectedLines.len) ==
+  indentedLines
+doAssert editorState.selection() == editor.Selection(anchor: 0,
+  head: indentedLines.len)
+doAssert editorState.undo()
+doAssert $editorState.buffer == selectedLines
+doAssert editorState.selection() == editor.Selection(anchor: 0,
+  head: selectedLines.len)
+doAssert indentKey(indentedLines, javascript, 0, indentedLines.len,
+  outdent = true) == selectedLines
+doAssert editorState.selection() == editor.Selection(anchor: 0,
+  head: selectedLines.len)
 
 win.destroy()
 loop.shutdown()
