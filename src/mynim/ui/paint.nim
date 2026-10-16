@@ -780,9 +780,12 @@ proc paintScene*(layout: LayoutResult; scale = 1'f32;
         if rect.empty:
           continue
         var clipCount = 0
+        var isTooltip = node.tooltipOverlay
         var parent = int(node.parent)
         while parent >= 0:
-          if layout.owner.nodes[parent].clipsChildren:
+          if layout.owner.nodes[parent].tooltipOverlay:
+            isTooltip = true
+          if layout.owner.nodes[parent].clipsChildren and not isTooltip:
             result.ops.add(layout.clipOp(parent, scale))
             inc clipCount
           parent = int(layout.owner.nodes[parent].parent)

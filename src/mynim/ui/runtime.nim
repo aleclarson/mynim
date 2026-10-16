@@ -1767,6 +1767,11 @@ proc event(rt: Runtime; ev: platform.SurfaceEvent): bool =
       return true
     if rt.runShortcutAction(ev.mods, ev.key):
       return true
+    if ev.key == platform.keyEscape and
+        rt.context.owner.tooltips.shown != 0:
+      rt.context.owner.tooltips.dismissed = rt.context.owner.tooltips.shown
+      rt.requestFrame()
+      return true
     var dx, dy, page: float32
     if ev.mods == 0:
       case ev.key

@@ -2097,6 +2097,29 @@ proc layoutAt(c: Context; bounds: Rect; now: MonoTime;
         first = 0
       result.animating = state.finishList(first, last) or result.animating
       updateListReorderTarget(c.owner.nodes, result.rects, state, slot)
+  for slot in 1..<c.owner.nodes.len:
+    if not c.owner.nodes[slot].tooltipOverlay:
+      continue
+    let anchorSlot = int(c.owner.nodes[slot].parent)
+    if anchorSlot <= 0 or anchorSlot >= result.rects.len:
+      continue
+    let anchor = result.rects[anchorSlot]
+    let overlay = result.rects[slot]
+    let gap = c.owner.nodes[slot].tooltipGap
+    let above = anchor.y - overlay.h - gap
+    let targetY = if above >= bounds.y:
+        above
+      else:
+        anchor.y + anchor.h + gap
+    let delta = targetY - overlay.y
+    if delta == 0:
+      continue
+    for descendant in slot..<c.owner.nodes.len:
+      var current = descendant
+      while current > slot and current > 0:
+        current = int(c.owner.nodes[current].parent)
+      if current == slot:
+        result.rects[descendant].y += delta
   c.owner.committedRects = result.rects
   for slot, node in c.owner.nodes:
     if node.identity in c.owner.trackedBounds:
@@ -2150,6 +2173,13 @@ proc insideClips(layout: LayoutResult; slot: int; x, y: float32): bool =
     parent = int(node.parent)
   true
 
+proc pointerTransparent(layout: LayoutResult; slot: int): bool =
+  var current = slot
+  while current > 0:
+    if layout.owner.nodes[current].passThrough:
+      return true
+    current = int(layout.owner.nodes[current].parent)
+
 proc targetAt(layout: LayoutResult; x, y: float32): Element =
   if layout.owner == nil or layout.owner.closed or layout.owner.inBuild or
       not layout.owner.hasFrame or
@@ -2167,7 +2197,8 @@ proc targetAt(layout: LayoutResult; x, y: float32): Element =
         layout.owner.paintSlots[orderIndex]
       else:
         orderIndex
-    if slot > 0 and layout.rects[slot].contains(x, y) and
+    if slot > 0 and not layout.pointerTransparent(slot) and
+        layout.rects[slot].contains(x, y) and
         layout.insideClips(slot, x, y):
       let target = Element(owner: layout.owner, slot: uint32(slot),
                            generation: layout.generation)
@@ -2379,7 +2410,8 @@ proc slotsAt(layout: LayoutResult; x, y: float32): seq[int] =
       layout.rects.len != layout.owner.nodes.len:
     return
   for slot in 1..<layout.rects.len:
-    if layout.rects[slot].contains(x, y) and
+    if not layout.pointerTransparent(slot) and
+        layout.rects[slot].contains(x, y) and
         layout.insideClips(slot, x, y):
       result.add(slot)
 

@@ -86,6 +86,10 @@ type
     direction: int8
     initialized: bool
 
+  TooltipState = object
+    hover, focus, shown, dismissed: uint64
+    hoverSince, focusSince, lastShown: MonoTime
+
   ElementOwner = ref object
     activeContext: Context
     nodes: seq[ElementNode]
@@ -98,6 +102,7 @@ type
     pendingNotices: Table[uint64, uint8]
     pendingSliderValues: Table[uint64, float64]
     stepperRepeats: Table[uint64, StepperRepeat]
+    tooltips: TooltipState
     rangeSliderDrags: Table[uint64, int8]
     pendingTextCallbacks: Table[uint64, seq[proc() {.closure.}]]
     pendingTextSubmitCallbacks: Table[uint64, seq[proc() {.closure.}]]
@@ -194,12 +199,13 @@ type
       revealInScroll, rightToLeft, directionSet: bool
     focusGroupSet, groupSelects: bool
     formContainer, formField, formLabel, accessHidden, disabled,
-      invalid: bool
+      invalid, tooltipEnabled, tooltipOverlay, passThrough: bool
     focusOrientation: FocusOrientation
     logical: uint8
     clipX, clipY, hasFollowScroll: bool
     followScrollSlot: int32
     gridCol, gridRow, gridColSpan, gridRowSpan: int
+    tooltipGap: float32
     # Overlay text is painted but excluded from the node's natural size.
     hasText, textNoWrap, textColorSet, textOverlay, listRowSelected,
       listRowFocusVisible, listRowHeader, listRowPinnedHeader: bool
@@ -216,6 +222,8 @@ type
       valueChangedInBuild: bool
     label: string
     accessDescription: string
+    tooltipText: string
+    tooltipBuild: proc(tip: Element) {.closure.}
     labelTargetSlot, fieldLabelSlot, fieldContentSlot,
       fieldControlSlot: int32
     textValue: string
@@ -1017,6 +1025,8 @@ proc children*(e: Element; build: proc() {.closure.}): Element =
   finally:
     owner.parent = previous
 
+proc buildTooltips(c: Context)
+
 proc build*(c: Context; view: proc(c: Context) {.closure.}) =
   ## Runs one view build pass. Elements made in view expire when it returns.
   if c == nil or c.owner.closed:
@@ -1078,6 +1088,7 @@ proc build*(c: Context; view: proc(c: Context) {.closure.}) =
   try:
     if view != nil:
       view(c)
+    c.buildTooltips()
     for index in 0..<c.owner.actions.len:
       if c.owner.actions[index].kind == actionShortcut and
           c.owner.actions[index].handle != nil:
