@@ -436,7 +436,7 @@ proc comboBoxKey(rt: Runtime; key: platform.Key;
     if not state.open:
       state.open = true
       state.filtering = false
-      state.highlight = if state.options.len > 0: 0 else: -1
+      state.highlight = 0
       state.pointerRevision = owner.pointerRevision
     elif state.visibleOptions.len > 0:
       state.highlight = min(max(state.highlight + 1, 0),
@@ -448,7 +448,7 @@ proc comboBoxKey(rt: Runtime; key: platform.Key;
     if not state.open:
       state.open = true
       state.filtering = false
-      state.highlight = state.options.high
+      state.highlight = -2
       state.pointerRevision = owner.pointerRevision
     elif state.visibleOptions.len > 0:
       state.highlight = if state.highlight < 0:

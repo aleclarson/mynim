@@ -1,5 +1,224 @@
 ## Filterable single-choice controls for the native UI.
 
+type
+  ComboBoxItemParts* = object ## An option row and its current highlight state.
+    element*: Element
+    isHighlighted*: bool
+
+  ComboBoxBuild = ref object
+    values: seq[string]
+    items: seq[Element]
+    chosenValue: string
+    hasChoice, inPopup: bool
+
+  ComboBoxParts* = object ## Input and builder methods for a custom combobox.
+    input*: Element
+    context: Context
+    state: ComboBoxState
+    build: ComboBoxBuild
+
+proc comboBoxPartsActive(parts: ComboBoxParts): bool =
+  parts.context != nil and parts.context.owner != nil and
+    parts.context.owner.inBuild and parts.state != nil and
+    parts.input.node != nil
+
+proc comboboxBase*(c: Context; text: var string): ComboBoxParts =
+  ## Creates an unstyled editable combobox. Style `input`, build its options
+  ## with `popup` and `item`, and read a chosen value after `popup` returns.
+  result.input = c.textInputBase(text)
+  let inputNode = result.input.node
+  if inputNode == nil:
+    return
+  let identity = inputNode[].identity
+  var state = c.owner.comboBoxStates.getOrDefault(identity)
+  if state == nil:
+    state = ComboBoxState(query: text, lastSelected: text, highlight: -1,
+      scroll: newScrollState())
+    c.owner.comboBoxStates[identity] = state
+  elif state.scroll == nil:
+    state.scroll = newScrollState()
+  result.build = ComboBoxBuild()
+  if state.hasPendingChoice:
+    result.build.chosenValue = state.pendingChoice
+    result.build.hasChoice = true
+    state.pendingChoice.setLen(0)
+    state.hasPendingChoice = false
+  state.tokenField = false
+  state.pendingTokenRemovals = 0
+  state.pendingTokenSubmission = false
+
+  inputNode[].comboBoxRoot = true
+  inputNode[].comboBoxInput = true
+  inputNode[].comboBoxState = state
+  inputNode[].accessRole = platform.roleComboBox
+  inputNode[].accessRoleSet = true
+
+  if result.input.changed():
+    state.query = text
+    state.lastSelected = text
+    state.open = true
+    state.filtering = true
+    state.highlight = 0
+    state.pointerRevision = c.owner.pointerRevision
+  elif text != state.lastSelected:
+    state.query = text
+    state.lastSelected = text
+    state.filtering = false
+
+  if result.input.clicked() and not state.open:
+    state.open = true
+    state.filtering = false
+    state.highlight = -1
+    state.pointerRevision = c.owner.pointerRevision
+  if not result.input.focused():
+    state.open = false
+    state.filtering = false
+    state.highlight = -1
+
+  result.context = c
+  result.state = state
+
+proc isOpen*(parts: ComboBoxParts): bool =
+  ## Reports whether this combobox's popup is open in the current frame.
+  parts.comboBoxPartsActive() and parts.state.open
+
+proc setOpen*(parts: ComboBoxParts; value: bool) =
+  ## Opens or closes the popup. Call before `popup` in the current frame.
+  if not parts.comboBoxPartsActive() or parts.state.open == value:
+    return
+  parts.state.open = value
+  parts.state.filtering = false
+  parts.state.highlight = -1
+  if value:
+    parts.state.pointerRevision = parts.context.owner.pointerRevision
+  if parts.context.owner.invalidate != nil:
+    parts.context.owner.invalidate()
+
+proc filtering*(parts: ComboBoxParts): bool =
+  ## Reports whether the user typed since the popup opened.
+  parts.comboBoxPartsActive() and parts.state.filtering
+
+proc chosen*(parts: ComboBoxParts): tuple[value: string, ok: bool] =
+  ## Returns and consumes the option chosen by click or Enter this frame.
+  if not parts.comboBoxPartsActive() or parts.build == nil or
+      not parts.build.hasChoice:
+    return
+  result = (parts.build.chosenValue, true)
+  parts.build.chosenValue.setLen(0)
+  parts.build.hasChoice = false
+
+proc item*(parts: ComboBoxParts; value: string): ComboBoxItemParts =
+  ## Creates a custom option row. Add its content and style it using
+  ## `isHighlighted`; the popup keeps keyboard and pointer focus in the input.
+  if not parts.comboBoxPartsActive() or parts.build == nil or
+      not parts.state.open or not parts.build.inPopup:
+    return
+  let state = parts.state
+  let index = parts.build.values.len
+  parts.build.values.add(value)
+  result.element = parts.context.buttonBase().tabStop(false)
+  let itemNode = result.element.node
+  if itemNode == nil:
+    return
+  itemNode[].accessRole = platform.roleListItem
+  itemNode[].accessRoleSet = true
+  itemNode[].label = value
+  itemNode[].activateEnter = false
+  itemNode[].focusTargetSlot = int32(parts.input.slot)
+  if parts.context.owner.pointerRevision != state.pointerRevision and
+      result.element.hovered():
+    state.highlight = index
+    state.pointerRevision = parts.context.owner.pointerRevision
+  result.isHighlighted = state.highlight == index
+  if result.isHighlighted:
+    itemNode[].accessExtraStates = itemNode[].accessExtraStates or
+      platform.accessChecked
+    if state.shownOption != value:
+      discard result.element.scrollIntoView()
+      state.shownOption = value
+  parts.build.items.add(result.element)
+  discard result.element.onClick(proc() =
+    state.pendingChoice = value
+    state.hasPendingChoice = true
+    state.open = false
+    state.filtering = false
+    state.highlight = -1
+  )
+
+proc popup*(parts: ComboBoxParts;
+            build: proc(panel: Element) {.closure.}): Element =
+  ## Shows a popup at least as wide as the input and builds options with
+  ## `item`. Returns an empty Element while closed or when no options exist.
+  if not parts.comboBoxPartsActive():
+    return
+  let state = parts.state
+  let context = parts.context
+  let wasOpen = state.open
+  let hadChoice = parts.build.hasChoice
+  var popupOpen = state.open
+  state.itemIdentities.setLen(0)
+  parts.build.values.setLen(0)
+  parts.build.items.setLen(0)
+  result = context.popoverBase(parts.input, popupOpen, proc(panel: Element) =
+    let panelNode = panel.node
+    if panelNode != nil:
+      panelNode[].accessRole = platform.roleList
+      panelNode[].accessRoleSet = true
+      panelNode[].accessExtraStates = panelNode[].accessExtraStates or
+        platform.accessSelectable
+    if build != nil:
+      parts.build.inPopup = true
+      try:
+        build(panel)
+      finally:
+        parts.build.inPopup = false
+  )
+  state.open = popupOpen
+  if popupOpen:
+    let count = parts.build.values.len
+    let oldHighlight = state.highlight
+    if state.highlight == -2 or state.highlight >= count:
+      state.highlight = count - 1
+    if count == 0:
+      state.highlight = -1
+      let panelNode = result.node
+      if panelNode != nil:
+        panelNode[].accessHidden = true
+      result = Element()
+    state.options.setLen(0)
+    state.visibleOptions.setLen(0)
+    for value in parts.build.values:
+      state.options.add(value)
+      state.visibleOptions.add(value)
+    for index, item in parts.build.items:
+      let itemNode = item.node
+      if itemNode != nil:
+        state.itemIdentities.add(itemNode[].identity)
+        itemNode[].accessPosInSet = index + 1
+        itemNode[].accessSetSize = count
+        let textSlot = int(itemNode[].firstChild)
+        if textSlot > 0 and textSlot < context.owner.nodes.len and
+            context.owner.nodes[textSlot].hasText:
+          context.owner.nodes[textSlot].accessHidden = true
+        if index == state.highlight:
+          itemNode[].accessExtraStates = itemNode[].accessExtraStates or
+            platform.accessChecked
+    if state.highlight != oldHighlight and
+        context.owner.invalidate != nil:
+      context.owner.invalidate()
+  else:
+    state.itemIdentities.setLen(0)
+
+  if wasOpen and not popupOpen and not hadChoice and
+      not state.hasPendingChoice:
+    state.filtering = false
+    state.highlight = -1
+  if not popupOpen or parts.build.values.len == 0:
+    state.shownOption.setLen(0)
+
+  parts.build.values.setLen(0)
+  parts.build.items.setLen(0)
+
 proc matchingComboBox(options: seq[string]; query: string): seq[string] =
   let needle = unicode.toLower(query.strip())
   if needle.len == 0:
@@ -197,7 +416,7 @@ proc combobox*(c: Context; selected: var string;
         matchingComboBox(state.options, state.query)
       else:
         state.options
-    if state.highlight >= state.visibleOptions.len:
+    if state.highlight == -2 or state.highlight >= state.visibleOptions.len:
       state.highlight = state.visibleOptions.high
     if state.filtering and state.highlight < 0 and
         state.visibleOptions.len > 0:
@@ -298,7 +517,7 @@ proc autocomplete*(c: Context; value: var string;
     for suggestion in matchingComboBox(state.options, state.query):
       if unicode.toLower(suggestion) != unicode.toLower(state.query):
         state.visibleOptions.add(suggestion)
-  if state.highlight >= state.visibleOptions.len:
+  if state.highlight == -2 or state.highlight >= state.visibleOptions.len:
     state.highlight = state.visibleOptions.high
   if state.visibleOptions.len == 0:
     state.highlight = -1
@@ -462,7 +681,7 @@ proc tokenField*(c: Context; tokens: var seq[string];
               break
         if not alreadyToken:
           state.visibleOptions.add(suggestion)
-    if state.highlight >= state.visibleOptions.len:
+    if state.highlight == -2 or state.highlight >= state.visibleOptions.len:
       state.highlight = state.visibleOptions.high
     if state.visibleOptions.len == 0:
       state.highlight = -1
