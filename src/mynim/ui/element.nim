@@ -277,17 +277,30 @@ type
     ## Returns a stable, unique identity for a GridView item.
   GridItemLabel* = proc(item: int): string {.closure.}
     ## Returns an item's accessible name.
+  GridItemReorder* = proc(items: seq[int]; beforeItem: int) {.closure.}
+    ## Reorders selected item indices before another item; itemCount means end.
   GridState* = ref object
     ## Retained selection, column count, and scroll position for GridView.
     selectedItem: int
     itemKey*: GridItemKey
     itemLabel*: GridItemLabel
+    reorder*: GridItemReorder
     columns*: int
-    selectable*: bool
+    selectable*, multiSelectable*: bool
     rows: ListState
     itemCount: int
     itemHeight, gap: float32
     rightToLeft: bool
+    selectedKey, selectionPivotKey: string
+    selectedKeyValid, selectionPivotKeyValid: bool
+    selectionPivot, reorderOrigin, reorderTarget, reorderTargetCell: int
+    selectedKeys: HashSet[string]
+    typedLabel: string
+    typedAt: MonoTime
+    reorderItems: seq[int]
+    reorderPointerX, reorderPointerY, reorderStartX, reorderStartY: float32
+    reorderTargetAfter: bool
+    reorderPressed, reorderDragging, reorderTargetValid: bool
     pendingChanged, pendingSubmitted: bool
 
   ScrollbarDrag = object

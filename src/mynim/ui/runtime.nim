@@ -23,6 +23,7 @@ type
     modalFocusReturns: Table[uint64, uint64]
     activeModalIdentity: uint64
     listReorder, tableReorder: ListState
+    gridReorder: GridState
     pointerCursor: platform.Cursor
     hasPointerCursor: bool
     textInputAdapter: TextInputAdapter
@@ -1842,6 +1843,8 @@ proc sliderKey(rt: Runtime; key: platform.Key;
   true
 
 proc autoScrollListReorder(rt: Runtime; state: ListState): bool
+proc gridReorderTarget(rt: Runtime; state: GridState)
+proc autoScrollGridReorder(rt: Runtime; state: GridState): bool
 proc showMenuButton(rt: Runtime; identity: uint64;
                     build: proc(menu: Menu) {.closure.})
 
@@ -1981,6 +1984,11 @@ proc renderFrame(rt: Runtime; presentFrame = true) =
   if presentFrame and rt.listReorder != nil and
       rt.listReorder.reorderDragging and rt.autoScrollListReorder(rt.listReorder):
     rt.requestFrame()
+  if presentFrame and rt.gridReorder != nil and
+      rt.gridReorder.reorderDragging:
+    rt.gridReorderTarget(rt.gridReorder)
+    if rt.autoScrollGridReorder(rt.gridReorder):
+      rt.requestFrame()
   rt.updateTextInput()
   rt.frameScene = layout.paintScene(scale)
   rt.hasScene = true
@@ -2005,6 +2013,11 @@ proc cancelListReorder(rt: Runtime) =
     rt.listReorder.cancelListReorder()
     rt.listReorder = nil
 
+proc cancelGridReorder(rt: Runtime) =
+  if rt.gridReorder != nil:
+    rt.gridReorder.cancelGridReorder()
+    rt.gridReorder = nil
+
 proc cancelTableReorder(rt: Runtime) =
   if rt.tableReorder != nil:
     rt.tableReorder.cancelTableColumnDrag()
@@ -2021,6 +2034,19 @@ proc beginListReorder(rt: Runtime; target: Element) =
         node.listState.beginListReorder(node.listRowIndex,
           rt.pointerX, rt.pointerY):
       rt.listReorder = node.listState
+      return
+    slot = int(node.parent)
+
+proc beginGridReorder(rt: Runtime; target: Element) =
+  rt.cancelGridReorder()
+  if target.owner == nil or target.owner != rt.frameLayout.owner:
+    return
+  var slot = int(target.slot)
+  while slot > 0 and slot < target.owner.nodes.len:
+    let node = target.owner.nodes[slot]
+    if node.gridCellState != nil and node.gridCellState.beginGridReorder(
+        node.gridItemIndex, rt.pointerX, rt.pointerY):
+      rt.gridReorder = node.gridCellState
       return
     slot = int(node.parent)
 
@@ -2172,6 +2198,101 @@ proc autoScrollListReorder(rt: Runtime; state: ListState): bool =
     delta = -min((top + edge - y) / 2, edge / 2)
   elif y > bottom - edge:
     delta = min((y - (bottom - edge)) / 2, edge / 2)
+  if delta == 0:
+    return false
+  let scroll = node.scrollState
+  let old = scroll.offsetY
+  scroll.stopScrollMotion()
+  scroll.offsetY = min(max(old + delta, 0'f32), scroll.maxY)
+  scroll.offsetY != old
+
+proc gridReorderTarget(rt: Runtime; state: GridState) =
+  let owner = rt.frameLayout.owner
+  if state == nil or owner == nil or rt.frameLayout.rects.len != owner.nodes.len:
+    return
+  let rootSlot = int(state.rows.frameSlot)
+  if rootSlot <= 0 or rootSlot >= owner.nodes.len or
+      state.rows.frameOwner != cast[pointer](owner) or
+      state.rows.generation != rt.frameLayout.generation:
+    state.reorderTargetValid = false
+    state.reorderTargetCell = -1
+    return
+  let rootBox = rt.frameLayout.rects[rootSlot]
+  if not rootBox.contains(state.reorderPointerX, state.reorderPointerY) or
+      not rt.frameLayout.insideClips(rootSlot, state.reorderPointerX,
+        state.reorderPointerY):
+    state.reorderTargetValid = false
+    state.reorderTargetCell = -1
+    return
+
+  var bestSlot = -1
+  var bestItem = -1
+  var bestDistance = -1'f32
+  for slot in 1..<owner.nodes.len:
+    let node = owner.nodes[slot]
+    if node.gridCellState != state or node.gridItemIndex < 0:
+      continue
+    let box = rt.frameLayout.rects[slot]
+    if state.reorderPointerY < box.y or
+        state.reorderPointerY >= box.y + box.h:
+      continue
+    let distance = abs(state.reorderPointerX - (box.x + box.w / 2))
+    if bestSlot < 0 or distance < bestDistance:
+      bestSlot = slot
+      bestItem = node.gridItemIndex
+      bestDistance = distance
+
+  if bestSlot < 0:
+    for slot in 1..<owner.nodes.len:
+      let node = owner.nodes[slot]
+      if node.gridCellState == state and
+          node.gridItemIndex == state.itemCount - 1:
+        state.reorderTarget = state.itemCount
+        state.reorderTargetCell = node.gridItemIndex
+        state.reorderTargetAfter = true
+        state.reorderTargetValid = true
+        return
+    state.reorderTargetValid = false
+    state.reorderTargetCell = -1
+    return
+
+  let box = rt.frameLayout.rects[bestSlot]
+  let node = owner.nodes[bestSlot]
+  let after = (state.reorderPointerX >= box.x + box.w / 2) !=
+    node.rightToLeft
+  state.reorderTarget = if after: bestItem + 1 else: bestItem
+  state.reorderTargetCell = bestItem
+  state.reorderTargetAfter = after
+  state.reorderTargetValid = true
+
+proc autoScrollGridReorder(rt: Runtime; state: GridState): bool =
+  if state == nil or not state.reorderDragging or
+      not rt.hasPointer or rt.frameLayout.owner == nil:
+    return false
+  let slot = int(state.rows.frameSlot)
+  let owner = rt.frameLayout.owner
+  if slot <= 0 or slot >= owner.nodes.len or
+      state.rows.frameOwner != cast[pointer](owner) or
+      state.rows.generation != rt.frameLayout.generation:
+    return false
+  let node = owner.nodes[slot]
+  if not node.scrollY or node.scrollState == nil:
+    return false
+  let box = rt.frameLayout.rects[slot]
+  let left = box.x + node.border[3] + node.pad[3]
+  let right = box.x + box.w - node.border[1] - node.pad[1]
+  let top = box.y + node.border[0] + node.pad[0]
+  let bottom = box.y + box.h - node.border[2] - node.pad[2]
+  if state.reorderPointerX < left or state.reorderPointerX >= right or
+      not rt.frameLayout.insideClips(slot, state.reorderPointerX,
+        state.reorderPointerY):
+    return false
+  const edge = 32'f32
+  var delta = 0'f32
+  if state.reorderPointerY < top + edge:
+    delta = -min((top + edge - state.reorderPointerY) / 2, edge / 2)
+  elif state.reorderPointerY > bottom - edge:
+    delta = min((state.reorderPointerY - (bottom - edge)) / 2, edge / 2)
   if delta == 0:
     return false
   let scroll = node.scrollState
@@ -2429,6 +2550,12 @@ proc event(rt: Runtime; ev: platform.SurfaceEvent): bool =
       discard rt.autoScrollListReorder(rt.listReorder)
       rt.requestFrame()
       return false
+    if rt.gridReorder != nil and
+        rt.gridReorder.updateGridReorder(rt.pointerX, rt.pointerY):
+      rt.gridReorderTarget(rt.gridReorder)
+      discard rt.autoScrollGridReorder(rt.gridReorder)
+      rt.requestFrame()
+      return false
     if rt.tableReorder != nil:
       if rt.tableReorder.updateTableColumnDrag(rt.frameLayout.owner.nodes,
           rt.frameLayout.rects, rt.pointerX):
@@ -2502,6 +2629,7 @@ proc event(rt: Runtime; ev: platform.SurfaceEvent): bool =
         rt.requestFrame()
         return true
     rt.beginListReorder(rt.pressTarget)
+    rt.beginGridReorder(rt.pressTarget)
     if not rt.beginTableResize(rt.pressTarget):
       rt.beginTableReorder(rt.pressTarget)
     if rt.pressTarget.owner != nil:
@@ -2599,6 +2727,28 @@ proc event(rt: Runtime; ev: platform.SurfaceEvent): bool =
         return true
       discard state.finishListReorder(commit = false)
       rt.listReorder = nil
+    if rt.gridReorder != nil:
+      let state = rt.gridReorder
+      if state.updateGridReorder(rt.pointerX, rt.pointerY):
+        rt.gridReorderTarget(state)
+        let slot = int(state.rows.frameSlot)
+        let owner = rt.frameLayout.owner
+        let canDrop = owner != nil and slot > 0 and
+          slot < owner.nodes.len and
+          state.rows.frameOwner == cast[pointer](owner) and
+          state.rows.generation == rt.frameLayout.generation and
+          rt.frameLayout.rects[slot].contains(rt.pointerX, rt.pointerY) and
+          rt.frameLayout.insideClips(slot, rt.pointerX, rt.pointerY)
+        discard state.finishGridReorder(commit = canDrop)
+        rt.gridReorder = nil
+        rt.pressTarget = Element()
+        rt.pressMods = 0
+        rt.pressHoverSlots.setLen(0)
+        rt.refreshPointer()
+        rt.requestFrame()
+        return true
+      discard state.finishGridReorder(commit = false)
+      rt.gridReorder = nil
     if rt.tableReorder != nil:
       let state = rt.tableReorder
       discard state.updateTableColumnDrag(rt.frameLayout.owner.nodes,
@@ -2641,6 +2791,15 @@ proc event(rt: Runtime; ev: platform.SurfaceEvent): bool =
     var clickedSlot = -1
     let clicked = rt.frameLayout.dispatchClick(rt.pressTarget,
       rt.pointerX, rt.pointerY, rt.pressMods, clickedSlot)
+    if clicked and ev.clicks >= 2 and clickedSlot > 0 and
+        clickedSlot < rt.frameLayout.owner.nodes.len:
+      var slot = clickedSlot
+      while slot > 0 and slot < rt.frameLayout.owner.nodes.len:
+        let node = rt.frameLayout.owner.nodes[slot]
+        if node.gridCellState != nil and node.gridCellState.selectable:
+          node.gridCellState.pendingSubmitted = true
+          break
+        slot = int(node.parent)
     result = clicked or sliderSlot >= 0 or colorPlaneSlot >= 0
     rt.clickedSlots.setLen(0)
     if clicked:
@@ -2660,11 +2819,13 @@ proc event(rt: Runtime; ev: platform.SurfaceEvent): bool =
     let hadTextInput = rt.hasTextInputState and rt.lastTextInput.active
     let hadScrollbarDrag = rt.scrollbarDrag.state != nil
     let hadListReorder = rt.listReorder != nil
+    let hadGridReorder = rt.gridReorder != nil
     let hadTableReorder = rt.tableReorder != nil
     if hadScrollbarDrag:
       rt.scrollbarDrag.state.scrollbarDragging = false
       rt.scrollbarDrag = ScrollbarDrag()
     rt.cancelListReorder()
+    rt.cancelGridReorder()
     rt.cancelTableReorder()
     rt.cancelKeyPress()
     rt.keyboardFocusVisible = false
@@ -2679,7 +2840,7 @@ proc event(rt: Runtime; ev: platform.SurfaceEvent): bool =
     rt.updateTextInput()
     if rt.pressedSlots != previousPressed or previousFocusVisible or
         hadTextInput or hadScrollbarDrag or hadListReorder or
-        hadTableReorder:
+        hadGridReorder or hadTableReorder:
       rt.requestFrame()
     false
   of platform.pointerLeave:
@@ -2861,6 +3022,7 @@ proc close(rt: Runtime) =
     rt.conn.surface.setTextInput(platform.TextInputState())
     rt.hasTextInputState = false
   rt.cancelListReorder()
+  rt.cancelGridReorder()
   rt.cancelTableReorder()
   rt.closed = true
   rt.context.close()

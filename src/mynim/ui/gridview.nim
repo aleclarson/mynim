@@ -1,37 +1,201 @@
-## Responsive, virtualized grids with single-item selection.
+## Responsive, virtualized grids with retained selection and reordering.
+
+proc gridItemKey(state: GridState; item: int): string =
+  if state.itemKey == nil: $item else: state.itemKey(item)
+
+proc findGridItemKey(state: GridState; key: string; nearItem: int): int =
+  if state == nil or state.itemCount <= 0:
+    return -1
+  let near = max(0, min(nearItem, state.itemCount - 1))
+  for distance in 0..1000:
+    let before = near - distance
+    if before >= 0 and state.gridItemKey(before) == key:
+      return before
+    let after = int64(near) + int64(distance)
+    if distance > 0 and after < int64(state.itemCount) and
+        state.gridItemKey(int(after)) == key:
+      return int(after)
+  -1
+
+proc setGridPivot(state: GridState; item: int) =
+  state.selectionPivot = item
+  state.selectionPivotKeyValid = item >= 0 and item < state.itemCount
+  state.selectionPivotKey = if state.selectionPivotKeyValid:
+      state.gridItemKey(item)
+    else:
+      ""
+
+proc syncGridItems(state: GridState; count: int) =
+  state.itemCount = max(count, 0)
+  if state.selectedItem >= 0:
+    if state.selectedKeyValid:
+      let same = state.selectedItem < state.itemCount and
+        state.gridItemKey(state.selectedItem) == state.selectedKey
+      if not same:
+        let moved = state.findGridItemKey(state.selectedKey,
+          state.selectedItem)
+        if moved >= 0:
+          state.selectedItem = moved
+          state.pendingChanged = true
+        else:
+          state.selectedItem = -1
+          state.selectedKey = ""
+          state.selectedKeyValid = false
+          state.pendingChanged = true
+    elif state.selectedItem < state.itemCount:
+      state.selectedKey = state.gridItemKey(state.selectedItem)
+      state.selectedKeyValid = true
+    else:
+      state.selectedItem = -1
+      state.pendingChanged = true
+  else:
+    state.selectedKey = ""
+    state.selectedKeyValid = false
+
+  if state.selectionPivotKeyValid:
+    let same = state.selectionPivot >= 0 and
+      state.selectionPivot < state.itemCount and
+      state.gridItemKey(state.selectionPivot) == state.selectionPivotKey
+    if not same:
+      state.selectionPivot = state.findGridItemKey(
+        state.selectionPivotKey, state.selectionPivot)
+      if state.selectionPivot < 0:
+        state.selectionPivotKey = ""
+        state.selectionPivotKeyValid = false
+      else:
+        state.selectionPivotKey = state.gridItemKey(state.selectionPivot)
+  elif state.selectionPivot >= state.itemCount:
+    state.selectionPivot = -1
 
 proc newGridState*(selectable = false; itemKey: GridItemKey = nil;
-                   itemLabel: GridItemLabel = nil): GridState =
+                   itemLabel: GridItemLabel = nil;
+                   multiSelectable = false;
+                   reorder: GridItemReorder = nil): GridState =
   ## Creates retained selection and scroll state for a virtualized grid.
   new(result)
   result.selectedItem = -1
-  result.selectable = selectable
+  result.selectionPivot = -1
+  result.reorderOrigin = -1
+  result.reorderTarget = -1
+  result.reorderTargetCell = -1
+  result.selectable = selectable or multiSelectable
+  result.multiSelectable = multiSelectable
   result.itemKey = itemKey
   result.itemLabel = itemLabel
+  result.reorder = reorder
+  result.selectedKeys = initHashSet[string]()
   result.rows = newListState()
   result.rows.rowAccess = proc(row: int): ListRowAccess =
     ListRowAccess(role: platform.roleGroup)
 
 func selected*(state: GridState): int =
-  ## Returns the selected item index, or -1 when none is selected.
+  ## Returns the active item index, or -1 when no item is active.
   if state == nil: -1 else: state.selectedItem
 
-proc selectGridItem(state: GridState; item: int) =
+proc isSelected*(state: GridState; item: int): bool =
+  ## Reports whether item belongs to the current selection.
+  if state == nil or item < 0 or item >= state.itemCount:
+    return false
+  if state.multiSelectable:
+    state.selectedKeys.contains(state.gridItemKey(item))
+  else:
+    state.selectedItem == item
+
+proc selectedItems*(state: GridState): seq[int] =
+  ## Returns selected item indices in grid order.
+  if state == nil:
+    return
+  for item in 0..<state.itemCount:
+    if state.isSelected(item):
+      result.add(item)
+
+proc chooseGridItem(state: GridState; item: int) =
   if state == nil or item < -1:
     return
-  if state.selectedItem != item:
+  var changed = state.selectedItem != item
+  if item < 0:
+    if state.multiSelectable and state.selectedKeys.len > 0:
+      changed = true
+    state.selectedKeys.clear()
+    state.selectedItem = -1
+    state.selectedKey = ""
+    state.selectedKeyValid = false
+    state.setGridPivot(-1)
+  else:
+    let key = state.gridItemKey(item)
+    if state.multiSelectable:
+      if state.selectedKeys.len != 1 or not state.selectedKeys.contains(key):
+        changed = true
+      state.selectedKeys.clear()
+      state.selectedKeys.incl(key)
+    elif state.selectedKeys.len > 0:
+      state.selectedKeys.clear()
+      changed = true
     state.selectedItem = item
+    state.selectedKey = key
+    state.selectedKeyValid = true
+    state.setGridPivot(item)
+    if state.rows != nil:
+      state.rows.scrollIntoView(item div max(state.columns, 1))
+  if changed:
     state.pendingChanged = true
-  if item >= 0 and state.rows != nil:
+
+proc toggleGridItem(state: GridState; item: int) =
+  if state == nil or item < 0 or item >= state.itemCount:
+    return
+  if not state.multiSelectable:
+    state.chooseGridItem(item)
+    return
+  let key = state.gridItemKey(item)
+  if state.selectedKeys.contains(key):
+    state.selectedKeys.excl(key)
+  else:
+    state.selectedKeys.incl(key)
+  state.selectedItem = item
+  state.selectedKey = key
+  state.selectedKeyValid = true
+  state.setGridPivot(item)
+  if state.rows != nil:
     state.rows.scrollIntoView(item div max(state.columns, 1))
+  state.pendingChanged = true
+
+proc extendGridSelection(state: GridState; item: int) =
+  if state == nil or item < 0 or item >= state.itemCount:
+    return
+  if not state.multiSelectable or state.selectionPivot < 0:
+    state.chooseGridItem(item)
+    return
+  let first = min(state.selectionPivot, item)
+  let last = max(state.selectionPivot, item)
+  state.selectedKeys.clear()
+  for selectedItem in first..last:
+    state.selectedKeys.incl(state.gridItemKey(selectedItem))
+  state.selectedItem = item
+  state.selectedKey = state.gridItemKey(item)
+  state.selectedKeyValid = true
+  if state.rows != nil:
+    state.rows.scrollIntoView(item div max(state.columns, 1))
+  state.pendingChanged = true
 
 proc select*(state: GridState; item: int) =
-  ## Selects an item, or clears selection with -1.
+  ## Selects one item, or clears selection with -1.
   if state == nil:
     raise newException(ValueError, "ui: grid state cannot be nil")
   if item < -1:
     raise newException(ValueError, "ui: selected item must be -1 or greater")
-  state.selectGridItem(item)
+  state.chooseGridItem(item)
+
+proc clearSelection*(state: GridState) =
+  ## Clears the active item and any multi-selection.
+  state.select(-1)
+
+proc toggleSelection*(state: GridState; item: int) =
+  ## Adds an item to the multi-selection, or removes it if already selected.
+  if state == nil:
+    raise newException(ValueError, "ui: grid state cannot be nil")
+  if item < 0 or item >= state.itemCount:
+    raise newException(ValueError, "ui: grid item is outside the grid")
+  state.toggleGridItem(item)
 
 proc scrollTo*(state: GridState; item: int; align = Align.Start) =
   ## Scrolls to show an item at the requested vertical alignment.
@@ -67,17 +231,82 @@ func visible*(state: GridState): tuple[first, last: int] =
     (int64(rows.last) + 1) * int64(columns) - 1)
   (first: int(firstItem), last: int(lastItem))
 
+proc clickGridItem(state: GridState; item: int; mods: platform.Modifiers) =
+  when defined(macosx):
+    const commandMask = platform.modSuper
+  else:
+    const commandMask = platform.modCtrl
+  if state.multiSelectable and (mods and platform.modShift) != 0:
+    state.extendGridSelection(item)
+  elif state.multiSelectable and (mods and commandMask) != 0:
+    state.toggleGridItem(item)
+  else:
+    state.chooseGridItem(item)
+
+proc gridItemClickHandler(state: GridState; item: int):
+    proc(mods: platform.Modifiers) {.closure.} =
+  result = proc(mods: platform.Modifiers) =
+    if item < state.itemCount:
+      state.clickGridItem(item, mods)
+
+proc gridTypeSelect(state: GridState; text: string) =
+  if state == nil or not state.selectable or state.itemLabel == nil or
+      text.len == 0 or state.itemCount == 0:
+    return
+  let now = getMonoTime()
+  if state.typedLabel.len > 0 and
+      (now - state.typedAt).inMilliseconds > 1000:
+    state.typedLabel.setLen(0)
+  let continued = state.typedLabel.len > 0
+  let lowerText = unicode.toLower(text)
+  let repeated = text.runeLen == 1 and state.typedLabel.runeLen == 1 and
+    unicode.toLower(state.typedLabel) == lowerText
+  var query = state.typedLabel & text
+  var start = state.selectedItem
+  if repeated:
+    query = text
+    inc start
+  elif not continued:
+    inc start
+  if start < 0:
+    start = 0
+  state.typedLabel = query
+  state.typedAt = now
+  let prefix = unicode.toLower(query)
+  for distance in 0..<state.itemCount:
+    let item = (start + distance) mod state.itemCount
+    if unicode.toLower(state.itemLabel(item)).startsWith(prefix):
+      state.chooseGridItem(item)
+      return
+
 proc gridKey(state: GridState; key: platform.Key;
              mods: platform.Modifiers): bool =
-  if state == nil or not state.selectable or state.itemCount <= 0 or mods != 0:
+  if state == nil or not state.selectable or state.itemCount <= 0:
+    return false
+  when defined(macosx):
+    const commandMask = platform.modSuper
+  else:
+    const commandMask = platform.modCtrl
+
+  if state.multiSelectable and key == platform.keyA and mods == commandMask:
+    let previousCount = state.selectedKeys.len
+    for item in 0..<state.itemCount:
+      state.selectedKeys.incl(state.gridItemKey(item))
+    if state.selectedKeys.len != previousCount:
+      state.pendingChanged = true
+    return true
+
+  let extend = state.multiSelectable and
+    (mods == platform.modShift or
+      mods == (platform.modShift or commandMask))
+  if mods != 0 and not extend:
     return false
 
   let count = state.itemCount
-  let columns = min(max(state.columns, 1), max(state.itemCount, 1))
+  let columns = min(max(state.columns, 1), max(count, 1))
   let current = state.selectedItem
   let selected = current >= 0 and current < count
   var target = -1
-
   case key
   of platform.keyEnter:
     if selected:
@@ -118,14 +347,80 @@ proc gridKey(state: GridState; key: platform.Key;
 
   if target < 0:
     return false
-  state.selectGridItem(target)
+  if extend:
+    if state.selectionPivot < 0 or not selected:
+      state.setGridPivot(max(current, 0))
+    state.extendGridSelection(target)
+  else:
+    state.chooseGridItem(target)
   true
+
+proc cancelGridReorder(state: GridState) =
+  if state == nil:
+    return
+  state.reorderItems.setLen(0)
+  state.reorderOrigin = -1
+  state.reorderTarget = -1
+  state.reorderTargetCell = -1
+  state.reorderPressed = false
+  state.reorderDragging = false
+  state.reorderTargetValid = false
+  state.reorderTargetAfter = false
+
+proc beginGridReorder(state: GridState; item: int; x, y: float32): bool =
+  if state == nil or state.reorder == nil or item < 0 or
+      item >= state.itemCount:
+    return false
+  state.cancelGridReorder()
+  state.reorderOrigin = item
+  if state.multiSelectable and state.isSelected(item):
+    state.reorderItems = state.selectedItems()
+  else:
+    state.reorderItems.add(item)
+  state.reorderTarget = item
+  state.reorderPointerX = x
+  state.reorderPointerY = y
+  state.reorderStartX = x
+  state.reorderStartY = y
+  state.reorderPressed = true
+  true
+
+proc updateGridReorder(state: GridState; x, y: float32): bool =
+  if state == nil or not state.reorderPressed:
+    return false
+  state.reorderPointerX = x
+  state.reorderPointerY = y
+  if not state.reorderDragging and
+      abs(x - state.reorderStartX) + abs(y - state.reorderStartY) >= 4'f32:
+    state.reorderDragging = true
+  state.reorderDragging
+
+proc finishGridReorder(state: GridState; commit: bool): bool =
+  if state == nil or not state.reorderPressed:
+    return false
+  let handler = state.reorder
+  let items = state.reorderItems
+  let target = state.reorderTarget
+  let valid = state.reorderDragging and state.reorderTargetValid and
+    target >= 0 and target <= state.itemCount
+  let samePosition = items.len == 1 and
+    (target == items[0] or target == items[0] + 1)
+  state.reorderItems = @[]
+  state.reorderPressed = false
+  state.reorderDragging = false
+  state.reorderTargetValid = false
+  state.reorderTargetAfter = false
+  state.reorderOrigin = -1
+  state.reorderTarget = -1
+  state.reorderTargetCell = -1
+  if commit and valid and not samePosition and handler != nil:
+    handler(items, target)
+    return true
 
 proc gridView*(c: Context; state: GridState; count: Natural;
                minItemWidth, itemHeight: float32;
                buildItem: proc(item: int) {.closure.}): Element =
-  ## Builds a responsive, virtualized grid. Cells are at least minItemWidth
-  ## wide and itemHeight tall; selection and keyboard navigation are optional.
+  ## Builds a responsive, virtualized grid with optional selection and reorder.
   if state == nil:
     raise newException(ValueError, "ui: grid state cannot be nil")
   if c == nil or c.owner == nil or not c.owner.inBuild:
@@ -147,12 +442,11 @@ proc gridView*(c: Context; state: GridState; count: Natural;
     state.rows.heights.defaultHeight = rowHeight
     state.rows.heights.dirty = true
 
-  state.itemCount = int(count)
   state.itemHeight = itemHeight
   state.gap = gap
-  if state.selectedItem >= state.itemCount:
-    state.selectedItem = -1
-    state.pendingChanged = true
+  state.syncGridItems(int(count))
+  if state.reorder == nil:
+    state.cancelGridReorder()
 
   let columns = min(max(state.columns, 1), max(state.itemCount, 1))
   let rowCount = if state.itemCount == 0: 0 else:
@@ -166,8 +460,7 @@ proc gridView*(c: Context; state: GridState; count: Natural;
     discard c.row().gap(gap).paddingY(gap / 2).alignItems(Align.Stretch)
       .shrink(0).children(proc() =
         for offset in 0..<itemCount:
-          let item = first + offset
-          let itemIndex = item
+          let itemIndex = first + offset
           if state.itemKey != nil:
             discard c.key(state.itemKey(itemIndex))
           else:
@@ -181,21 +474,33 @@ proc gridView*(c: Context; state: GridState; count: Natural;
             node[].accessRoleSet = true
             node[].accessPosInSet = itemIndex + 1
             node[].accessSetSize = state.itemCount
+            node[].gridCellState = state
+            node[].gridItemIndex = itemIndex
             if state.selectable:
               node[].accessExtraStates = platform.accessSelectable
+              if state.isSelected(itemIndex):
+                node[].accessExtraStates = node[].accessExtraStates or
+                  platform.accessChecked
+                node[].background = c.theme.accent
               if state.selectedItem == itemIndex:
                 node[].accessExtraStates = node[].accessExtraStates or
                   platform.accessSelected
-                node[].background = c.theme.accent
                 activeIdentity = node[].identity
+            if state.reorderDragging and itemIndex in state.reorderItems:
+              node[].opacity = 0.4'f32
+              node[].opacitySet = true
+            if state.reorderDragging and
+                itemIndex == state.reorderTargetCell:
+              node[].borderColor = c.theme.accent
+              if state.reorderTargetAfter != state.rightToLeft:
+                node[].border[1] = 2'f32
+              else:
+                node[].border[3] = 2'f32
             if state.itemLabel != nil:
               node[].label = state.itemLabel(itemIndex)
           if state.selectable:
             discard cell.tabStop(false).onClick(
-              proc(mods: platform.Modifiers) =
-                if itemIndex < state.itemCount:
-                  state.selectGridItem(itemIndex)
-            )
+              state.gridItemClickHandler(itemIndex))
           discard cell.children(proc() =
             if buildItem != nil:
               buildItem(itemIndex)
@@ -211,17 +516,22 @@ proc gridView*(c: Context; state: GridState; count: Natural;
   root[].gridViewState = state
   root[].gridMinWidth = minItemWidth
   root[].gridGap = gap
+  root[].accessSetSize = state.itemCount
   state.rightToLeft = root[].rightToLeft
   for slot in cellSlots:
     c.owner.nodes[slot].focusTargetSlot = int32(result.slot)
-  root[].accessExtraStates = root[].accessExtraStates or
-    (if state.selectable: platform.accessSelectable
-     else: platform.AccessStates(0))
   if state.selectable:
+    root[].accessExtraStates = root[].accessExtraStates or
+      platform.accessSelectable
+    if state.multiSelectable:
+      root[].accessExtraStates = root[].accessExtraStates or
+        platform.accessMultiselectable
     discard result.focusable().focusRing(false)
     root[].keyHandler = proc(key: platform.Key; mods: platform.Modifiers;
                              focusSlot: var int): bool =
       state.gridKey(key, mods)
+    if state.itemLabel != nil:
+      root[].textInputHandler = proc(text: string) = state.gridTypeSelect(text)
   if state.selectable:
     root[].activeDescendantIdentity = activeIdentity
   if state.pendingChanged:

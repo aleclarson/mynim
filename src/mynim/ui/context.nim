@@ -311,6 +311,8 @@ type
     toolbarCollapsed, toolbarMore: bool
     toolbarState: ToolbarState
     gridViewState: GridState
+    gridCellState: GridState
+    gridItemIndex: int
     gridMinWidth, gridGap: float32
     modal, autoFocus: bool
     modalScopeIdentity, overlayOwnerIdentity: uint64
