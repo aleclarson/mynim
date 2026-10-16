@@ -1221,7 +1221,8 @@ proc queueSliderValue(rt: Runtime; slot: int; value: float64): bool =
   rt.requestFrame()
   true
 
-proc queueSliderPointer(rt: Runtime; slot: int): bool =
+proc queueSliderPointer(rt: Runtime; slot: int;
+                        activateRating = false): bool =
   let layout = rt.frameLayout
   let owner = layout.owner
   if owner == nil or owner.closed or layout.generation != owner.generation or
@@ -1231,6 +1232,8 @@ proc queueSliderPointer(rt: Runtime; slot: int): bool =
       classify(rt.pointerY) in {fcNan, fcInf, fcNegInf}:
     return false
   let node = owner.nodes[slot]
+  if node.rating and not activateRating:
+    return false
   let bounds = layout.rects[slot]
   var fraction: float32
   if node.sliderVertical:
@@ -1248,6 +1251,18 @@ proc queueSliderPointer(rt: Runtime; slot: int): bool =
     if node.rightToLeft:
       fraction = 1 - fraction
   fraction = max(0'f32, min(1'f32, fraction))
+  if node.rating:
+    let maximum = int(node.sliderHigh - node.sliderLow)
+    if maximum <= 0:
+      return false
+    let index = min(max(int(floor(float64(fraction) * float64(maximum))) + 1,
+      1), maximum)
+    let identity = node.identity
+    let current = owner.pendingSliderValues.getOrDefault(identity,
+      node.sliderValue)
+    let next = if current == float64(index): node.sliderLow
+      else: float64(index)
+    return rt.queueSliderValue(slot, next)
   let value = node.sliderLow + fraction.float64 *
     (node.sliderHigh - node.sliderLow)
   rt.queueSliderValue(slot, value)
@@ -1823,7 +1838,7 @@ proc event(rt: Runtime; ev: platform.SurfaceEvent): bool =
       let sliderSlot = rt.frameLayout.sliderAncestor(slot)
       if sliderSlot >= 0:
         slot = sliderSlot
-        discard rt.queueSliderPointer(sliderSlot)
+        discard rt.queueSliderPointer(sliderSlot, activateRating = true)
       var targetNode = rt.frameLayout.owner.nodes[slot]
       if targetNode.listState != nil and targetNode.listRowIndex >= 0 and
           not targetNode.listRowHeader:

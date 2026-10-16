@@ -38,6 +38,7 @@ include mynim/ui/widgets
 include mynim/ui/collapsible
 include mynim/ui/meter
 include mynim/ui/progress
+include mynim/ui/rating
 include mynim/ui/tabs
 include mynim/ui/table
 include mynim/ui/outline

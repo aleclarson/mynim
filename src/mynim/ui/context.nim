@@ -192,7 +192,7 @@ type
     hasText, textNoWrap, textColorSet, textOverlay, listRowSelected,
       listRowFocusVisible, listRowHeader, listRowPinnedHeader: bool
     listRowAction: bool
-    slider, sliderVertical: bool
+    slider, sliderVertical, rating: bool
     sliderLow, sliderHigh, sliderValue, sliderStep: float64
     hasAccessRange: bool
     accessMin, accessMax, accessNow: float64
