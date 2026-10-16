@@ -430,6 +430,9 @@ proc accessibilityTree(layout: LayoutResult;
     if label.len == 0 and node.hasText and not node.textOverlay:
       label = node.textValue
     let parentSlot = int(node.parent)
+    if node.rangeSliderThumb and parentSlot > 0 and
+        parentSlot < owner.nodes.len and owner.nodes[parentSlot].label.len > 0:
+      label = owner.nodes[parentSlot].label & " " & label
     let parent = if parentSlot >= 0: accessIndex[parentSlot] else: -1
     let rect = layout.rects[slot]
     var accessible = platform.AccessNode(id: uint64(slot + 1),
@@ -1196,7 +1199,7 @@ proc sliderAncestor(layout: LayoutResult; slot: int): int =
   var current = slot
   while current > 0 and current < owner.nodes.len:
     let node = owner.nodes[current]
-    if node.slider:
+    if node.slider or node.rangeSlider:
       return current
     current = int(node.parent)
   -1
@@ -1213,16 +1216,93 @@ proc queueSliderValue(rt: Runtime; slot: int; value: float64): bool =
   let identity = node.identity
   let current = owner.pendingSliderValues.getOrDefault(identity,
     node.sliderValue)
-  let next = value.snapSliderValue(node.sliderLow, node.sliderHigh,
+  let snapped = value.snapSliderValue(node.sliderLow, node.sliderHigh,
     node.sliderStep)
+  let next = min(max(snapped, node.sliderClampLow), node.sliderClampHigh)
   if next == current:
     return false
   owner.pendingSliderValues[identity] = next
   rt.requestFrame()
   true
 
+proc rangeSliderThumbSlot(owner: ElementOwner; rootSlot: int;
+                          handle: int8): int =
+  if owner == nil or rootSlot <= 0 or rootSlot >= owner.nodes.len:
+    return -1
+  var child = int(owner.nodes[rootSlot].firstChild)
+  while child > 0 and child < owner.nodes.len:
+    let node = owner.nodes[child]
+    if node.rangeSliderThumb and node.rangeSliderHandle == handle:
+      return child
+    child = int(node.nextSibling)
+  -1
+
+proc queueRangeSliderPointer(rt: Runtime; slot: int;
+                             activatePointer: bool): bool =
+  let layout = rt.frameLayout
+  let owner = layout.owner
+  let hitNode = owner.nodes[slot]
+  let rootSlot = if hitNode.rangeSlider: slot else: int(hitNode.parent)
+  if rootSlot <= 0 or rootSlot >= owner.nodes.len or
+      not owner.nodes[rootSlot].rangeSlider or rootSlot >= layout.rects.len:
+    return false
+  let root = owner.nodes[rootSlot]
+  let lowSlot = owner.rangeSliderThumbSlot(rootSlot, 0)
+  let highSlot = owner.rangeSliderThumbSlot(rootSlot, 1)
+  if lowSlot < 0 or highSlot < 0:
+    return false
+
+  let bounds = layout.rects[rootSlot]
+  let left = bounds.x + root.border[3] + root.pad[3]
+  let width = bounds.w - root.contentInsetX
+  if width <= 0:
+    return false
+  var fraction = (rt.pointerX - left) / width
+  if root.rightToLeft:
+    fraction = 1'f32 - fraction
+  fraction = max(0'f32, min(1'f32, fraction))
+  let targetValue = root.sliderLow + fraction.float64 *
+    (root.sliderHigh - root.sliderLow)
+
+  var handle = if hitNode.rangeSliderThumb:
+      hitNode.rangeSliderHandle
+    else:
+      -1'i8
+  if activatePointer or not owner.rangeSliderDrags.hasKey(root.identity):
+    if handle < 0:
+      let lowValue = owner.nodes[lowSlot].sliderValue
+      let highValue = owner.nodes[highSlot].sliderValue
+      handle = if abs(targetValue - highValue) < abs(targetValue - lowValue) or
+          targetValue > highValue: 1'i8 else: 0'i8
+  else:
+    handle = owner.rangeSliderDrags[root.identity]
+  if activatePointer:
+    owner.rangeSliderDrags[root.identity] = handle
+
+  let thumbSlot = if handle == 0: lowSlot else: highSlot
+  let focusChanged = rt.focusSlot != thumbSlot or rt.keyboardFocusVisible
+  rt.focusSlot = thumbSlot
+  rt.keyboardFocusVisible = false
+  rt.cancelKeyPress()
+  if focusChanged:
+    rt.requestFrame()
+  rt.queueSliderValue(thumbSlot, targetValue) or focusChanged
+
+proc rangeSliderIdentity(owner: ElementOwner; slot: int): uint64 =
+  if owner == nil or slot <= 0 or slot >= owner.nodes.len:
+    return 0
+  let node = owner.nodes[slot]
+  if node.rangeSlider:
+    return node.identity
+  if node.rangeSliderThumb:
+    let parent = int(node.parent)
+    if parent > 0 and parent < owner.nodes.len and
+        owner.nodes[parent].rangeSlider:
+      return owner.nodes[parent].identity
+  0
+
 proc queueSliderPointer(rt: Runtime; slot: int;
-                        activateRating = false): bool =
+                        activatePointer = false): bool =
   let layout = rt.frameLayout
   let owner = layout.owner
   if owner == nil or owner.closed or layout.generation != owner.generation or
@@ -1232,7 +1312,9 @@ proc queueSliderPointer(rt: Runtime; slot: int;
       classify(rt.pointerY) in {fcNan, fcInf, fcNegInf}:
     return false
   let node = owner.nodes[slot]
-  if node.stepper or (node.rating and not activateRating):
+  if node.rangeSlider or node.rangeSliderThumb:
+    return rt.queueRangeSliderPointer(slot, activatePointer)
+  if node.stepper or (node.rating and not activatePointer):
     return false
   let bounds = layout.rects[slot]
   var fraction: float32
@@ -1295,9 +1377,9 @@ proc sliderKey(rt: Runtime; key: platform.Key;
     of platform.keyUp:
       value += step
     of platform.keyHome:
-      value = node.sliderLow
+      value = node.sliderClampLow
     of platform.keyEnd:
-      value = node.sliderHigh
+      value = node.sliderClampHigh
     else:
       return false
     discard rt.queueSliderValue(rt.focusSlot, value)
@@ -1316,9 +1398,9 @@ proc sliderKey(rt: Runtime; key: platform.Key;
   of platform.keyPageUp:
     value += pageStep
   of platform.keyHome:
-    value = node.sliderLow
+    value = node.sliderClampLow
   of platform.keyEnd:
-    value = node.sliderHigh
+    value = node.sliderClampHigh
   else:
     return false
   discard rt.queueSliderValue(rt.focusSlot, value)
@@ -1856,7 +1938,7 @@ proc event(rt: Runtime; ev: platform.SurfaceEvent): bool =
       let sliderSlot = rt.frameLayout.sliderAncestor(slot)
       if sliderSlot >= 0:
         slot = sliderSlot
-        discard rt.queueSliderPointer(sliderSlot, activateRating = true)
+        discard rt.queueSliderPointer(sliderSlot, activatePointer = true)
       var targetNode = rt.frameLayout.owner.nodes[slot]
       if targetNode.listState != nil and targetNode.listRowIndex >= 0 and
           not targetNode.listRowHeader:
@@ -1948,7 +2030,10 @@ proc event(rt: Runtime; ev: platform.SurfaceEvent): bool =
       else:
         -1
     if sliderSlot >= 0:
+      let rangeIdentity = rt.frameLayout.owner.rangeSliderIdentity(sliderSlot)
       discard rt.queueSliderPointer(sliderSlot)
+      if rangeIdentity != 0:
+        rt.frameLayout.owner.rangeSliderDrags.del(rangeIdentity)
     var clickedSlot = -1
     let clicked = rt.frameLayout.dispatchClick(rt.pressTarget,
       rt.pointerX, rt.pointerY, rt.pressMods, clickedSlot)
@@ -1980,6 +2065,7 @@ proc event(rt: Runtime; ev: platform.SurfaceEvent): bool =
     rt.keyboardFocusVisible = false
     rt.surfaceFocused = false
     rt.context.owner.focusActive = false
+    rt.context.owner.rangeSliderDrags.clear()
     rt.pressTarget = Element()
     rt.pressMods = 0
     rt.pressHoverSlots.setLen(0)

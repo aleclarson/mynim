@@ -3144,6 +3144,8 @@ proc sliderBase*(c: Context; value: var float64; low, high: float64): Element =
   n[].sliderLow = low
   n[].sliderHigh = high
   n[].sliderStep = (high - low) / 100
+  n[].sliderClampLow = low
+  n[].sliderClampHigh = high
   n[].accessRole = platform.roleSlider
   n[].accessRoleSet = true
   if result.owner.pendingSliderValues.hasKey(n[].identity):
