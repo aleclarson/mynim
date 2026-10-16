@@ -16,7 +16,7 @@ type TextFieldClient = ref object of platform.TextInputClient
   bufferSnapshot: TextSnapshot
   anchor, caret: int
   mark: platform.TextRange
-  hasMark, nativeChanged, readOnly, rightToLeft: bool
+  hasMark, nativeChanged, readOnly, password, rightToLeft: bool
   insetX, insetY: float32
   placeholderColor: Color
   style: textStack.Style
@@ -69,9 +69,20 @@ proc setFieldText(client: TextFieldClient; value: string) =
   client.nativeChanged = false
 
 proc rebuildFieldLayout(client: TextFieldClient) =
+  let display = if client.password:
+      repeat("•", client.text.runeLen)
+    else:
+      client.text
   client.shaped = textStack.shared().layout(textStack.Params(
-    text: client.text, style: client.style, noWrap: true,
+    text: display, style: client.style, noWrap: true,
     keepSpaces: true, rtl: client.rightToLeft))
+
+proc fieldDisplayText(client: TextFieldClient): string =
+  if client.text.len == 0:
+    return client.placeholder
+  if client.password:
+    return repeat("•", client.text.runeLen)
+  client.text
 
 proc clearTextFieldHistory(client: TextFieldClient) =
   client.textUndo.setLen(0)
@@ -502,6 +513,8 @@ method textForRange*(client: TextFieldClient; r: platform.TextRange):
   let actual = platform.TextRange(
     start: platform.utf16Len(client.text[0 ..< firstByte]),
     `end`: platform.utf16Len(client.text[0 ..< pastLastByte]))
+  if client.password:
+    return (repeat("•", actual.`end` - actual.start), actual)
   (client.text[firstByte ..< pastLastByte], actual)
 
 method selection*(client: TextFieldClient): platform.TextSelection =
@@ -700,7 +713,7 @@ proc finishTextField(c: Context; e: Element; client: TextFieldClient) =
   node[].focusable = true
   node[].hasText = true
   node[].textNoWrap = true
-  node[].textValue = if client.text.len == 0: client.placeholder else: client.text
+  node[].textValue = client.fieldDisplayText()
   node[].textColor = if client.text.len == 0 and client.placeholder.len > 0:
       c.theme.textMuted
     else:
@@ -734,6 +747,7 @@ proc leaveTextAreaMode(client: TextFieldClient) =
 
 proc initializeTextArea(client: TextFieldClient; buffer: TextBuffer) =
   client.clearTextFieldHistory()
+  client.password = false
   client.multiline = true
   client.boundBuffer = buffer
   client.areaScroll = newScrollState()
@@ -772,6 +786,7 @@ proc textInputBase*(c: Context; value: var string): Element =
   let client = result.acquireTextField(value)
   client.onPaste = nil
   client.leaveTextAreaMode()
+  client.password = false
 
   if client.boundBuffer != nil:
     client.clearTextFieldHistory()
@@ -807,6 +822,7 @@ proc textInputBufferBase*(c: Context; buffer: TextBuffer): Element =
   let client = result.acquireTextField("")
   client.onPaste = nil
   client.leaveTextAreaMode()
+  client.password = false
   if client.boundBuffer != buffer:
     client.clearTextFieldHistory()
     client.boundBuffer = buffer
@@ -992,6 +1008,16 @@ proc readOnly*(e: Element; value = true): Element =
   let client = e.fieldClient()
   if client != nil:
     client.readOnly = value
+
+proc password*(e: Element): Element =
+  ## Masks a single-line field and hides its value from clipboard and input methods.
+  result = e
+  let client = e.fieldClient()
+  let node = e.node
+  if client != nil and node != nil and not client.multiline:
+    client.password = true
+    client.rebuildFieldLayout()
+    node[].textValue = client.fieldDisplayText()
 
 proc onPaste*(e: Element; action: proc(text: string): bool {.closure.}): Element =
   ## Lets action handle clipboard text before the field inserts it. An empty

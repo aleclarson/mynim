@@ -455,6 +455,9 @@ proc accessibilityTree(layout: LayoutResult;
       accessible.value = value
       accessible.placeholder = node.placeholder
       if node.textClient of TextFieldClient and
+          TextFieldClient(node.textClient).password:
+        accessible.states = accessible.states or platform.accessPassword
+      if node.textClient of TextFieldClient and
           TextFieldClient(node.textClient).readOnly:
         accessible.states = accessible.states or platform.accessReadOnly
     if node.focusable or node.clickHandler != nil or node.textClient != nil:
@@ -638,8 +641,18 @@ proc inputChanged(rt: Runtime; slot: int; before: string) =
   if owner != nil and not owner.closed and slot > 0 and
       slot < owner.nodes.len and owner.nodes[slot].textClient != nil:
     let identity = owner.nodes[slot].identity
-    if platform.clientTextContext(owner.nodes[slot].textClient).text != before:
-      if owner.nodes[slot].textClient of TextFieldClient:
+    let client = owner.nodes[slot].textClient
+    let changed = if client of TextFieldClient:
+      let field = TextFieldClient(client)
+      if field.password:
+        not field.hasMark and (field.nativeChanged or
+          platform.clientTextContext(client).text != before)
+      else:
+        platform.clientTextContext(client).text != before
+    else:
+      platform.clientTextContext(client).text != before
+    if changed:
+      if client of TextFieldClient:
         owner.deferTextInputChange(identity, owner.generation)
       else:
         discard owner.notifyAction(identity, owner.generation, actionChange)
@@ -855,13 +868,15 @@ proc textFieldCommand(rt: Runtime; command: string): bool =
   let selected = client.fieldRange()
   case command
   of "copy":
+    if client.password:
+      return true
     let (text, actual) = client.textForRange(selected)
     if actual.start < actual.`end` and rt.conn != nil and
         rt.conn.clipboard != nil:
       rt.conn.clipboard.writeText(text)
     true
   of "cut":
-    if client.readOnly:
+    if client.readOnly or client.password:
       return true
     let (text, actual) = client.textForRange(selected)
     if actual.start < actual.`end`:
