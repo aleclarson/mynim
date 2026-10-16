@@ -345,6 +345,7 @@ type
     keyHandler: UiKeyHandler
     treeAccessAction: TreeAccessAction
     treeAccessFocus: TreeAccessFocus
+    textInputHandler: proc(text: string) {.closure.}
     tableState: ListState
     tableColumnId: string
     tableColumnIndex: int

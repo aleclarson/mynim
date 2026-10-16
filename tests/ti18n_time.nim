@@ -10,3 +10,7 @@ block time_patterns:
 block localized_integer_digits:
   doAssert i18n.formatInteger("en", 7, 2) == "07"
   doAssert i18n.formatInteger("fa", 7, 2) == "۰۷"
+
+block localized_period_names:
+  let (am, pm) = i18n.dayPeriods("zh-Hans", i18n.nameAbbreviated)
+  doAssert am == "上午" and pm == "下午"

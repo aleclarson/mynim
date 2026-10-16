@@ -2275,6 +2275,15 @@ proc event(rt: Runtime; ev: platform.SurfaceEvent): bool =
   of platform.textInput:
     let adapter = rt.textInputAdapter
     if adapter == nil or adapter.inputTarget() == nil:
+      let owner = rt.frameLayout.owner
+      if owner != nil and rt.focusSlot > 0 and
+          rt.focusSlot < owner.nodes.len:
+        let handler = owner.nodes[rt.focusSlot].textInputHandler
+        if handler != nil:
+          handler(ev.text)
+          rt.keyboardFocusVisible = true
+          rt.requestFrame()
+          return true
       if rt.frameLayout.handleListText(rt.focusSlot, ev.text):
         rt.keyboardFocusVisible = true
         rt.requestFrame()

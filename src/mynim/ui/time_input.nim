@@ -135,6 +135,17 @@ proc timeDigitAction(c: Context; state: TimeControlState; segment, digit,
                      hourCycle: int): proc() {.closure.} =
   result = proc() = c.queueTimeDigit(state, segment, digit, hourCycle)
 
+proc queueTimePeriodText(state: TimeControlState; text, am, pm: string;
+                         hourCycle: int) =
+  let typed = text.toLowerAscii
+  if typed.len == 0:
+    return
+  let isAm = typed == "a" or am.toLowerAscii.startsWith(typed)
+  let isPm = typed == "p" or pm.toLowerAscii.startsWith(typed)
+  let current = state.pendingTime()
+  if (isAm and current.hour >= 12) or (isPm and current.hour < 12):
+    state.queueTimeValue(changedTime(current, 2, 0, hourCycle))
+
 proc timeSegment(c: Context; state: TimeControlState;
                  segment, position: int; order: seq[int]; hourCycle: int;
                  locale: string; am, pm: string; value: DateTime): Element =
@@ -211,6 +222,8 @@ proc timeSegment(c: Context; state: TimeControlState;
       discard element.onShortcut(0, key,
         timeDigitAction(c, state, segment, digit, hourCycle))
   elif segment == 2:
+    node[].textInputHandler = proc(text: string) =
+      state.queueTimePeriodText(text, am, pm, hourCycle)
     discard element.onShortcut(0, platform.keyA, proc() =
       let current = state.pendingTime()
       if current.hour >= 12:
