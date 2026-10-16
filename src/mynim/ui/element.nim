@@ -247,8 +247,7 @@ type
     selectionPivotKey: string
     selectionPivotKeyValid: bool
     selectionSpan: int
-    externalKeySelection: Selection[string]
-    externalIndexSelection: Selection[int]
+    externalSelection: SelectionBinding
     anchor: int
     anchorKey: string
     anchorInset: float64
@@ -301,8 +300,7 @@ type
     selectedKeyValid, selectionPivotKeyValid: bool
     selectionPivot, reorderOrigin, reorderTarget, reorderTargetCell: int
     selectedKeys: HashSet[string]
-    externalKeySelection: Selection[string]
-    externalIndexSelection: Selection[int]
+    externalSelection: SelectionBinding
     typedLabel: string
     typedAt: MonoTime
     reorderItems: seq[int]

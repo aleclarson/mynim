@@ -4,18 +4,14 @@ proc gridItemKey(state: GridState; item: int): string =
   if state.itemKey == nil: $item else: state.itemKey(item)
 
 proc gridSelectionCount(state: GridState): int =
-  if state.externalKeySelection != nil:
-    state.externalKeySelection.len
-  elif state.externalIndexSelection != nil:
-    state.externalIndexSelection.len
+  if state.externalSelection != nil:
+    state.externalSelection.itemCount()
   else:
     state.selectedKeys.len
 
 proc gridItemIsSelected(state: GridState; item: int): bool =
-  if state.externalKeySelection != nil:
-    state.externalKeySelection.has(state.gridItemKey(item))
-  elif state.externalIndexSelection != nil:
-    state.externalIndexSelection.has(item)
+  if state.externalSelection != nil:
+    state.externalSelection.containsItem(item)
   else:
     state.selectedKeys.contains(state.gridItemKey(item))
 
@@ -24,16 +20,8 @@ proc setGridItemSelected(state: GridState; item: int;
   let exists = state.gridItemIsSelected(item)
   if exists == selected:
     return false
-  if state.externalKeySelection != nil:
-    if selected:
-      state.externalKeySelection.add(state.gridItemKey(item))
-    else:
-      state.externalKeySelection.remove(state.gridItemKey(item))
-  elif state.externalIndexSelection != nil:
-    if selected:
-      state.externalIndexSelection.add(item)
-    else:
-      state.externalIndexSelection.remove(item)
+  if state.externalSelection != nil:
+    return state.externalSelection.setItem(item, selected)
   if selected:
     state.selectedKeys.incl(state.gridItemKey(item))
   else:
@@ -43,10 +31,8 @@ proc setGridItemSelected(state: GridState; item: int;
 proc clearGridSelection(state: GridState): bool =
   result = state.gridSelectionCount() > 0
   state.selectedKeys.clear()
-  if state.externalKeySelection != nil:
-    state.externalKeySelection.clear()
-  if state.externalIndexSelection != nil:
-    state.externalIndexSelection.clear()
+  if state.externalSelection != nil:
+    discard state.externalSelection.clearItems()
 
 proc findGridItemKey(state: GridState; key: string; nearItem: int): int =
   if state == nil or state.itemCount <= 0:
@@ -133,6 +119,19 @@ proc newGridState*(selectable = false; itemKey: GridItemKey = nil;
   result.rows.rowAccess = proc(row: int): ListRowAccess =
     ListRowAccess(role: platform.roleGroup)
 
+proc bindSelection*[K](state: GridState; selection: var Selection[K];
+    keyAt: proc(item: int): K {.closure.}): GridState =
+  ## Binds app-owned selection using the item's comparable key.
+  if state == nil:
+    raise newException(ValueError, "ui: grid state cannot be nil")
+  if keyAt == nil:
+    raise newException(ValueError, "ui: grid selection key cannot be nil")
+  state.externalSelection = newSelectionBinding(selection, keyAt)
+  state.selectedKeys.clear()
+  state.selectable = true
+  state.multiSelectable = true
+  state
+
 proc bindSelection*(state: GridState;
                     selection: var Selection[string]): GridState =
   ## Binds app-owned selection to a grid with stable string item keys.
@@ -141,13 +140,7 @@ proc bindSelection*(state: GridState;
   if state.itemKey == nil:
     raise newException(ValueError,
       "ui: string selection requires a grid itemKey")
-  selection.ensure()
-  state.externalKeySelection = selection
-  state.externalIndexSelection = nil
-  state.selectedKeys.clear()
-  state.selectable = true
-  state.multiSelectable = true
-  state
+  state.bindSelection(selection, state.itemKey)
 
 proc bindSelection*(state: GridState;
                     selection: var Selection[int]): GridState =
@@ -157,13 +150,7 @@ proc bindSelection*(state: GridState;
   if state.itemKey != nil:
     raise newException(ValueError,
       "ui: integer selection requires a grid without itemKey")
-  selection.ensure()
-  state.externalKeySelection = nil
-  state.externalIndexSelection = selection
-  state.selectedKeys.clear()
-  state.selectable = true
-  state.multiSelectable = true
-  state
+  state.bindSelection(selection, proc(item: int): int = item)
 
 func selected*(state: GridState): int =
   ## Returns the active item index, or -1 when no item is active.

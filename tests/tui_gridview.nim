@@ -1,8 +1,14 @@
-import std/assertions
+import std/[assertions, hashes]
 
 include "../src/mynim.nim"
 import mynim/internal/fake as fakeBackend
 import mynim/ui as ui
+
+type GridSelectionKey = object
+  value: int
+
+proc hash(key: GridSelectionKey): Hash = hash(key.value)
+proc `==`(left, right: GridSelectionKey): bool = left.value == right.value
 
 let fake = fakeBackend.newFakeBackend()
 theBackend = platform.Backend(fake)
@@ -121,6 +127,28 @@ block unkeyed_grid_shares_index_selection:
   doAssert not state.isSelected(1)
   state.toggleSelection(3)
   doAssert chosen.has(3)
+  state.clearSelection()
+  doAssert chosen.len == 0
+
+block grid_shares_custom_selection_keys:
+  let context = ui.newContext()
+  var chosen: ui.Selection[GridSelectionKey]
+  chosen.add(GridSelectionKey(value: 20))
+  let state = ui.newGridState().bindSelection(chosen,
+    proc(item: int): GridSelectionKey =
+      GridSelectionKey(value: item * 10))
+
+  context.build(proc(ctx: ui.Context) =
+    discard ctx.gridView(state, 4, 40, 20,
+      proc(item: int) = discard).size(100, 60)
+  )
+  discard context.layout(100, 60)
+  doAssert state.isSelected(2)
+
+  state.toggleSelection(3)
+  doAssert chosen.has(GridSelectionKey(value: 30))
+  chosen.remove(GridSelectionKey(value: 20))
+  doAssert not state.isSelected(2)
   state.clearSelection()
   doAssert chosen.len == 0
 

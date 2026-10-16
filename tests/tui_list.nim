@@ -1,5 +1,11 @@
-import std/assertions
+import std/[assertions, hashes]
 import mynim/ui
+
+type SelectionTestKey = object
+  value: int
+
+proc hash(key: SelectionTestKey): Hash = hash(key.value)
+proc `==`(left, right: SelectionTestKey): bool = left.value == right.value
 
 proc keyedAnchorAfterPrepend(keepOffset: bool):
     tuple[offset: float32, firstVisible: int] =
@@ -281,6 +287,43 @@ block unkeyed_app_selection_uses_row_indices:
 
   state.toggleSelection(3)
   doAssert selected.has(3)
+  state.clearSelection()
+  doAssert selected.len == 0
+
+block app_selection_accepts_custom_key_types:
+  let context = newContext()
+  var offset = 0
+  let rowKey: ListRowKey = proc(row: int): string = $(offset + row)
+  let state = newListState(20, rowKey = rowKey)
+  var selected: Selection[SelectionTestKey]
+  selected.add(SelectionTestKey(value: 2))
+  discard state.bindSelection(selected,
+    proc(row: int): SelectionTestKey =
+      SelectionTestKey(value: offset + row))
+  var count = 4
+
+  proc buildList() =
+    context.build(proc(ctx: Context) =
+      discard ctx.list(state, count, proc(row: int) =
+        discard ctx.box().height(20).shrink(0)
+      ).size(120, 40)
+    )
+
+  buildList()
+  discard context.layout(120, 40)
+  doAssert state.isSelected(2)
+  state.toggleSelection(1)
+  doAssert selected.has(SelectionTestKey(value: 1))
+
+  offset = -1
+  inc count
+  buildList()
+  discard context.layout(120, 40)
+  doAssert state.isSelected(2)
+  doAssert state.isSelected(3)
+
+  selected.remove(SelectionTestKey(value: 2))
+  doAssert state.selectedRows() == @[2]
   state.clearSelection()
   doAssert selected.len == 0
 

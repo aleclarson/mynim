@@ -201,80 +201,38 @@ proc selectionEntry(state: ListState; row: int): ListSelectedRow =
 proc listRowIsSelected(state: ListState; row: int): bool =
   if row < 0 or row >= state.rowCount or state.isListHeader(row):
     return false
+  if state.externalSelection != nil:
+    return state.externalSelection.containsItem(row)
   if state.rowKey != nil:
-    if state.externalKeySelection != nil:
-      state.externalKeySelection.has(state.rowKey(row))
-    else:
-      state.selectedKeys.contains(state.rowKey(row))
+    state.selectedKeys.contains(state.rowKey(row))
   else:
-    if state.externalIndexSelection != nil:
-      state.externalIndexSelection.has(row)
-    else:
-      state.selectedIndices.contains(row)
-
-proc syncExternalListSelection(state: ListState) =
-  if state.externalKeySelection != nil:
-    for i in countdown(state.chosenRows.high, 0):
-      let chosen = state.chosenRows[i]
-      if chosen.keyValid and not state.externalKeySelection.has(chosen.key):
-        state.selectedKeys.excl(chosen.key)
-        state.chosenRows.delete(i)
-
-    for key in state.externalKeySelection.all:
-      if not state.selectedKeys.contains(key):
-        state.selectedKeys.incl(key)
-        let row = state.findListKey(key, 0)
-        state.chosenRows.add(ListSelectedRow(row: row,
-          nearRow: max(row, 0), key: key, keyValid: true))
-
-  if state.externalIndexSelection != nil:
-    for i in countdown(state.chosenRows.high, 0):
-      let chosen = state.chosenRows[i]
-      if not chosen.keyValid and
-          not state.externalIndexSelection.has(chosen.row):
-        state.selectedIndices.excl(chosen.row)
-        state.chosenRows.delete(i)
-
-    for row in state.externalIndexSelection.all:
-      if not state.selectedIndices.contains(row):
-        state.selectedIndices.incl(row)
-        state.chosenRows.add(ListSelectedRow(row: row, nearRow: row))
+    state.selectedIndices.contains(row)
 
 proc setListRowSelected(state: ListState; row: int; selected: bool): bool =
   if row < 0 or (selected and state.isListHeader(row)):
     return false
   let entry = state.selectionEntry(row)
-  let exists = if entry.keyValid:
-      if state.externalKeySelection != nil:
-        state.externalKeySelection.has(entry.key)
-      else:
-        state.selectedKeys.contains(entry.key)
+  let exists = if state.externalSelection != nil:
+      state.externalSelection.containsItem(row)
+    elif entry.keyValid:
+      state.selectedKeys.contains(entry.key)
     else:
-      if state.externalIndexSelection != nil:
-        state.externalIndexSelection.has(row)
-      else:
-        state.selectedIndices.contains(row)
+      state.selectedIndices.contains(row)
   if exists == selected:
     return false
+  if state.externalSelection != nil:
+    return state.externalSelection.setItem(row, selected)
   if selected:
     if entry.keyValid:
       state.selectedKeys.incl(entry.key)
-      if state.externalKeySelection != nil:
-        state.externalKeySelection.add(entry.key)
     else:
       state.selectedIndices.incl(row)
-      if state.externalIndexSelection != nil:
-        state.externalIndexSelection.add(row)
     state.chosenRows.add(entry)
     return true
   if entry.keyValid:
     state.selectedKeys.excl(entry.key)
-    if state.externalKeySelection != nil:
-      state.externalKeySelection.remove(entry.key)
   else:
     state.selectedIndices.excl(row)
-    if state.externalIndexSelection != nil:
-      state.externalIndexSelection.remove(row)
   for i, chosen in state.chosenRows:
     let same = if entry.keyValid:
         chosen.keyValid and chosen.key == entry.key
@@ -300,7 +258,6 @@ proc setListCursor(state: ListState; row: int; pivot: bool) =
     state.selectionSpan = 0
 
 proc syncListSelection(state: ListState) =
-  state.syncExternalListSelection()
   for i in 0..<state.chosenRows.len:
     var chosen = state.chosenRows[i]
     if not chosen.keyValid and state.rowKey != nil and
@@ -327,12 +284,8 @@ proc syncListSelection(state: ListState) =
       if state.isListHeader(chosen.row):
         if chosen.keyValid:
           state.selectedKeys.excl(chosen.key)
-          if state.externalKeySelection != nil:
-            state.externalKeySelection.remove(chosen.key)
         else:
           state.selectedIndices.excl(chosen.row)
-          if state.externalIndexSelection != nil:
-            state.externalIndexSelection.remove(chosen.row)
         state.chosenRows.delete(i)
 
   if state.selectionPivotKeyValid and state.rowKey != nil:
@@ -585,6 +538,21 @@ proc newListState*(estimatedRowHeight = 28'f32; rowGap = 0'f32;
   result.selectionPivot = -1
   result.last = -1
 
+proc bindSelection*[K](state: ListState; selection: var Selection[K];
+    keyAt: proc(row: int): K {.closure.}): ListState =
+  ## Binds app-owned selection using the item's comparable key.
+  if state == nil:
+    raise newException(ValueError, "ui: list state cannot be nil")
+  if keyAt == nil:
+    raise newException(ValueError, "ui: list selection key cannot be nil")
+  state.externalSelection = newSelectionBinding(selection, keyAt)
+  state.chosenRows.setLen(0)
+  state.selectedKeys.clear()
+  state.selectedIndices.clear()
+  state.multiSelectionEnabled = true
+  state.selectionEnabled = true
+  state
+
 proc bindSelection*(state: ListState;
                     selection: var Selection[string]): ListState =
   ## Binds app-owned selection to a list with stable string row keys.
@@ -593,16 +561,7 @@ proc bindSelection*(state: ListState;
   if state.rowKey == nil:
     raise newException(ValueError,
       "ui: string selection requires a list rowKey")
-  selection.ensure()
-  state.externalKeySelection = selection
-  state.externalIndexSelection = nil
-  state.chosenRows.setLen(0)
-  state.selectedKeys.clear()
-  state.selectedIndices.clear()
-  state.multiSelectionEnabled = true
-  state.selectionEnabled = true
-  state.syncExternalListSelection()
-  state
+  state.bindSelection(selection, state.rowKey)
 
 proc bindSelection*(state: ListState;
                     selection: var Selection[int]): ListState =
@@ -612,25 +571,14 @@ proc bindSelection*(state: ListState;
   if state.rowKey != nil:
     raise newException(ValueError,
       "ui: integer selection requires a list without rowKey")
-  selection.ensure()
-  state.externalKeySelection = nil
-  state.externalIndexSelection = selection
-  state.chosenRows.setLen(0)
-  state.selectedKeys.clear()
-  state.selectedIndices.clear()
-  state.multiSelectionEnabled = true
-  state.selectionEnabled = true
-  state.syncExternalListSelection()
-  state
+  state.bindSelection(selection, proc(row: int): int = row)
 
 proc clearListMultiSelection(state: ListState) =
   state.chosenRows.setLen(0)
   state.selectedKeys.clear()
   state.selectedIndices.clear()
-  if state.externalKeySelection != nil:
-    state.externalKeySelection.clear()
-  if state.externalIndexSelection != nil:
-    state.externalIndexSelection.clear()
+  if state.externalSelection != nil:
+    discard state.externalSelection.clearItems()
 
 proc setFollowEndAnimation*(state: ListState; animation: Animation) =
   ## Enables follow-end and animates rows added while the list stays at its end.
@@ -690,6 +638,11 @@ proc isSelected*(state: ListState; row: int): bool =
 proc selectedRows*(state: ListState): seq[int] =
   ## Returns the selected row indices still present in the current list.
   if state == nil or not state.multiSelectionEnabled:
+    return
+  if state.externalSelection != nil:
+    for row in 0..<state.rowCount:
+      if state.listRowIsSelected(row):
+        result.add(row)
     return
   state.syncListSelection()
   for chosen in state.chosenRows:

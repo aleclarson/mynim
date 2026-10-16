@@ -6,6 +6,30 @@
 type
   Selection*[K] = ref object
     keys: HashSet[K]
+  SelectionBinding = ref object
+    containsItem: proc(item: int): bool {.closure.}
+    setItem: proc(item: int; selected: bool): bool {.closure.}
+    clearItems: proc(): bool {.closure.}
+    itemCount: proc(): int {.closure.}
+
+proc setSelectionKey[K](selection: Selection[K]; key: K;
+                        selected: bool): bool =
+  if selection == nil:
+    return false
+  let exists = selection.keys.contains(key)
+  if exists == selected:
+    return false
+  if selected:
+    selection.keys.incl(key)
+  else:
+    selection.keys.excl(key)
+  true
+
+proc clearSelectionKeys[K](selection: Selection[K]): bool =
+  if selection == nil or selection.keys.len == 0:
+    return false
+  selection.keys.clear()
+  true
 
 proc ensure[K](selection: var Selection[K]) =
   if selection == nil:
@@ -24,20 +48,30 @@ proc len*[K](selection: Selection[K]): int =
 proc add*[K](selection: var Selection[K]; key: K) =
   ## Selects key.
   selection.ensure()
-  selection.keys.incl(key)
+  discard selection.setSelectionKey(key, true)
 
 proc remove*[K](selection: var Selection[K]; key: K) =
   ## Removes key from the selection.
-  if selection != nil:
-    selection.keys.excl(key)
+  discard selection.setSelectionKey(key, false)
 
 proc clear*[K](selection: var Selection[K]) =
   ## Clears the selection.
-  if selection != nil:
-    selection.keys.clear()
+  discard selection.clearSelectionKeys()
 
 iterator all*[K](selection: Selection[K]): K =
   ## Iterates selected keys in unspecified order.
   if selection != nil:
     for key in selection.keys:
       yield key
+
+proc newSelectionBinding[K](selection: var Selection[K];
+    keyAt: proc(item: int): K {.closure.}): SelectionBinding =
+  selection.ensure()
+  let shared = selection
+  result = SelectionBinding(
+    containsItem: proc(item: int): bool = shared.has(keyAt(item)),
+    setItem: proc(item: int; selected: bool): bool =
+      shared.setSelectionKey(keyAt(item), selected),
+    clearItems: proc(): bool = shared.clearSelectionKeys(),
+    itemCount: proc(): int = shared.len
+  )
