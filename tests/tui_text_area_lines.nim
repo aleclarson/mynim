@@ -3,6 +3,7 @@ import mynim/ui as ui
 
 block text_area_lines_follow_wrapped_text:
   var draft = ""
+  var defaultDraft = ""
   let buffer = ui.newTextBuffer()
   var minLines = 1
   var fixedHeight = false
@@ -13,6 +14,7 @@ block text_area_lines_follow_wrapped_text:
         area = area.height(90)
       discard area.label("Draft")
       discard ctx.textAreaBufferBase(buffer).lines(1, 4).label("Buffer")
+      discard ctx.textAreaBase(defaultDraft).label("Default")
     )
   , 400, 600)
   defer: tester.close()
@@ -21,6 +23,18 @@ block text_area_lines_follow_wrapped_text:
   doAssert foundEmpty and empty.h > 0
   let (emptyBuffer, foundEmptyBuffer) = tester.find("Buffer")
   doAssert foundEmptyBuffer and emptyBuffer.h == empty.h
+  let (emptyDefault, foundEmptyDefault) = tester.find("Default")
+  doAssert foundEmptyDefault and abs(emptyDefault.h - 3 * empty.h) <= 1
+
+  defaultDraft = repeat("word ", 400)
+  tester.frame()
+  let (wrappedDefault, foundWrappedDefault) = tester.find("Default")
+  doAssert foundWrappedDefault and abs(wrappedDefault.h - emptyDefault.h) <= 1
+
+  defaultDraft = "one\ntwo\nthree\nfour"
+  tester.frame()
+  let (fourParagraphs, foundFourParagraphs) = tester.find("Default")
+  doAssert foundFourParagraphs and abs(fourParagraphs.h - 4 * empty.h) <= 1
 
   draft = "one line"
   tester.frame()

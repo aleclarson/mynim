@@ -680,13 +680,16 @@ proc measureTree(nodes: seq[ElementNode]; natural: var seq[NaturalSize];
       else:
         contentH += node.gapY * float32(childCount - 1)
 
-    if node.textAreaInput and node.textAreaMaxLines > 0:
+    if node.textAreaInput:
       let line = textStack.shared().layout(textStack.Params(text: " ",
         style: node.textStyle, keepSpaces: true, rtl: node.rightToLeft))
       let lineHeight = max(line.height, max(node.textStyle.size, 1'f32))
-      contentH = min(max(contentH,
-        float32(node.textAreaMinLines) * lineHeight),
-        float32(node.textAreaMaxLines) * lineHeight)
+      if node.textAreaMaxLines > 0:
+        contentH = min(max(contentH,
+          float32(node.textAreaMinLines) * lineHeight),
+          float32(node.textAreaMaxLines) * lineHeight)
+      else:
+        contentH = float32(max(node.textAreaParagraphs, 3)) * lineHeight
 
     let width = node.width.resolve(-1)
     let height = node.height.resolve(-1)

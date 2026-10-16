@@ -1080,6 +1080,7 @@ proc textAreaCore(c: Context; buffer: TextBuffer;
   node[].clipY = true
   let snapshot = client.bufferSnapshot
   let count = snapshot.lineCount()
+  node[].textAreaParagraphs = count
   let first = client.areaFirst
   let pastLast = client.areaPastLast
   let top = client.areaHeights.top(first).float32
@@ -1119,10 +1120,14 @@ proc lines*(e: Element; min, max: int): Element =
 proc textAreaBase*(c: Context; value: var string): Element =
   ## Creates an unstyled multiline editor bound to a string. Native edits are
   ## copied into value on the next build before the field's change actions.
+  ## Without `lines()`, its height follows the paragraph count, at least three
+  ## lines, and wrapped text scrolls within it.
   result = c.textAreaCore(nil, addr value)
 
 proc textAreaBufferBase*(c: Context; buffer: TextBuffer): Element =
   ## Creates an unstyled multiline editor over an indexed text buffer.
+  ## Without `lines()`, its height follows the paragraph count, at least three
+  ## lines, and wrapped text scrolls within it.
   result = c.textAreaCore(buffer, nil)
 
 proc themeTextInput(c: Context; e: Element): Element =

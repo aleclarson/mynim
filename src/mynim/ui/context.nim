@@ -423,6 +423,7 @@ type
     textAreaOwner: platform.TextInputClient
     textAreaInput: bool
     textAreaMinLines, textAreaMaxLines: int
+    textAreaParagraphs: int
     textAreaLine: int
     clickHandler: proc(mods: platform.Modifiers) {.closure.}
     menuBuilder: proc(menu: Menu) {.closure.}
