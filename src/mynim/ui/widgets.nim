@@ -287,6 +287,7 @@ proc themedButton(c: Context; label: string; primary: bool): Element =
   let wasPressed = result.pressed()
   let wasHovered = result.hovered()
   let grouped = c.segmentedToggles and not primary
+  let toolbar = c.toolbarButtons and not primary and not grouped
   var foreground = theme.text
   if primary:
     foreground = theme.accentText
@@ -298,6 +299,12 @@ proc themedButton(c: Context; label: string; primary: bool): Element =
     result = result.gap(theme.space(1.5))
       .padding(theme.space(1), theme.space(3))
       .radius(max(theme.radius - theme.space(0.5), 0'f32))
+      .background(if wasPressed: theme.surfacePressed
+        elif wasHovered: theme.surfaceHover else: rgba(0, 0, 0, 0))
+  elif toolbar:
+    result = result.gap(theme.space(1.5))
+      .padding(theme.space(1.5), theme.space(2.5))
+      .radius(theme.radius)
       .background(if wasPressed: theme.surfacePressed
         elif wasHovered: theme.surfaceHover else: rgba(0, 0, 0, 0))
   else:
@@ -586,6 +593,10 @@ proc toggle*(c: Context; on: var bool; label: string): Element =
       .background(if frameOn:
         (if theme.dark: theme.surfacePressed else: theme.background)
       elif wasHovered: theme.surfaceHover else: rgba(0, 0, 0, 0))
+  elif c.toolbarButtons:
+    result = result.radius(theme.radius).background(if frameOn:
+      theme.surfacePressed
+    elif wasHovered: theme.surfaceHover else: rgba(0, 0, 0, 0))
   else:
     result = result.radius(theme.radius)
       .background(if frameOn: theme.surfacePressed

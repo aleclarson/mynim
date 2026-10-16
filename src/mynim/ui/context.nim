@@ -12,7 +12,7 @@ type
     accordion: AccordionBuild
     accordionHeaders: Table[uint64, seq[uint64]]
     checkboxGroup: CheckboxGroupBuild
-    segmentedToggles: bool
+    segmentedToggles, toolbarButtons: bool
     formDepth: int
     pendingKey: string
     rightToLeft: bool
