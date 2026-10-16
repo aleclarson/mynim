@@ -262,7 +262,7 @@ proc cursorHandle*(c: Cursor): uint =
   h
 
 method setTextInput*(s: w32Surface, t: TextInputState) =
-  let active = t.active
+  let active = t.active and not t.noInputMethod
   let caret = t.caret
   if s.input.active and s.input.client != t.client:
     s.clientComposition.reset()

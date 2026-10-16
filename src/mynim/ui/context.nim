@@ -360,6 +360,7 @@ type
     dialogState: DialogState
     dialogDismissed: bool
     tabStopSet, tabStop: bool
+    noInputMethod: bool
     formContainer, formField, formLabel, accessHidden, disabled,
       invalid, tooltipEnabled, tooltipOverlay, passThrough: bool
     popoverAnchor: bool

@@ -138,6 +138,8 @@ proc clientRange(r: nsRange): ref TextRange =
 
 proc setMarkedText(s: macSurface, text: string,
                    selected, replacement: nsRange) =
+  if s.input.noInputMethod:
+    return
   let c = s.input.client
   if c != nil:
     c.setMarkedText(clientRange(replacement), text, TextRange(

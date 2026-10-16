@@ -3416,6 +3416,13 @@ proc onClick*(e: Element;
     if handler != nil:
       n.focusable = true
 
+proc inputMethod*(e: Element; on: bool): Element =
+  ## Controls whether focused text accepts input-method composition.
+  result = e
+  let n = e.node
+  if n != nil:
+    n.noInputMethod = not on
+
 proc cursor*(e: Element; value: platform.Cursor): Element =
   ## Sets the pointer cursor while the pointer is over e.
   result = e

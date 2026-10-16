@@ -85,6 +85,23 @@ block headless_text_input_events:
   doAssert value == "start!"
   tester.setFocused(false)
   doAssert not tester.textInputActive()
+  doAssert not tester.textInputNoInputMethod()
+
+block no_input_method:
+  var value = "command"
+  let tester = ui.newTester(proc(ctx: ui.Context) =
+    discard ctx.textInput(value).label("Command").inputMethod(false)
+  , 160, 40)
+  defer: tester.close()
+
+  doAssert tester.click("Command") == nil
+  doAssert tester.textInputActive()
+  doAssert tester.textInputNoInputMethod()
+  doAssert tester.textCaret().active
+  tester.compose("あ", 1)
+  doAssert value == "command"
+  tester.typeText("x")
+  doAssert value == "commandx"
 
 block headless_native_menu:
   let tester = ui.newTester(proc(ctx: ui.Context) =

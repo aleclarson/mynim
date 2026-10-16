@@ -321,10 +321,13 @@ method setCursor*(s: macSurface, c: Cursor) =
     s.applyCursor()
 
 method setTextInput*(s: macSurface, t: TextInputState) =
-  if s.input.client != t.client and s.input.active:
+  if s.input.active and
+      (s.input.client != t.client or
+       (not s.input.noInputMethod and t.noInputMethod)):
     s.marked = ""
     discard send(send(s.view, "inputContext"), "discardMarkedText")
-  if s.input.active and not t.active and s.marked != "":
+  if s.input.active and (not t.active or
+      (not s.input.noInputMethod and t.noInputMethod)) and s.marked != "":
     s.marked = ""
     discard send(send(s.view, "inputContext"), "discardMarkedText")
   let moved = t.active != s.input.active or t.caret != s.input.caret
@@ -723,8 +726,9 @@ proc registerSurfaceClass*() =
         if s == nil:
           return
         let mods = eventMods(ev)
-        let ime = s.input.active and
-          (mods and (platform.modSuper or platform.modCtrl)) == 0
+        let noShortcut = (mods and (platform.modSuper or platform.modCtrl)) == 0
+        let ime = s.input.active and not s.input.noInputMethod and
+          noShortcut
         # A key typed while the input method composes is the input
         # method's alone, as Enter choosing a candidate or Escape
         # giving the composition up, as GTK's and IMM32's filtering
@@ -733,6 +737,14 @@ proc registerSurfaceClass*() =
           discard s.send(platform.SurfaceEvent(kind: keyPressed,
             key: eventKey(ev), physicalKey: physicalKey(ev), mods: mods,
             repeat: sendBool(ev, "isARepeat")))
+        if s.input.active and s.input.noInputMethod and noShortcut:
+          let chars = goString(send(ev, "characters"))
+          var text = ""
+          for rune in chars.runes:
+            if rune.int32 >= 0x20 and rune.int32 != 0x7F:
+              text.add(toUTF8(rune))
+          if text != "":
+            discard s.send(platform.SurfaceEvent(kind: textInput, text: text))
         # Input methods see the key while a text input has the focus;
         # they answer with insertText: or setMarkedText:.
         if ime:

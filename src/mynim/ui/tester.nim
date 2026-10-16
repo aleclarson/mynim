@@ -396,6 +396,9 @@ proc setFocused*(t: Tester; focused: bool) =
   t.send(platform.SurfaceEvent(kind: kind))
 
 proc compose*(t: Tester; text: string; caret: int) =
+  if t != nil and t.surface.textInput.active and
+      t.surface.textInput.noInputMethod:
+    return
   t.send(platform.SurfaceEvent(kind: platform.textComposition, text: text,
                                 caret: caret))
 
@@ -411,6 +414,11 @@ proc textCaret*(t: Tester): tuple[rect: Rect, active: bool] =
 
 proc textInputActive*(t: Tester): bool =
   t != nil and t.surface.textInput.active
+
+proc textInputNoInputMethod*(t: Tester): bool =
+  ## Reports whether the focused text input disables composition.
+  t != nil and t.surface.textInput.active and
+    t.surface.textInput.noInputMethod
 
 proc clipboard*(t: Tester): string =
   if t != nil:

@@ -74,6 +74,8 @@ type
     ## The state of the text input that has the keyboard, for input
     ## methods.
     active*: bool
+    ## noInputMethod lets keyboard layouts type directly without composing.
+    noInputMethod*: bool
     ## caret is the caret's rectangle, in DIPs relative to the surface.
     caret*: RectF
     ## text is the input's text around the caret, and start and `end` the

@@ -384,12 +384,13 @@ method setCursor*(s: gtkSurface, c: Cursor) =
 
 method setTextInput*(s: gtkSurface, t: TextInputState) =
   let active = t.active
+  let inputMethodActive = active and not t.noInputMethod
   let caret = t.caret
-  if s.textInput and (not active or s.input.client != t.client):
+  if s.textInput and (not inputMethodActive or s.input.client != t.client):
     s.clientComposition.reset()
     gtkIMContextReset(s.im)
   s.input = t
-  s.textInput = active
+  s.textInput = inputMethodActive
   s.caret = caret
   if active:
     var r = gdkRectangle(x: int32(caret.x), y: int32(caret.y),
@@ -666,9 +667,20 @@ proc initSurfaceCallbacks*() =
         s.lastKey = gdkEventCopy(event)
       if s.textInput and gtkIMContextFilterKeypress(s.im, event):
         return true
+      let keyval = field[uint32](event, 28)
+      let rawMods = field[uint32](event, 24)
+      let mods = gdkMods(rawMods)
+      let altGr = (rawMods and (1'u32 shl 7)) != 0 # GDK_MOD5_MASK
+      if kind == keyPressed and s.input.active and s.input.noInputMethod and
+          (mods and (modCtrl or modSuper)) == 0 and
+          ((mods and modAlt) == 0 or altGr):
+        let rune = gdkKeyvalToUnicode(keyval)
+        if rune >= 0x20 and rune != 0x7f and rune <= 0x10ffff:
+          discard s.send(SurfaceEvent(kind: textInput,
+            text: $Rune(int32(rune))))
       # A modifier key on its own: the state is the one before the
       # event, so the key's own bit goes in or out.
-      let bit = modifierKeyval(field[uint32](event, 28))
+      let bit = modifierKeyval(keyval)
       if bit != 0:
         var state = gdkMods(field[uint32](event, 24))
         if kind == keyPressed:
@@ -678,8 +690,7 @@ proc initSurfaceCallbacks*() =
         discard s.send(SurfaceEvent(kind: modifiersChanged,
           mods: state))
         return false
-      let k = keyvalKey(field[uint32](event, 28))
-      let mods = gdkMods(field[uint32](event, 24))
+      let k = keyvalKey(keyval)
       let physical = eventPhysicalKey(event)
       # A key the layout types no US key for, as S on a Cyrillic
       # layout, still reaches shortcuts by its position. A release is
@@ -732,6 +743,8 @@ proc initSurfaceCallbacks*() =
       var cursor: int32
       gtkIMContextGetPreedit(s.im, addr str, nil, addr cursor)
       let text = takeStr(str)
+      if s.input.noInputMethod:
+        return
       if s.input.client != nil:
         let c = s.input.client
         s.clientComposition.reset()
@@ -753,6 +766,8 @@ proc initSurfaceCallbacks*() =
     proc(im, data: pointer) {.cdecl.} =
       let s = theBackend.surfaceOf(data)
       if s.isNil:
+        return
+      if s.input.noInputMethod:
         return
       if s.input.client != nil:
         s.clientComposition.`end`(s.input.client)

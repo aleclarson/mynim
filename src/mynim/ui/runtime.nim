@@ -1051,7 +1051,8 @@ proc sameTextInput(a, b: platform.TextInputState): bool =
   a.active == b.active and a.caret.x == b.caret.x and
     a.caret.y == b.caret.y and a.caret.w == b.caret.w and
     a.caret.h == b.caret.h and a.text == b.text and
-    a.start == b.start and a.`end` == b.`end` and a.client == b.client
+    a.start == b.start and a.`end` == b.`end` and a.client == b.client and
+    a.noInputMethod == b.noInputMethod
 
 proc utf16AtRune(value: string; offset: int): int =
   var left = max(offset, 0)
@@ -1134,6 +1135,7 @@ proc updateTextInput(rt: Runtime) =
     let adapter = rt.textInputAdapter
     let context = platform.clientTextContext(adapter)
     state.active = true
+    state.noInputMethod = rt.frameLayout.owner.nodes[focusedSlot].noInputMethod
     state.client = adapter
     state.text = context.text
     state.start = runeAtUtf16(context.text, context.start)
@@ -1154,6 +1156,9 @@ proc updateTextInput(rt: Runtime) =
     return
   if rt.hasTextInputState and rt.lastTextInput.sameTextInput(state):
     return
+  if rt.hasTextInputState and rt.lastTextInput.active and
+      rt.lastTextInput.noInputMethod != state.noInputMethod:
+    rt.inputComposition.reset()
   rt.conn.surface.setTextInput(state)
   rt.lastTextInput = state
   rt.hasTextInputState = true
@@ -2681,6 +2686,9 @@ proc event(rt: Runtime; ev: platform.SurfaceEvent): bool =
     let adapter = rt.textInputAdapter
     if adapter == nil or adapter.inputTarget() == nil:
       return false
+    when not defined(emscripten):
+      if rt.lastTextInput.noInputMethod:
+        return false
     if ev.text.len == 0:
       rt.inputComposition.`end`(adapter)
     else:
