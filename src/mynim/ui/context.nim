@@ -103,7 +103,9 @@ type
     scroll: ScrollState
     pointerRevision: uint64
     highlight: int
-    open, filtering, hasPendingChoice: bool
+    tokenCount, pendingTokenRemovals: int
+    open, filtering, hasPendingChoice, tokenField,
+      pendingTokenSubmission: bool
 
   TooltipState = object
     hover, focus, shown, dismissed: uint64

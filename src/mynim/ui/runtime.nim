@@ -425,6 +425,12 @@ proc comboBoxKey(rt: Runtime; key: platform.Key;
   if not node.comboBoxInput or node.comboBoxState == nil:
     return false
   let state = node.comboBoxState
+  if key == platform.keyBackspace and state.tokenField and
+      state.query.len == 0 and state.tokenCount > 0:
+    inc state.pendingTokenRemovals
+    rt.keyboardFocusVisible = true
+    rt.requestFrame()
+    return true
   case key
   of platform.keyDown:
     if not state.open:
