@@ -32,6 +32,10 @@ type
     fontSize*: float32 ## Text size in DIPs; defaults to 13.
     caretSelection: Selection
     selectionPending: bool
+    syntaxBuffer: Buffer
+    syntaxLanguage: syntax.Language
+    syntaxVersion: uint64
+    syntaxStates: seq[uint64]
 
   BufferUndoEntry = object
     before, after: ui.TextSnapshot
@@ -162,6 +166,72 @@ proc language*(buffer: Buffer): syntax.Language =
   if buffer != nil:
     withLock buffer.mu:
       result = buffer.language
+
+proc clearSyntaxCache(state: State; language: syntax.Language;
+                      version: uint64) =
+  state.syntaxBuffer = state.buffer
+  state.syntaxLanguage = language
+  state.syntaxVersion = version
+  state.syntaxStates = @[0'u64]
+
+proc cachedTokens(state: State; snapshot: Snapshot;
+                  language: syntax.Language; line: int): seq[syntax.Token] =
+  if language == nil or language.tokenizer == nil or line < 0 or
+      line >= snapshot.lineCount():
+    return
+  if state.syntaxBuffer != state.buffer or
+      state.syntaxLanguage != language or
+      state.syntaxVersion != snapshot.version():
+    state.clearSyntaxCache(language, snapshot.version())
+  var scratch: seq[syntax.Token]
+  while state.syntaxStates.len <= line:
+    let index = state.syntaxStates.len - 1
+    let next = language.tokenizer(snapshot.line(index),
+      state.syntaxStates[index], scratch)
+    state.syntaxStates.add(next)
+    scratch.setLen(0)
+  let next = language.tokenizer(snapshot.line(line),
+    state.syntaxStates[line], result)
+  if line == state.syntaxStates.len - 1:
+    state.syntaxStates.add(next)
+
+proc syntaxColor(theme: ui.Theme; kind: syntax.TokenKind): ui.Color =
+  case kind
+  of syntax.tokenKeyword, syntax.tokenTag, syntax.tokenHeading,
+      syntax.tokenLink, syntax.tokenMeta:
+    result = theme.accent
+  of syntax.tokenType, syntax.tokenNumber, syntax.tokenAttribute,
+      syntax.tokenRegexp:
+    result = theme.warning
+  of syntax.tokenFunction, syntax.tokenConstant, syntax.tokenEscape,
+      syntax.tokenEmphasis, syntax.tokenStrong:
+    result = theme.accentHover
+  of syntax.tokenString, syntax.tokenCode, syntax.tokenInserted:
+    result = theme.success
+  of syntax.tokenComment, syntax.tokenProperty, syntax.tokenOperator,
+      syntax.tokenPunctuation:
+    result = theme.textMuted
+  of syntax.tokenDeleted, syntax.tokenInvalid:
+    result = theme.danger
+  of syntax.tokenText, syntax.tokenVariable:
+    result = theme.text
+
+proc syntaxSpans(state: State; snapshot: Snapshot;
+                 language: syntax.Language; theme: ui.Theme;
+                 line: int; text: string): seq[ui.Span] =
+  let tokens = state.cachedTokens(snapshot, language, line)
+  if tokens.len == 0:
+    return
+  var byteStart = 0
+  for token in tokens:
+    let pastLast = min(text.len, token.pastLast)
+    if pastLast <= byteStart:
+      continue
+    result.add(ui.Span(text: text[byteStart ..< pastLast],
+      color: theme.syntaxColor(token.kind)))
+    byteStart = pastLast
+  if byteStart < text.len:
+    result.add(ui.Span(text: text[byteStart .. ^1], color: theme.text))
 
 proc setLanguage*(buffer: Buffer; language: syntax.Language) =
   ## Associates language metadata with the buffer; nil means plain text.
@@ -462,11 +532,21 @@ proc view*(c: ui.Context; state: State): ui.Element =
   ## Builds a native, editable code-editor surface over `state.buffer`.
   ## The caller chooses its size with `fill`, `grow`, or an explicit size.
   ## Text rendering and native editing use the UI's virtualized text area;
-  ## line gutters, syntax styling, multi-caret input, and editor commands are
-  ## added by later editor layers.
+  ## line gutters, multi-caret input, and editor commands are added by later
+  ## editor layers.
   state.ensureState()
   let snapshot = state.buffer.snapshot()
-  result = c.textAreaBufferBase(state.buffer.document)
+  let language = state.buffer.language
+  let theme = c.theme()
+  let styleLine: ui.TextAreaStyler =
+    if language == nil or language.tokenizer == nil: nil
+    else:
+      proc(line: int; text: string): seq[ui.Span] =
+        state.syntaxSpans(snapshot, language, theme, line, text)
+  result = if styleLine == nil:
+      c.textAreaBufferBase(state.buffer.document)
+    else:
+      c.textAreaBufferStyledBase(state.buffer.document, styleLine)
   let family = if state.fontFamily.len == 0: "monospace" else: state.fontFamily
   let size = if state.fontSize <= 0: 13'f32 else: state.fontSize
   discard result.textFamily(family).textSize(size)

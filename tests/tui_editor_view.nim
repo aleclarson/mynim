@@ -14,6 +14,7 @@ app.handleReady()
 
 let editorState = editor.newState("a😀b")
 editorState.label = "Source"
+editorState.buffer.setLanguage(editor.languageNamed("go"))
 let uiContent = ui.newContent(proc(ctx: ui.Context) =
   discard editor.view(ctx, editorState).size(240, 100)
 )

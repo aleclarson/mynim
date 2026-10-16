@@ -1,6 +1,6 @@
 ## Language metadata and line-tokenizer types for native code editors.
 
-import std/strutils
+import std/[strutils, tables]
 
 type
   BracketMode = enum
@@ -63,6 +63,8 @@ type
     hardTabs*: bool ## Whether this language usually indents with tab bytes.
     tokenizer*: Tokenizer ## Optional line tokenizer; nil leaves text unstyled.
 
+include "lexer_impl"
+
 proc brackets(mode: BracketMode): seq[BracketPair] =
   if mode in {bracketCommon, bracketCommonAndAngles}:
     result.add(BracketPair(open: "(", close: ")"))
@@ -91,7 +93,8 @@ proc builtin(name: string; extensions: seq[string];
     brackets: brackets(bracketMode),
     autoClose: if hasAutoClose: autoClosePairs(autoQuotes, autoCloseNotIn)
       else: @[],
-    wordChars: wordChars, tabSize: tabSize, hardTabs: hardTabs)
+    wordChars: wordChars, tabSize: tabSize, hardTabs: hardTabs,
+    tokenizer: builtinTokenizer(name))
 
 let builtinLanguages = @[
   builtin("Go", @[".go"], lineComment = "//", blockOpen = "/*",

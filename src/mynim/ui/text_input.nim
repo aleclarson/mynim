@@ -3,6 +3,9 @@
 const maxTextUndoSteps = 200
 
 type
+  TextAreaStyler* = proc(line: int; text: string): seq[Span] {.closure.}
+    ## Produces styled runs for one visible text-area line.
+
   TextAreaUndoEntry = object
     before, after: TextSnapshot
     beforeAnchor, beforeCaret, afterAnchor, afterCaret: int
@@ -1261,7 +1264,7 @@ proc textInputBufferBase*(c: Context; buffer: TextBuffer): Element =
   c.finishTextField(result, client)
 
 proc textAreaCore(c: Context; buffer: TextBuffer;
-                  boundValue: ptr string): Element =
+                  boundValue: ptr string; styler: TextAreaStyler): Element =
   result = c.newTextFieldElement()
   let node = result.node
   if node == nil:
@@ -1343,7 +1346,10 @@ proc textAreaCore(c: Context; buffer: TextBuffer;
     if top > 0:
       discard c.box().height(top).shrink(0)
     for line in first..<pastLast:
-      let paragraph = c.text(snapshot.line(line)).shrink(0)
+      let text = snapshot.line(line)
+      let spans = if styler == nil: @[] else: styler(line, text)
+      let paragraph = if spans.len == 0: c.text(text).shrink(0)
+        else: c.richText(spans).shrink(0)
         .minHeight(lineHeight)
       if paragraph.node != nil:
         paragraph.node[].textAreaOwner = client
@@ -1374,13 +1380,20 @@ proc textAreaBase*(c: Context; value: var string): Element =
   ## copied into value on the next build before the field's change actions.
   ## Without `lines()`, its height follows the paragraph count, at least three
   ## lines, and wrapped text scrolls within it.
-  result = c.textAreaCore(nil, addr value)
+  result = c.textAreaCore(nil, addr value, nil)
 
 proc textAreaBufferBase*(c: Context; buffer: TextBuffer): Element =
   ## Creates an unstyled multiline editor over an indexed text buffer.
   ## Without `lines()`, its height follows the paragraph count, at least three
   ## lines, and wrapped text scrolls within it.
-  result = c.textAreaCore(buffer, nil)
+  result = c.textAreaCore(buffer, nil, nil)
+
+proc textAreaBufferStyledBase*(c: Context; buffer: TextBuffer;
+                               styler: TextAreaStyler): Element =
+  ## Creates an unstyled multiline editor whose visible lines use `styler`.
+  ## The line callback affects painting; caret and selection geometry remain
+  ## based on the same text and font metrics.
+  result = c.textAreaCore(buffer, nil, styler)
 
 proc themeTextInput(c: Context; e: Element): Element =
   let theme = c.theme
