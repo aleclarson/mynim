@@ -33,7 +33,8 @@ proc fileDropTargetAt(layout: LayoutResult; x, y: float32): int =
 proc dataDropTargetAt(layout: LayoutResult; x, y: float32;
                       drag: platform.DataDragEvent):
                       tuple[slot: int, formats: seq[transfer.Format],
-                            operation: transfer.Operation] =
+                            operation: transfer.Operation,
+                            localValue: bool] =
   if drag == nil:
     return
   let owner = layout.owner
@@ -44,6 +45,13 @@ proc dataDropTargetAt(layout: LayoutResult; x, y: float32;
     var slot = candidate
     while slot > 0 and slot < owner.nodes.len:
       let node = owner.nodes[slot]
+      if drag.`local` != nil and node.valueAccepts != nil and
+          node.valueAccepts(drag.`local`) and
+          not owner.effectivelyDisabled(slot):
+        let operation = transfer.negotiate(drag.offer.operations,
+          transfer.Copy, drag.offer.suggested)
+        if operation != transfer.None:
+          return (slot, @[], operation, true)
       if node.dropDataTarget and not owner.effectivelyDisabled(slot):
         var formats: seq[transfer.Format]
         for format in node.dropDataOptions.formats:
@@ -53,7 +61,7 @@ proc dataDropTargetAt(layout: LayoutResult; x, y: float32;
         let operation = transfer.negotiate(drag.offer.operations,
           node.dropDataOptions.operations, drag.offer.suggested)
         if formats.len > 0 and operation != transfer.None:
-          return (slot, formats, operation)
+          return (slot, formats, operation, false)
       slot = int(node.parent)
 
 proc dataDragOver*(e: Element; options: transfer.DropOptions):

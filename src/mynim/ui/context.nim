@@ -228,9 +228,13 @@ type
     keyframes: Table[uint64, Table[string, ScalarSequence]]
     findBarStates: Table[uint64, FindBarState]
     pendingDataDrops: Table[uint64, transfer.Drop]
+    pendingValueDrops: Table[uint64, RootRef]
     pendingFileDrops: Table[uint64, seq[string]]
     dataOverIdentity, fileOverIdentity: uint64
     dataOverOffer: transfer.Offer
+    dataOverLocalIdentity, dragSourceIdentity, dragOverIdentity: uint64
+    dataOverLocal, dragValue: RootRef
+    dragCanceled: bool
     pendingDropGeneration: uint32
     routers: seq[Router]
     frameNow: MonoTime
@@ -402,6 +406,8 @@ type
     dropDataOptions: transfer.DropOptions
     dragDataProvider: proc(): transfer.Data {.closure.}
     dragDataOptions: transfer.DragOptions
+    dragValueProvider: proc(): RootRef {.closure.}
+    valueAccepts: proc(value: RootRef): bool {.closure.}
     tableState: ListState
     tableColumnId: string
     tableColumnIndex: int
@@ -578,6 +584,7 @@ proc newContext*(): Context =
     initTable[uint64, Table[string, ScalarSequence]]()
   result.owner.findBarStates = initTable[uint64, FindBarState]()
   result.owner.pendingDataDrops = initTable[uint64, transfer.Drop]()
+  result.owner.pendingValueDrops = initTable[uint64, RootRef]()
   result.owner.pendingFileDrops = initTable[uint64, seq[string]]()
   result.accordionHeaders = initTable[uint64, seq[uint64]]()
   result.theme = lightTheme()
@@ -934,10 +941,17 @@ proc retire(owner: ElementOwner) =
   owner.keyframes.clear()
   owner.findBarStates.clear()
   owner.pendingDataDrops.clear()
+  owner.pendingValueDrops.clear()
   owner.pendingFileDrops.clear()
   owner.dataOverIdentity = 0
   owner.fileOverIdentity = 0
   owner.dataOverOffer = transfer.Offer()
+  owner.dataOverLocalIdentity = 0
+  owner.dataOverLocal = nil
+  owner.dragSourceIdentity = 0
+  owner.dragOverIdentity = 0
+  owner.dragValue = nil
+  owner.dragCanceled = false
   owner.pendingDropGeneration = 0
   owner.committedRects = @[]
   owner.lastBounds.clear()
@@ -1479,6 +1493,7 @@ proc build*(c: Context; view: proc(c: Context) {.closure.}) =
     c.owner.pendingTextSubmitCallbacks.clear()
     if c.owner.pendingDropGeneration == c.owner.generation:
       c.owner.pendingDataDrops.clear()
+      c.owner.pendingValueDrops.clear()
       c.owner.pendingFileDrops.clear()
       c.owner.pendingDropGeneration = 0
     if built:

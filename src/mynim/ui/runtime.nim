@@ -33,6 +33,7 @@ type
     pressX, pressY: float32
     dragCandidateIdentity: uint64
     nativeDragStarted: bool
+    localDrag: LocalDragState
     splitPointerOffset: float64
     hasPointer: bool
     hoverSlots, pressHoverSlots, pressedSlots, clickedSlots: seq[int]
@@ -50,6 +51,13 @@ type
     elif (defined(linux) and (defined(amd64) or defined(arm64))) or
         defined(emscripten):
       glRenderer: glGpu.Renderer
+
+  LocalDragState = ref object
+    sourceIdentity, overIdentity: uint64
+    value: RootRef
+    preview: scene.Image
+    width, height, hotX, hotY: int
+    canceled: bool
 
   TextInputAdapter = ref object of platform.TextInputClient
     runtime: Runtime
@@ -1848,6 +1856,7 @@ proc sliderKey(rt: Runtime; key: platform.Key;
 proc autoScrollListReorder(rt: Runtime; state: ListState): bool
 proc gridReorderTarget(rt: Runtime; state: GridState)
 proc autoScrollGridReorder(rt: Runtime; state: GridState): bool
+proc paintLocalDrag(rt: Runtime; frame: var scene.Scene)
 proc showMenuButton(rt: Runtime; identity: uint64;
                     build: proc(menu: Menu) {.closure.})
 
@@ -1994,6 +2003,7 @@ proc renderFrame(rt: Runtime; presentFrame = true) =
       rt.requestFrame()
   rt.updateTextInput()
   rt.frameScene = layout.paintScene(scale)
+  rt.paintLocalDrag(rt.frameScene)
   rt.hasScene = true
   rt.updateAccessibility()
   if presentFrame:
@@ -2312,7 +2322,8 @@ proc dragCandidate(rt: Runtime; target: Element): uint64 =
   var slot = int(target.slot)
   while slot > 0 and slot < owner.nodes.len:
     let node = owner.nodes[slot]
-    if node.dragDataProvider != nil and not owner.effectivelyDisabled(slot):
+    if (node.dragDataProvider != nil or node.dragValueProvider != nil) and
+        not owner.effectivelyDisabled(slot):
       return node.identity
     slot = int(node.parent)
 
@@ -2354,7 +2365,39 @@ proc dragPreview(rt: Runtime; slot: int; startX, startY: float32):
     x: min(max(int(startX - left), 0), width - 1),
     y: min(max(int(startY - top), 0), height - 1))
 
-proc startDataDragFromPress(rt: Runtime): bool =
+proc updateLocalDragTarget(rt: Runtime) =
+  let drag = rt.localDrag
+  let owner = rt.frameLayout.owner
+  if drag == nil or drag.canceled or owner == nil:
+    return
+  let slot = rt.frameLayout.valueDropTargetAt(rt.pointerX, rt.pointerY,
+    drag.value)
+  drag.overIdentity = if slot > 0: owner.nodes[slot].identity else: 0'u64
+  owner.dragOverIdentity = drag.overIdentity
+
+proc clearDragOwner(owner: ElementOwner) =
+  if owner == nil:
+    return
+  owner.dragSourceIdentity = 0
+  owner.dragOverIdentity = 0
+  owner.dragValue = nil
+  owner.dragCanceled = false
+
+proc paintLocalDrag(rt: Runtime; frame: var scene.Scene) =
+  let drag = rt.localDrag
+  if drag == nil or drag.canceled or drag.preview == nil:
+    return
+  let scale = frame.scale
+  let x = (rt.pointerX - float32(drag.hotX)) * scale
+  let y = (rt.pointerY - float32(drag.hotY)) * scale
+  frame.ops.add(scene.Op(kind: scene.opImage,
+    rect: scene.Rect(x: x, y: y,
+      w: float32(drag.width) * scale, h: float32(drag.height) * scale),
+    image: drag.preview,
+    src: scene.Rect(w: float32(drag.width), h: float32(drag.height)),
+    opacity: 0.75))
+
+proc startDragFromPress(rt: Runtime): bool =
   if rt.nativeDragStarted or rt.dragCandidateIdentity == 0 or
       rt.pressTarget.owner != rt.frameLayout.owner:
     return false
@@ -2370,27 +2413,48 @@ proc startDataDragFromPress(rt: Runtime): bool =
   if slot <= 0 or slot >= owner.nodes.len or owner.effectivelyDisabled(slot):
     return false
   let node = owner.nodes[slot]
-  if node.dragDataProvider == nil:
+  if node.dragDataProvider == nil and node.dragValueProvider == nil:
     return false
-  var options = node.dragDataOptions
-  if options.preview == nil:
-    let (preview, hotspot) = rt.dragPreview(slot, rt.pressX, rt.pressY)
-    options.preview = preview
-    options.hotspot = hotspot
-  let data = node.dragDataProvider()
-  rt.nativeDragStarted = true
+  let localValue = if node.dragValueProvider != nil:
+      node.dragValueProvider()
+    else:
+      nil
   rt.dragCandidateIdentity = 0
   rt.pressTarget = Element()
   rt.pressMods = 0
   rt.pressHoverSlots.setLen(0)
   rt.refreshPointer()
-  let startErr = if rt.conn.startDataDrag != nil:
-      rt.conn.startDataDrag(data, nil, options, float64(rt.pointerX),
-        float64(rt.pointerY))
-    else:
-      platform.errUnsupported()
-  if startErr != nil and options.done != nil:
-    options.done(transfer.Result(err: startErr))
+  owner.dragSourceIdentity = identity
+  owner.dragValue = localValue
+  owner.dragOverIdentity = 0
+  owner.dragCanceled = false
+  rt.nativeDragStarted = node.dragDataProvider != nil
+  if rt.nativeDragStarted:
+    var options = node.dragDataOptions
+    if options.preview == nil:
+      let (preview, hotspot) = rt.dragPreview(slot, rt.pressX, rt.pressY)
+      options.preview = preview
+      options.hotspot = hotspot
+    let data = node.dragDataProvider()
+    let startErr = if rt.conn.startDataDrag != nil:
+        rt.conn.startDataDrag(data, localValue, options,
+          float64(rt.pointerX), float64(rt.pointerY))
+      else:
+        platform.errUnsupported()
+    if startErr != nil:
+      clearDragOwner(owner)
+      if options.done != nil:
+        options.done(transfer.Result(err: startErr))
+  elif localValue != nil:
+    let (preview, hotspot) = rt.dragPreview(slot, rt.pressX, rt.pressY)
+    let bounds = if preview == nil: sourceImage.Rectangle() else: preview.bounds()
+    rt.localDrag = LocalDragState(sourceIdentity: identity, value: localValue,
+      preview: if preview == nil: nil else: scene.newSceneImage(preview),
+      width: bounds.dx(), height: bounds.dy(), hotX: hotspot.x,
+      hotY: hotspot.y)
+    rt.updateLocalDragTarget()
+  else:
+    clearDragOwner(owner)
   rt.requestFrame()
   true
 
@@ -2416,6 +2480,15 @@ proc event(rt: Runtime; ev: platform.SurfaceEvent): bool =
     rt.requestFrame()
     false
   of platform.keyPressed:
+    if ev.key == platform.keyEscape and rt.localDrag != nil and
+        not rt.localDrag.canceled:
+      rt.localDrag.canceled = true
+      rt.localDrag.overIdentity = 0
+      if rt.frameLayout.owner != nil:
+        rt.frameLayout.owner.dragCanceled = true
+        rt.frameLayout.owner.dragOverIdentity = 0
+      rt.requestFrame()
+      return true
     if ev.key == platform.keyTab and
         (ev.mods and (platform.modCtrl or platform.modAlt or
           platform.modSuper)) == 0:
@@ -2622,6 +2695,10 @@ proc event(rt: Runtime; ev: platform.SurfaceEvent): bool =
     rt.pointerY = float32(ev.y)
     rt.hasPointer = true
     rt.refreshPointer()
+    if rt.localDrag != nil:
+      rt.updateLocalDragTarget()
+      rt.requestFrame()
+      return true
     if rt.pressTarget.owner == rt.frameLayout.owner:
       let owner = rt.frameLayout.owner
       let slot = owner.textInputSlot(int(rt.pressTarget.slot))
@@ -2654,7 +2731,7 @@ proc event(rt: Runtime; ev: platform.SurfaceEvent): bool =
           rt.frameLayout.rects, rt.pointerX):
         rt.requestFrame()
       return false
-    if rt.startDataDragFromPress():
+    if rt.startDragFromPress():
       return true
     if rt.pressTarget.owner == rt.frameLayout.owner:
       let owner = rt.frameLayout.owner
@@ -2795,9 +2872,29 @@ proc event(rt: Runtime; ev: platform.SurfaceEvent): bool =
   of platform.pointerUp:
     if ev.button != 0:
       return false
+    if rt.localDrag != nil:
+      let drag = rt.localDrag
+      let owner = rt.frameLayout.owner
+      rt.pointerX = float32(ev.x)
+      rt.pointerY = float32(ev.y)
+      rt.hasPointer = true
+      rt.updateLocalDragTarget()
+      if not drag.canceled and drag.overIdentity != 0 and owner != nil:
+        owner.pendingValueDrops[drag.overIdentity] = drag.value
+        owner.pendingDropGeneration = owner.generation + 1
+      rt.localDrag = nil
+      clearDragOwner(owner)
+      rt.pressTarget = Element()
+      rt.pressMods = 0
+      rt.dragCandidateIdentity = 0
+      rt.pressHoverSlots.setLen(0)
+      rt.refreshPointer()
+      rt.requestFrame()
+      return true
     if rt.nativeDragStarted:
       rt.nativeDragStarted = false
       rt.dragCandidateIdentity = 0
+      clearDragOwner(rt.frameLayout.owner)
       rt.pressTarget = Element()
       rt.pressMods = 0
       rt.pressHoverSlots.setLen(0)
@@ -2979,11 +3076,17 @@ proc event(rt: Runtime; ev: platform.SurfaceEvent): bool =
         owner.nodes[target.slot].identity
       else:
         0'u64
+    let localIdentity = if target.localValue: identity else: 0'u64
     let offerChanged = owner.dataOverOffer.formats != ev.drag.offer.formats or
       owner.dataOverOffer.operations != ev.drag.offer.operations or
       owner.dataOverOffer.suggested != ev.drag.offer.suggested
-    let changed = owner.dataOverIdentity != identity or offerChanged
+    let changed = owner.dataOverIdentity != identity or
+      owner.dataOverLocalIdentity != localIdentity or
+      owner.dataOverLocal != (if target.localValue: ev.drag.`local` else: nil) or
+      offerChanged
     owner.dataOverIdentity = identity
+    owner.dataOverLocalIdentity = localIdentity
+    owner.dataOverLocal = if target.localValue: ev.drag.`local` else: nil
     if identity != 0:
       owner.dataOverOffer = ev.drag.offer
       owner.dataOverOffer.formats = @(ev.drag.offer.formats)
@@ -3003,6 +3106,8 @@ proc event(rt: Runtime; ev: platform.SurfaceEvent): bool =
       owner.dataOverIdentity = 0
       owner.fileOverIdentity = 0
       owner.dataOverOffer = transfer.Offer()
+      owner.dataOverLocalIdentity = 0
+      owner.dataOverLocal = nil
       rt.requestFrame()
     false
   of platform.dataDrop:
@@ -3014,6 +3119,8 @@ proc event(rt: Runtime; ev: platform.SurfaceEvent): bool =
       return false
     owner.dataOverIdentity = 0
     owner.dataOverOffer = transfer.Offer()
+    owner.dataOverLocalIdentity = 0
+    owner.dataOverLocal = nil
     if ev.drag == nil:
       return false
     rt.pointerX = float32(ev.x)
@@ -3026,13 +3133,21 @@ proc event(rt: Runtime; ev: platform.SurfaceEvent): bool =
       ev.drag.formats = @[]
       rt.requestFrame()
       return false
+    let identity = owner.nodes[target.slot].identity
+    if target.localValue:
+      owner.pendingValueDrops[identity] = ev.drag.`local`
+      owner.pendingDropGeneration = owner.generation + 1
+      ev.drag.operation = target.operation
+      ev.drag.formats = @[]
+      rt.refreshPointer()
+      rt.requestFrame()
+      return true
     let (data, err) = ev.drag.data.materialize(target.formats)
     if err != nil:
       ev.drag.operation = transfer.None
       ev.drag.formats = @[]
       rt.requestFrame()
       return false
-    let identity = owner.nodes[target.slot].identity
     owner.pendingDataDrops[identity] = transfer.Drop(data: data,
       operation: target.operation)
     owner.pendingDropGeneration = owner.generation + 1
@@ -3060,6 +3175,8 @@ proc event(rt: Runtime; ev: platform.SurfaceEvent): bool =
     rt.surfaceFocused = false
     rt.context.owner.focusActive = false
     rt.context.owner.rangeSliderDrags.clear()
+    rt.localDrag = nil
+    clearDragOwner(rt.context.owner)
     rt.pressTarget = Element()
     rt.pressMods = 0
     rt.dragCandidateIdentity = 0
