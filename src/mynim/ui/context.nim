@@ -15,6 +15,8 @@ type
     formDepth: int
     pendingKey: string
     rightToLeft: bool
+    localeTag: string
+    region: surface.Region
     hasPendingKey: bool
     themeEnabled, themeBackground: bool
 
@@ -117,6 +119,11 @@ type
     hexFieldIdentity: uint64
     hex: string
 
+  DateControlState = ref object
+    cursor, lastValue, pendingValue: DateTime
+    dayHandle, anchorHandle: Handle
+    open, initialized, hasPendingValue: bool
+
   ColorPlaneValue = object
     saturation, brightness: float64
 
@@ -161,6 +168,7 @@ type
     activeModalIdentity: uint64
     comboBoxStates: Table[uint64, ComboBoxState]
     colorPickerStates: Table[uint64, ColorPickerState]
+    dateControlStates: Table[uint64, DateControlState]
     toasts: seq[ToastEntry]
     toastState: ToastState
     announcements: seq[string]
@@ -288,7 +296,7 @@ type
     slider, sliderVertical, rating, stepper, numberInput, comboBoxRoot,
       comboBoxInput, rangeSlider,
       rangeSliderThumb, splitPane, splitHandle, splitVertical,
-      colorPlane, colorPickerRoot: bool
+      dateControl, colorPlane, colorPickerRoot: bool
     rangeSliderHandle: int8
     sliderLow, sliderHigh, sliderValue, sliderStep: float64
     sliderClampLow, sliderClampHigh: float64
@@ -485,6 +493,7 @@ proc newContext*(): Context =
   result.owner.dialogOrdinals = initTable[uint64, uint64]()
   result.owner.comboBoxStates = initTable[uint64, ComboBoxState]()
   result.owner.colorPickerStates = initTable[uint64, ColorPickerState]()
+  result.owner.dateControlStates = initTable[uint64, DateControlState]()
   result.owner.toastState = ToastState()
   result.owner.rangeSliderDrags = initTable[uint64, int8]()
   result.owner.pendingTextCallbacks =
@@ -1175,6 +1184,7 @@ proc build*(c: Context; view: proc(c: Context) {.closure.}) =
     c.owner.dialogOrdinals = initTable[uint64, uint64]()
     c.owner.comboBoxStates = initTable[uint64, ComboBoxState]()
     c.owner.colorPickerStates = initTable[uint64, ColorPickerState]()
+    c.owner.dateControlStates = initTable[uint64, DateControlState]()
     c.owner.toastState = ToastState()
     c.owner.toasts.setLen(0)
     c.owner.announcements.setLen(0)
@@ -1333,6 +1343,14 @@ proc build*(c: Context; view: proc(c: Context) {.closure.}) =
         staleColorPickers.add(identity)
     for identity in staleColorPickers:
       c.owner.colorPickerStates.del(identity)
+    var staleDateControls: seq[uint64]
+    for identity in c.owner.dateControlStates.keys:
+      let slot = c.owner.idSlots.getOrDefault(identity, -1)
+      if slot <= 0 or slot >= c.owner.nodes.len or
+          not c.owner.nodes[slot].dateControl:
+        staleDateControls.add(identity)
+    for identity in staleDateControls:
+      c.owner.dateControlStates.del(identity)
     built = true
   finally:
     c.owner.inBuild = false

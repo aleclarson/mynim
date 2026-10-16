@@ -8,6 +8,7 @@ import mynim/internal/platform
 import mynim/internal/surface
 import mynim/internal/raster as raster
 import mynim/internal/text as textStack
+import mynim/i18n as i18n
 from mynim/internal/ucd import lookupGeneralCategory, Ll, Lm, Lo, Lt, Lu, Nd
 import mynim/internal/svg as svgRenderer
 import mynim/image as sourceImage
@@ -56,6 +57,7 @@ include mynim/ui/search_field
 include mynim/ui/tooltip
 include mynim/ui/overlay
 include mynim/ui/popover
+include mynim/ui/date
 include mynim/ui/color_picker
 include mynim/ui/dialog
 include mynim/ui/combobox

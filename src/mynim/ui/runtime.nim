@@ -484,6 +484,8 @@ proc comboBoxKey(rt: Runtime; key: platform.Key;
   else:
     false
 
+proc setRuntimeFocus(rt: Runtime; layout: LayoutResult; slot: int)
+
 proc dismissPopover(rt: Runtime): bool =
   let owner = rt.frameLayout.owner
   if owner == nil:
@@ -496,6 +498,11 @@ proc dismissPopover(rt: Runtime): bool =
           not owner.isWithinNode(anchorSlot, rt.focusSlot):
         continue
       state.pendingDismiss = true
+      if anchorSlot > 0 and rt.frameLayout.focusableSlot(anchorSlot):
+        rt.setRuntimeFocus(rt.frameLayout, anchorSlot)
+        rt.keyboardFocusVisible = true
+        owner.nodes[anchorSlot].focusVisible = true
+        owner.focusVisibleSlots.add(anchorSlot)
       rt.requestFrame()
       return true
 
@@ -1835,6 +1842,9 @@ proc renderFrame(rt: Runtime; presentFrame = true) =
   rt.context.theme = rt.systemTheme
   rt.context.rightToLeft = rt.conn.rightToLeft != nil and
     rt.conn.rightToLeft()
+  rt.context.localeTag = if rt.conn.locale == nil: "" else: rt.conn.locale()
+  rt.context.region = if rt.conn.region == nil: i18n.Region()
+    else: rt.conn.region()
   rt.context.themeEnabled = true
   rt.context.themeBackground = false
 
