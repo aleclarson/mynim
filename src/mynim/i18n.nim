@@ -2,13 +2,27 @@
 ## app is written in, the one that suits them best, and says an app's
 ## messages in it.
 ##
-## PORT STATUS: locale normalization and regional week/hour preferences
-## use CLDR data. Message, number and date formatting are still being ported.
+## PORT STATUS: regional preferences, CLDR names, and common date skeletons
+## use CLDR data. Message/number formatting and full date pattern matching
+## are still being ported.
 
-import std/[strutils, tables, times, atomics]
+import std/[strutils, tables, times, atomics, unicode]
 import ./i18n/cldr_regions as cldr
+import ./i18n/cldr_format_data as formatData
 
 type
+  NameWidth* = enum
+    ## The width of a localized month, weekday, or day-period name.
+    nameWide, nameAbbreviated, nameShort, nameNarrow
+
+  DateOptions* = object
+    ## Options for localized Gregorian date formatting.
+    skeleton*: string
+      ## CLDR fields in any order. Common forms include "yMd", "yMMMM",
+      ## and "yMMMMd"; exact CLDR skeleton patterns are used when present.
+    hourCycle*: int
+      ## 12 or 24 to override the locale's hour cycle for hour fields.
+
   Region* = object
     ## How a reader writes dates, times and numbers: the regional
     ## formats of their system, with the changes they made to them.
@@ -300,6 +314,289 @@ proc hourCycle*(tag: string): int =
   let parts = localeParts(tag)
   let preference = preferredHour(parts.language, regionOf(tag))
   if preference == 'h' or preference == 'K': 12 else: 24
+
+proc findFormatLocale(tag: string): int =
+  var low = 0
+  var high = formatData.formatLocales.len
+  while low < high:
+    let mid = low + (high - low) div 2
+    if formatData.formatLocales[mid] < tag:
+      low = mid + 1
+    else:
+      high = mid
+  if low < formatData.formatLocales.len and
+      formatData.formatLocales[low] == tag:
+    return low
+  -1
+
+proc addCandidate(candidates: var seq[string]; tag: string) =
+  if tag == "": return
+  for candidate in candidates:
+    if candidate == tag: return
+  candidates.add tag
+
+proc formatLocaleIndex(tag: string): int =
+  let normalized = normalize(tag)
+  if normalized == "" or isPseudo(tag):
+    return findFormatLocale("en")
+  let parts = localeParts(normalized)
+  let likely = likelyParts(normalized)
+  let languageLikely = likelyParts(parts.language)
+  var candidates: seq[string]
+  if parts.script == "" and parts.region != "" and likely.script != "" and
+      likely.script != languageLikely.script:
+    addCandidate(candidates, parts.language & "-" & likely.script & "-" &
+      parts.region)
+  addCandidate(candidates, normalized)
+  if parts.script != "":
+    addCandidate(candidates, parts.language & "-" & parts.script)
+  elif likely.script != "" and likely.script != languageLikely.script:
+    addCandidate(candidates, parts.language & "-" & likely.script)
+  addCandidate(candidates, parts.language)
+  for candidate in candidates:
+    let index = findFormatLocale(candidate)
+    if index >= 0: return index
+  findFormatLocale("en")
+
+proc formatSlot(entries: openArray[formatData.FormatEntry];
+                starts: openArray[uint32]; strings: openArray[string];
+                locale, slot: int): string =
+  if slot < 0 or slot > high(uint16).int or locale < 0 or
+      locale >= formatData.formatParents.len:
+    return ""
+  var current = locale
+  var remaining = formatData.formatParents.len
+  while remaining > 0:
+    let first = int(starts[current])
+    let past = int(starts[current + 1])
+    var low = first
+    var high = past
+    while low < high:
+      let mid = low + (high - low) div 2
+      if int(entries[mid].slot) < slot:
+        low = mid + 1
+      else:
+        high = mid
+    if low < past and int(entries[low].slot) == slot:
+      let value = int(entries[low].value)
+      if value < strings.len: return strings[value]
+    if current == 0: break
+    current = int(formatData.formatParents[current])
+    dec remaining
+
+proc dateSlot(locale, slot: int): string =
+  formatSlot(formatData.dateEntries, formatData.dateStarts,
+    formatData.dateStrings, locale, slot)
+
+proc numberSlot(locale, slot: int): string =
+  formatSlot(formatData.numberEntries, formatData.numberStarts,
+    formatData.numberStrings, locale, slot)
+
+proc monthWidthIndex(width: NameWidth): int =
+  case width
+  of nameAbbreviated, nameShort: 0
+  of nameNarrow: 1
+  of nameWide: 2
+
+proc weekdayWidthIndex(width: NameWidth): int =
+  case width
+  of nameAbbreviated: 0
+  of nameNarrow: 1
+  of nameShort: 2
+  of nameWide: 3
+
+proc months*(locale: string; width = nameWide;
+             standAlone = false): array[12, string] =
+  ## Month names in locale, January first. Stand-alone names can differ
+  ## from names used inside a date in some languages.
+  let data = formatLocaleIndex(locale)
+  let context = if standAlone: 1 else: 0
+  let first = context * 36 + monthWidthIndex(width) * 12
+  for i in 0..<result.len:
+    result[i] = dateSlot(data, first + i)
+
+proc weekdays*(locale: string; width = nameWide;
+               standAlone = false): array[7, string] =
+  ## Weekday names in locale, Sunday first, matching WeekDay's CLDR order.
+  let data = formatLocaleIndex(locale)
+  let context = if standAlone: 1 else: 0
+  let first = 72 + context * 28 + weekdayWidthIndex(width) * 7
+  for i in 0..<result.len:
+    result[i] = dateSlot(data, first + i)
+
+proc dayPeriods*(locale: string; width = nameWide):
+    tuple[am, pm: string] =
+  ## Localized names for the two halves of the day.
+  let data = formatLocaleIndex(locale)
+  let first = 128 + monthWidthIndex(width) * 12
+  result.am = dateSlot(data, first)
+  result.pm = dateSlot(data, first + 1)
+
+proc preferredHourSymbol(locale: string): char =
+  case unicodeKey(locale, "hc")
+  of "h11": return 'K'
+  of "h12": return 'h'
+  of "h23": return 'H'
+  of "h24": return 'k'
+  else: discard
+  let parts = localeParts(locale)
+  preferredHour(parts.language, regionOf(locale))
+
+proc localizedDigits(locale: string; data: int): array[10, string] =
+  var text = if unicodeKey(locale, "nu") == "latn":
+      numberSlot(data, 202)
+    else:
+      numberSlot(data, 191)
+  if text == "": text = "0123456789"
+  var i = 0
+  for rune in text.runes:
+    if i < result.len:
+      result[i] = toUTF8(rune)
+    inc i
+  if i != result.len:
+    for i in 0..<result.len:
+      result[i] = $(char(ord('0') + i))
+
+proc dateNumber(value, minDigits: int;
+                 digits: array[10, string]): string =
+  let ascii = $value
+  for _ in 0..<max(0, minDigits - ascii.len):
+    result.add digits[0]
+  for ch in ascii:
+    if ch in {'0'..'9'}:
+      result.add digits[ord(ch) - ord('0')]
+    else:
+      result.add ch
+
+proc dateField(locale: string; data: int; value: DateTime; field: char;
+               width: int; digits: array[10, string]): string =
+  case field
+  of 'y', 'Y', 'u':
+    let year = if width == 2: value.year mod 100 else: value.year
+    return dateNumber(year, if width == 2: 2 else: width, digits)
+  of 'M', 'L':
+    let month = int(value.month)
+    if width <= 2:
+      return dateNumber(month, width, digits)
+    let context = if field == 'L': 1 else: 0
+    let nameWidth = case width
+      of 3: 0
+      of 5: 1
+      else: 2
+    return dateSlot(data, context * 36 + nameWidth * 12 + month - 1)
+  of 'd':
+    return dateNumber(value.monthday, width, digits)
+  of 'E', 'e', 'c':
+    let weekday = cldrWeekDayIndex(value.weekday)
+    if field != 'E' and width <= 2:
+      let first = cldrWeekDayIndex(firstWeekday(locale))
+      return dateNumber((weekday - first + 7) mod 7 + 1, width, digits)
+    let context = if field == 'c': 1 else: 0
+    let nameWidth = case width
+      of 4: 3
+      of 5: 1
+      of 6: 2
+      else: 0
+    return dateSlot(data, 72 + context * 28 + nameWidth * 7 + weekday)
+  of 'G':
+    let nameWidth = if width == 5: 1 elif width >= 4: 2 else: 0
+    let era = if value.year <= 0: 0 else: 1
+    return dateSlot(data, 164 + nameWidth * 2 + era)
+  of 'a', 'b':
+    let nameWidth = monthWidthIndex(if width == 5: nameNarrow
+      elif width >= 4: nameWide else: nameAbbreviated)
+    return dateSlot(data, 128 + nameWidth * 12 +
+      (if value.hour < 12: 0 else: 1))
+  of 'h':
+    let hour = if value.hour mod 12 == 0: 12 else: value.hour mod 12
+    return dateNumber(hour, width, digits)
+  of 'H': return dateNumber(value.hour, width, digits)
+  of 'K': return dateNumber(value.hour mod 12, width, digits)
+  of 'k': return dateNumber(if value.hour == 0: 24 else: value.hour,
+    width, digits)
+  of 'm': return dateNumber(value.minute, width, digits)
+  of 's': return dateNumber(value.second, width, digits)
+  else:
+    result = repeat(field, width)
+
+proc appendQuoted(pattern: string; index: var int; output: var string) =
+  inc index
+  if index < pattern.len and pattern[index] == '\'':
+    output.add '\''
+    inc index
+    return
+  while index < pattern.len:
+    if pattern[index] == '\'':
+      if index + 1 < pattern.len and pattern[index + 1] == '\'':
+        output.add '\''
+        index += 2
+      else:
+        inc index
+        return
+    else:
+      output.add pattern[index]
+      inc index
+
+proc formatPattern(locale: string; data: int; value: DateTime;
+                   pattern: string; digits: array[10, string]): string =
+  var i = 0
+  while i < pattern.len:
+    let ch = pattern[i]
+    if ch == '\'':
+      appendQuoted(pattern, i, result)
+    elif ch in {'a'..'z', 'A'..'Z'}:
+      var past = i + 1
+      while past < pattern.len and pattern[past] == ch:
+        inc past
+      result.add dateField(locale, data, value, ch, past - i, digits)
+      i = past
+    else:
+      result.add ch
+      inc i
+
+proc datePattern(locale: string; data: int; options: DateOptions): string =
+  var skeleton = options.skeleton
+  if skeleton == "": skeleton = "yMd"
+  var hour = if options.hourCycle == 12: 'h'
+    elif options.hourCycle == 24: 'H'
+    else: preferredHourSymbol(locale)
+  if options.hourCycle == 0:
+    for ch in skeleton:
+      if ch in {'h', 'H', 'K', 'k'}:
+        hour = ch
+        break
+  if 'j' in skeleton:
+    skeleton = skeleton.replace("j", $hour)
+  elif options.hourCycle in [12, 24]:
+    for ch in ['h', 'H', 'K', 'k']:
+      skeleton = skeleton.replace($ch, $hour)
+  for i, key in formatData.skeletons:
+    if key == skeleton:
+      let pattern = dateSlot(data, 214 + i)
+      if pattern != "": return pattern
+  if skeleton == "yMMMMd" or (skeleton.contains("d") and
+      skeleton.count('M') >= 4):
+    return dateSlot(data, 171) # CLDR long date pattern.
+  if skeleton == "yMMMd":
+    return dateSlot(data, 172) # CLDR medium date pattern.
+  if skeleton == "yMd":
+    return dateSlot(data, 173) # CLDR short date pattern fallback.
+  for i, key in formatData.skeletons:
+    if key == "yMd":
+      return dateSlot(data, 214 + i)
+  dateSlot(data, 171)
+
+proc formatDate*(locale: string; value: DateTime;
+                 options = DateOptions()): string =
+  ## Formats a Gregorian date using CLDR names, patterns, and digits.
+  ## Exact available skeleton patterns are used; yMMMMd and yMMMd use
+  ## the matching long and medium CLDR date styles when no exact pattern
+  ## is available. Other unmatched skeletons currently fall back to yMd;
+  ## full DateTimePatternGenerator matching is still being ported.
+  let data = formatLocaleIndex(locale)
+  let digits = localizedDigits(locale, data)
+  let pattern = datePattern(locale, data, options)
+  formatPattern(locale, data, value, pattern, digits).replace("\u202f", " ")
 
 proc `match`*(want, supported: seq[string]): string =
   ## The supported tag want likes best (i18n's match): an exact
