@@ -43,6 +43,18 @@ proc spacer*(c: Context): Element =
   ## Fills free space in its row or column, pushing siblings apart.
   c.box().grow()
 
+proc divider*(c: Context): Element =
+  ## Adds a one-pixel line across the current row or column.
+  let parent = int(c.owner.parent)
+  let row = parent > 0 and parent < c.owner.nodes.len and
+    c.owner.nodes[parent].row
+  result = c.box().background(c.theme.border).shrink(0)
+    .alignSelf(Align.Stretch)
+  if row:
+    result = result.width(1)
+  else:
+    result = result.height(1)
+
 proc sliderTickCount(low, high, step: float64): int =
   if classify(step) in {fcNan, fcInf, fcNegInf} or step <= 0 or
       high <= low:
