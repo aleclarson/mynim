@@ -8,7 +8,7 @@ import mynim/internal/platform
 import mynim/internal/surface
 import mynim/internal/raster as raster
 import mynim/internal/text as textStack
-from mynim/internal/ucd import lookupGeneralCategory, Nd
+from mynim/internal/ucd import lookupGeneralCategory, Ll, Lm, Lo, Lt, Lu, Nd
 import mynim/internal/svg as svgRenderer
 import mynim/image as sourceImage
 export platform.TextInputClient, platform.TextRange, platform.TextSelection,
@@ -41,6 +41,7 @@ include mynim/ui/progress
 include mynim/ui/rating
 include mynim/ui/stepper
 include mynim/ui/spinner
+include mynim/ui/avatar
 include mynim/ui/range_slider
 include mynim/ui/tabs
 include mynim/ui/table
