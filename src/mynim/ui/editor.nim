@@ -2,6 +2,9 @@
 
 import std/[algorithm, locks, strutils]
 import mynim/ui as ui
+import mynim/ui/editor/syntax as syntax
+
+export syntax
 
 type
   Edit* = object ## A UTF-8 byte range to replace.
@@ -42,6 +45,7 @@ type
     saved: ui.TextSnapshot
     undo, redo: seq[BufferUndoEntry]
     crlf: bool
+    language: syntax.Language
     transactionDepth: int
     transactionBefore: ui.TextSnapshot
 
@@ -152,6 +156,18 @@ proc setLineEnding*(buffer: Buffer; ending: string) =
   buffer.requireBuffer()
   withLock buffer.mu:
     buffer.crlf = ending == "\r\n"
+
+proc language*(buffer: Buffer): syntax.Language =
+  ## Returns the language metadata associated with the buffer, if any.
+  if buffer != nil:
+    withLock buffer.mu:
+      result = buffer.language
+
+proc setLanguage*(buffer: Buffer; language: syntax.Language) =
+  ## Associates language metadata with the buffer; nil means plain text.
+  buffer.requireBuffer()
+  withLock buffer.mu:
+    buffer.language = language
 
 proc same*(a, b: Snapshot): bool =
   ## Reports whether snapshots share the same text root; line endings are
