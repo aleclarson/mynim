@@ -1,6 +1,7 @@
 ## Command-line entry point for the Nim port of MyGo.
 
 import std/os
+import ./build
 import ./doctor
 import ./init
 import ./skills
@@ -17,6 +18,7 @@ Commands:
 
   init            create a native UI project
   install-skills  install the MyNim maintenance skill
+  build           compile a native project for this machine
   doctor          check that the development environment is ready
   version         print the MyGo version
   help            print this help
@@ -46,8 +48,12 @@ proc run(args: seq[string]): int =
     if args.len > 1:
       return runInstallSkills(args[1 .. ^1])
     return runInstallSkills(@[])
+  of "build":
+    if args.len > 1:
+      return runBuild(args[1 .. ^1])
+    return runBuild(@[])
   of "vet", "migrate-ui", "generate", "gen",
-     "dev", "i18n", "build", "keygen":
+     "dev", "i18n", "keygen":
     stderr.writeLine("mygo: command \"" & args[0] & "\" is not ported yet")
     return 1
   else:
