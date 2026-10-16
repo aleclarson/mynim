@@ -39,6 +39,10 @@ proc primaryButton*(c: Context; label: string): Element =
   ## Creates an accent-colored button for the primary action.
   c.themedButton(label, primary = true)
 
+proc spacer*(c: Context): Element =
+  ## Fills free space in its row or column, pushing siblings apart.
+  c.box().grow()
+
 proc sliderTickCount(low, high, step: float64): int =
   if classify(step) in {fcNan, fcInf, fcNegInf} or step <= 0 or
       high <= low:
