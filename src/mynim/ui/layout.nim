@@ -691,16 +691,18 @@ proc distribute(nodes: seq[ElementNode]; children: seq[int];
                 first, pastLast: int;
                 sizes, minimum, maximum, factors: var seq[float32];
                 amount: float32; growing: bool) =
+  template room(child: int): float32 =
+    if growing:
+      if classify(maximum[child]) == fcInf: Inf.float32
+      else: maximum[child] - sizes[child]
+    else:
+      sizes[child] - minimum[child]
   var remaining = amount
   for _ in 0 .. (pastLast - first):
     var totalFactor: float32
     for itemIndex in first ..< pastLast:
       let child = children[itemIndex]
-      let room = if growing:
-          maximum[child] - sizes[child]
-        else:
-          sizes[child] - minimum[child]
-      if room > 0 and factors[child] > 0:
+      if room(child) > 0 and factors[child] > 0:
         totalFactor += factors[child]
     if totalFactor <= 0 or remaining <= 0:
       break
@@ -708,13 +710,10 @@ proc distribute(nodes: seq[ElementNode]; children: seq[int];
     var changed: float32
     for itemIndex in first ..< pastLast:
       let child = children[itemIndex]
-      let room = if growing:
-          maximum[child] - sizes[child]
-        else:
-          sizes[child] - minimum[child]
-      if room > 0 and factors[child] > 0:
+      let available = room(child)
+      if available > 0 and factors[child] > 0:
         let share = remaining * factors[child] / totalFactor
-        let delta = min(share, room)
+        let delta = min(share, available)
         if growing:
           sizes[child] += delta
         else:
@@ -1919,6 +1918,81 @@ proc settled*(e: Element; key: string): bool =
   let channel = channels.getOrDefault(key)
   not channel.initialized or (not channel.moving and not channel.pending)
 
+proc alignFormLabels(nodes: var seq[ElementNode]) =
+  var widths = initTable[int, float32]()
+  for slot in 1..<nodes.len:
+    if not nodes[slot].formLabel:
+      continue
+    var form = int(nodes[slot].parent)
+    while form > 0 and form < nodes.len and
+        not nodes[form].formContainer:
+      form = int(nodes[form].parent)
+    if form <= 0 or form >= nodes.len:
+      continue
+    var child = int(nodes[slot].firstChild)
+    var width = 0'f32
+    while child > 0 and child < nodes.len:
+      if nodes[child].hasText and nodes[child].shapedText != nil:
+        width = max(width, nodes[child].shapedText.width)
+      child = int(nodes[child].nextSibling)
+    widths[form] = max(widths.getOrDefault(form), width)
+
+  for slot in 1..<nodes.len:
+    if not nodes[slot].formLabel:
+      continue
+    var form = int(nodes[slot].parent)
+    while form > 0 and form < nodes.len and
+        not nodes[form].formContainer:
+      form = int(nodes[form].parent)
+    if widths.hasKey(form):
+      nodes[slot].width = UiLength(value: widths[form], kind: lengthPixels)
+
+proc firstFormText(nodes: seq[ElementNode]; slot: int): int =
+  if slot <= 0 or slot >= nodes.len:
+    return -1
+  if nodes[slot].hasText and not nodes[slot].textOverlay and
+      nodes[slot].shapedText != nil and nodes[slot].shapedText.lines.len > 0:
+    return slot
+  var child = int(nodes[slot].firstChild)
+  while child > 0 and child < nodes.len:
+    if not nodes[child].absolute:
+      result = nodes.firstFormText(child)
+      if result > 0:
+        return
+    child = int(nodes[child].nextSibling)
+  result = -1
+
+proc alignFormLabelBaselines(nodes: seq[ElementNode]; rects: var seq[Rect]) =
+  for fieldSlot in 1..<nodes.len:
+    let field = nodes[fieldSlot]
+    let labelSlot = int(field.fieldLabelSlot)
+    let controlSlot = int(field.fieldControlSlot)
+    if not field.formField or labelSlot <= 0 or labelSlot >= rects.len or
+        controlSlot <= 0 or controlSlot >= rects.len:
+      continue
+    let control = nodes[controlSlot]
+    var labelY: float32
+    if control.textClient != nil:
+      labelY = rects[controlSlot].y + control.pad[0] + control.border[0]
+    else:
+      let textSlot = nodes.firstFormText(controlSlot)
+      if textSlot > 0:
+        labelY = rects[textSlot].y
+      else:
+        labelY = rects[controlSlot].y +
+          (rects[controlSlot].h - rects[labelSlot].h) / 2
+    let delta = labelY - rects[labelSlot].y
+    if delta == 0:
+      continue
+    var pending = @[labelSlot]
+    while pending.len > 0:
+      let slot = pending.pop()
+      rects[slot].y += delta
+      var child = int(nodes[slot].firstChild)
+      while child > 0 and child < nodes.len:
+        pending.add(child)
+        child = int(nodes[child].nextSibling)
+
 proc layoutAt(c: Context; bounds: Rect; now: MonoTime;
               reduceMotion: bool): LayoutResult =
   ## Lays out the latest completed build inside bounds.
@@ -1950,6 +2024,7 @@ proc layoutAt(c: Context; bounds: Rect; now: MonoTime;
   c.owner.gridScratch.contributions.setLen(0)
   c.owner.gridScratch.values.setLen(0)
   shapeText(c.owner.nodes)
+  alignFormLabels(c.owner.nodes)
   discard measureTree(c.owner.nodes, c.owner.natural, c.owner.gridScratch)
   if c.owner.nodes.applyTableFits(c.owner.natural):
     discard measureTree(c.owner.nodes, c.owner.natural, c.owner.gridScratch)
@@ -1990,6 +2065,7 @@ proc layoutAt(c: Context; bounds: Rect; now: MonoTime;
       now, reduceMotion) or result.animating
     revealInScrollContainers(c.owner.nodes, c.owner.rectScratch)
     shiftScrolledRects(c.owner.nodes, result.rects)
+    alignFormLabelBaselines(c.owner.nodes, result.rects)
     for slot in 0..<c.owner.nodes.len:
       let node = c.owner.nodes[slot]
       if node.listState == nil or node.listRowIndex != -1 or
@@ -2399,6 +2475,11 @@ proc dispatchClick(layout: LayoutResult; pressed: Element;
   if target.owner != pressed.owner or target.slot != pressed.slot:
     return false
   clickedSlot = int(target.slot)
+  let labelTarget = int(layout.owner.nodes[clickedSlot].labelTargetSlot)
+  if labelTarget > 0 and labelTarget < layout.owner.nodes.len:
+    clickedSlot = labelTarget
+  if layout.owner.effectivelyDisabled(clickedSlot):
+    return false
   let node = layout.owner.nodes[clickedSlot]
   if node.listState != nil and node.listRowIndex >= 0 and
       not node.listRowHeader and not node.listRowAction:
@@ -2418,6 +2499,8 @@ proc dispatchAccessTreeAction(layout: LayoutResult; id: uint64;
   for slot in 1..<layout.owner.nodes.len:
     if uint64(slot + 1) != id:
       continue
+    if layout.owner.effectivelyDisabled(slot):
+      return false
     let node = layout.owner.nodes[slot]
     if node.treeAccessAction != nil:
       return node.treeAccessAction(action)
@@ -2435,6 +2518,8 @@ proc dispatchAccessPress(layout: LayoutResult; id: uint64): bool =
   for slot in 1..<layout.owner.nodes.len:
     if uint64(slot + 1) != id:
       continue
+    if layout.owner.effectivelyDisabled(slot):
+      return false
     let handler = layout.owner.nodes[slot].clickHandler
     if handler == nil:
       return false

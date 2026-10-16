@@ -957,7 +957,8 @@ proc themeTextInput(c: Context; e: Element): Element =
     node[].radius = [theme.radius, theme.radius, theme.radius, theme.radius]
     node[].background = theme.surface
     node[].border = [1'f32, 1, 1, 1]
-    node[].borderColor = if result.focused(): theme.accent
+    node[].borderColor = if node[].invalid: theme.danger
+      elif result.focused(): theme.accent
       elif result.hovered(): theme.border.mix(theme.text, 0.2'f32)
       else: theme.border
     if node[].textClient of TextFieldClient:

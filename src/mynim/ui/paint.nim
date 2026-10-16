@@ -591,12 +591,16 @@ proc clipOp(layout: LayoutResult; slot: int; scale: float32): scene.Op =
 proc opacityOf(nodes: seq[ElementNode]; slot: int): float32 =
   result = 1
   var current = slot
+  var disabledSeen = false
   while current >= 0:
     let node = nodes[current]
     if node.opacitySet:
       result *= node.opacity
       if result == 0:
         return
+    if node.disabled and not disabledSeen:
+      result *= 0.5'f32
+      disabledSeen = true
     current = int(node.parent)
 
 proc paintScrollbar(sceneFrame: scene.Scene; layout: LayoutResult;

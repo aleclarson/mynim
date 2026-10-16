@@ -198,6 +198,8 @@ proc focusableSlot(layout: LayoutResult; slot: int): bool =
       layout.generation != owner.generation or slot <= 0 or
       slot >= owner.nodes.len:
     return false
+  if owner.effectivelyDisabled(slot):
+    return false
   let node = owner.nodes[slot]
   node.focusable or node.clickHandler != nil
 
@@ -397,6 +399,9 @@ proc accessibilityTree(layout: LayoutResult;
     index = -1
   for slot in 1..<owner.nodes.len:
     let node = owner.nodes[slot]
+    if node.accessHidden:
+      continue
+    let isDisabled = owner.effectivelyDisabled(slot)
     let image = node.bitmap != nil or node.vector != nil
     let listContainer = node.listState != nil and node.listRowIndex == -1
     let listItem = node.listState != nil and node.listRowIndex >= 0 and
@@ -439,17 +444,21 @@ proc accessibilityTree(layout: LayoutResult;
       parent: parent, role: role, label: label,
       bounds: platform.RectF(x: rect.x.float64, y: rect.y.float64,
         w: rect.w.float64, h: rect.h.float64))
+    accessible.description = node.accessDescription
     accessible.states = accessible.states or node.accessSort
     accessible.states = accessible.states or node.accessExtraStates
     accessible.actions = accessible.actions or node.accessExtraActions
     accessible.level = node.accessLevel
+    if isDisabled:
+      accessible.states = accessible.states or platform.accessDisabled
     if node.slider:
       accessible.min = node.sliderLow
       accessible.max = node.sliderHigh
       accessible.now = node.sliderValue
       accessible.step = node.sliderStep
-      accessible.actions = accessible.actions or platform.actionIncrement or
-        platform.actionDecrement
+      if not isDisabled:
+        accessible.actions = accessible.actions or platform.actionIncrement or
+          platform.actionDecrement
       if node.sliderVertical:
         accessible.states = accessible.states or platform.accessVertical
     elif node.hasAccessRange:
@@ -467,7 +476,8 @@ proc accessibilityTree(layout: LayoutResult;
       if node.textClient of TextFieldClient and
           TextFieldClient(node.textClient).readOnly:
         accessible.states = accessible.states or platform.accessReadOnly
-    if node.focusable or node.clickHandler != nil or node.textClient != nil:
+    if not isDisabled and
+        (node.focusable or node.clickHandler != nil or node.textClient != nil):
       accessible.states = accessible.states or platform.accessFocusable
       accessible.actions = accessible.actions or platform.actionFocus
     if listItem and node.listState.selectionEnabled and
@@ -483,13 +493,14 @@ proc accessibilityTree(layout: LayoutResult;
       accessible.states = accessible.states or platform.accessMultiselectable
     if layout.hasScrollAncestor(slot):
       accessible.actions = accessible.actions or platform.actionScrollIntoView
-    if node.textClient != nil and
+    if not isDisabled and node.textClient != nil and
         not (node.textClient of TextFieldClient and
           TextFieldClient(node.textClient).readOnly):
       accessible.actions = accessible.actions or platform.actionSetValue
-    if node.clickHandler != nil or role == platform.roleButton or
+    if not isDisabled and (node.clickHandler != nil or
+        role == platform.roleButton or
         (listItem and node.listState.selectionEnabled and
-          not node.listRowHeader):
+          not node.listRowHeader)):
       accessible.actions = accessible.actions or platform.actionPress
     result.nodes.add(accessible)
     accessIndex[slot] = result.nodes.high
@@ -1935,6 +1946,20 @@ proc event(rt: Runtime; ev: platform.SurfaceEvent): bool =
       rt.beginTableReorder(rt.pressTarget)
     if rt.pressTarget.owner != nil:
       var slot = int(rt.pressTarget.slot)
+      if rt.pressTarget.owner == rt.frameLayout.owner and
+          slot > 0 and slot < rt.frameLayout.owner.nodes.len:
+        let labelTarget = int(
+          rt.frameLayout.owner.nodes[slot].labelTargetSlot)
+        if labelTarget > 0 and
+            labelTarget < rt.frameLayout.owner.nodes.len:
+          slot = labelTarget
+      if rt.pressTarget.owner == rt.frameLayout.owner and
+          rt.frameLayout.owner.effectivelyDisabled(slot):
+        rt.refreshPointer()
+        if rt.hoverSlots != previousHover or
+            rt.pressedSlots != previousPressed:
+          rt.requestFrame()
+        return rt.pressTarget.owner != nil
       let sliderSlot = rt.frameLayout.sliderAncestor(slot)
       if sliderSlot >= 0:
         slot = sliderSlot
@@ -2108,7 +2133,8 @@ proc event(rt: Runtime; ev: platform.SurfaceEvent): bool =
       let slot = int(ev.id - 1)
       let owner = rt.frameLayout.owner
       if owner != nil and slot > 0 and slot < owner.nodes.len and
-          owner.nodes[slot].slider:
+          owner.nodes[slot].slider and
+          not owner.effectivelyDisabled(slot):
         let node = owner.nodes[slot]
         let identity = node.identity
         let current = owner.pendingSliderValues.getOrDefault(identity,
@@ -2166,7 +2192,8 @@ proc event(rt: Runtime; ev: platform.SurfaceEvent): bool =
       let slot = int(ev.id - 1)
       let owner = rt.frameLayout.owner
       if owner != nil and slot > 0 and slot < owner.nodes.len and
-          owner.nodes[slot].textClient != nil:
+          owner.nodes[slot].textClient != nil and
+          not owner.effectivelyDisabled(slot):
         let client = owner.nodes[slot].textClient
         if client of TextFieldClient and TextFieldClient(client).readOnly:
           return false

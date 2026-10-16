@@ -48,4 +48,5 @@ include mynim/ui/tabs
 include mynim/ui/table
 include mynim/ui/outline
 include mynim/ui/tree
+include mynim/ui/form
 include mynim/ui/runtime

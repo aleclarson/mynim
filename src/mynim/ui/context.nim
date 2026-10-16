@@ -12,6 +12,7 @@ type
     accordionHeaders: Table[uint64, seq[uint64]]
     checkboxGroup: CheckboxGroupBuild
     segmentedToggles: bool
+    formDepth: int
     pendingKey: string
     rightToLeft: bool
     hasPendingKey: bool
@@ -86,6 +87,7 @@ type
     initialized: bool
 
   ElementOwner = ref object
+    activeContext: Context
     nodes: seq[ElementNode]
     idSlots: Table[uint64, int]
     identityParents: Table[uint64, uint64]
@@ -191,6 +193,8 @@ type
       focusRingDisabled, scrollX, scrollY,
       revealInScroll, rightToLeft, directionSet: bool
     focusGroupSet, groupSelects: bool
+    formContainer, formField, formLabel, accessHidden, disabled,
+      invalid: bool
     focusOrientation: FocusOrientation
     logical: uint8
     clipX, clipY, hasFollowScroll: bool
@@ -211,6 +215,9 @@ type
     hovered, pressed, clicked, changed, submitted,
       valueChangedInBuild: bool
     label: string
+    accessDescription: string
+    labelTargetSlot, fieldLabelSlot, fieldContentSlot,
+      fieldControlSlot: int32
     textValue: string
     placeholder: string
     textStyle: textStack.Style
@@ -752,6 +759,15 @@ proc node(e: Element): ptr ElementNode =
     return nil
   addr e.owner.nodes[int(e.slot)]
 
+proc effectivelyDisabled(owner: ElementOwner; slot: int): bool =
+  if owner == nil or slot <= 0 or slot >= owner.nodes.len:
+    return false
+  var current = slot
+  while current > 0 and current < owner.nodes.len:
+    if owner.nodes[current].disabled:
+      return true
+    current = int(owner.nodes[current].parent)
+
 proc valid*(e: Element): bool =
   ## Reports whether e belongs to the active build callback.
   e.node != nil
@@ -1055,6 +1071,7 @@ proc build*(c: Context; view: proc(c: Context) {.closure.}) =
                                 align: Align.Auto, selfAlign: Align.Auto))
   c.owner.parent = 0
   c.owner.inBuild = true
+  c.owner.activeContext = c
   c.owner.reduceMotion = c.reduceMotion
   c.owner.hasFrame = false
   var built = false
@@ -1127,6 +1144,7 @@ proc build*(c: Context; view: proc(c: Context) {.closure.}) =
     built = true
   finally:
     c.owner.inBuild = false
+    c.owner.activeContext = nil
     c.owner.parent = -1
     c.owner.hasFrame = built
     if not built:
