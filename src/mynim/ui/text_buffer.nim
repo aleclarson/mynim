@@ -26,6 +26,13 @@ proc newTextBuffer*(text = ""): TextBuffer =
   initLock(result.mu)
   result.root = textRope.build(text)
 
+proc forkTextBuffer(snapshot: TextSnapshot): TextBuffer =
+  ## Creates a copy-on-write editor view of an immutable document version.
+  new(result)
+  initLock(result.mu)
+  result.root = snapshot.root
+  result.version = snapshot.version
+
 proc snapshot*(buffer: TextBuffer): TextSnapshot =
   ## Returns an immutable snapshot that remains valid after later edits.
   if buffer == nil:

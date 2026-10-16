@@ -76,13 +76,19 @@ doAssert changeActions == 1 and changedValues[^1] == $buffer
 
 doAssert native.send(platform.SurfaceEvent(kind: platform.textComposition,
   text: "é", caret: 1))
-doAssert $buffer == "abc\ndefQé\nxyz"
+doAssert $buffer == "abc\ndefQ\nxyz"
+let composingClient = native.lastTextInput().client
+let (_, preeditRange) = composingClient.markedRange()
+doAssert preeditRange
+let (preeditText, _) = composingClient.textForRange(platform.TextRange(
+  start: 0, `end`: high(int)))
+doAssert preeditText == "abc\ndefQé\nxyz"
 doAssert native.frame()
+doAssert $buffer == "abc\ndefQ\nxyz"
 doAssert changeActions == 1
-let (_, marked) = native.lastTextInput().client.markedRange()
-doAssert marked
 doAssert native.send(platform.SurfaceEvent(kind: platform.textComposition))
 doAssert native.frame()
+doAssert $buffer == "abc\ndefQé\nxyz"
 doAssert changeActions == 2
 
 doAssert native.send(platform.SurfaceEvent(kind: platform.keyPressed,
@@ -129,10 +135,11 @@ doAssert changeActions == 7
 doAssert native.send(platform.SurfaceEvent(kind: platform.textComposition,
   text: "é", caret: 1))
 doAssert native.frame()
-doAssert $buffer == "é"
+doAssert $buffer == ""
 doAssert changeActions == 7
 doAssert native.send(platform.SurfaceEvent(kind: platform.textComposition))
 doAssert native.frame()
+doAssert $buffer == "é"
 doAssert changeActions == 8
 doAssert native.send(platform.SurfaceEvent(kind: platform.keyPressed,
   key: platform.keyZ, mods: platform.modSuper))
@@ -144,6 +151,66 @@ doAssert native.send(platform.SurfaceEvent(kind: platform.keyPressed,
 doAssert native.frame()
 doAssert $buffer == "é"
 doAssert changeActions == 10
+
+buffer.set("AéZ")
+discard native.send(platform.SurfaceEvent(kind: platform.surfaceResize))
+doAssert native.frame()
+let compositionClient = native.lastTextInput().client
+let replacement = new platform.TextRange
+replacement[] = platform.TextRange(start: 1, `end`: 2)
+compositionClient.setMarkedText(replacement, "😀候",
+  platform.TextRange(start: 3, `end`: 3))
+doAssert $buffer == "AZ"
+let (firstPreedit, _) = compositionClient.textForRange(platform.TextRange(
+  start: 0, `end`: high(int)))
+doAssert firstPreedit == "A😀候Z"
+compositionClient.setMarkedText(nil, "😀候補",
+  platform.TextRange(start: 4, `end`: 4))
+doAssert $buffer == "AZ"
+let (virtualReplacement, _) = compositionClient.textForRange(
+  platform.TextRange(start: 0, `end`: high(int)))
+doAssert virtualReplacement == "A😀候補Z"
+let (mark, marked) = compositionClient.markedRange()
+doAssert marked and mark == platform.TextRange(start: 1, `end`: 5)
+doAssert native.frame()
+doAssert $buffer == "AZ"
+
+var compositionOrder: platform.InputComposition
+compositionOrder.`end`(compositionClient)
+doAssert $buffer == "A😀候補Z"
+compositionOrder.replace(compositionClient, nil, "e")
+doAssert $buffer == "AeZ"
+doAssert native.frame()
+doAssert native.send(platform.SurfaceEvent(kind: platform.keyPressed,
+  key: platform.keyZ, mods: platform.modSuper))
+doAssert native.frame()
+doAssert $buffer == "AéZ"
+doAssert native.send(platform.SurfaceEvent(kind: platform.keyPressed,
+  key: platform.keyZ, mods: platform.modSuper or platform.modShift))
+doAssert native.frame()
+doAssert $buffer == "AeZ"
+
+compositionClient.setMarkedText(nil, "?",
+  platform.TextRange(start: 1, `end`: 1))
+doAssert $buffer == "AeZ"
+compositionOrder.`end`(compositionClient)
+doAssert $buffer == "Ae?Z"
+let unrelatedFirst = new platform.TextRange
+unrelatedFirst[] = platform.TextRange(start: 4, `end`: 4)
+compositionOrder.replace(compositionClient, unrelatedFirst, "X")
+doAssert $buffer == "Ae?ZX"
+let unrelatedSecond = new platform.TextRange
+unrelatedSecond[] = platform.TextRange(start: 5, `end`: 5)
+compositionOrder.replace(compositionClient, unrelatedSecond, "!")
+doAssert $buffer == "Ae?ZX!"
+doAssert native.send(platform.SurfaceEvent(kind: platform.keyPressed,
+  key: platform.keyZ, mods: platform.modSuper))
+doAssert native.frame()
+doAssert $buffer == "Ae?Z"
+doAssert native.send(platform.SurfaceEvent(kind: platform.keyPressed,
+  key: platform.keyZ, mods: platform.modSuper))
+doAssert native.frame()
+doAssert $buffer == "AeZ"
 
 win.destroy()
 loop.shutdown()

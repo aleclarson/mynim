@@ -41,6 +41,13 @@ type
     areaHeights: ParagraphHeightIndex
     areaLineHeights: seq[float32]
     areaLayouts: Table[int, textStack.Layout]
+    areaCompositionBuffer: TextBuffer
+    areaCompositionBase: TextSnapshot
+    areaCompositionStart: int
+    areaCompositionText: string
+    areaCompositionActive: bool
+    areaCommittedMark: platform.TextRange
+    areaHasCommittedMark: bool
     areaUndo, areaRedo: seq[TextAreaUndoEntry]
     areaUndoGroupOpen: bool
     textUndo, textRedo: seq[TextFieldUndoEntry]
@@ -233,6 +240,26 @@ proc recordAreaEdit(client: TextFieldClient; before, after: TextSnapshot;
 
 proc revealAreaCaret(client: TextFieldClient)
 
+proc clearAreaComposition(client: TextFieldClient; restoreBase: bool;
+                          keepTransaction = false) =
+  if client.areaCompositionBuffer != nil:
+    if restoreBase:
+      client.bufferSnapshot = client.areaCompositionBase
+    client.areaCompositionBuffer = nil
+    client.areaCompositionBase = TextSnapshot()
+    client.areaCompositionStart = 0
+    client.areaCompositionText.setLen(0)
+  client.hasMark = false
+  client.mark = platform.TextRange()
+  if not keepTransaction:
+    client.areaCompositionActive = false
+    client.areaCommittedMark = platform.TextRange()
+    client.areaHasCommittedMark = false
+  client.areaHasDesiredX = false
+  client.resetAreaCache(client.bufferSnapshot.lineCount())
+  if client.areaLineHeight > 0:
+    client.areaHeights.setEstimate(float64(client.areaLineHeight))
+
 proc restoreAreaHistory(client: TextFieldClient; snapshot: TextSnapshot;
                         anchor, caret: int) =
   client.boundBuffer.restore(snapshot)
@@ -248,6 +275,13 @@ proc restoreAreaHistory(client: TextFieldClient; snapshot: TextSnapshot;
   client.areaStringChanged = client.areaStringBound
   client.areaHasDesiredX = false
   client.areaUndoGroupOpen = false
+  client.areaCompositionBuffer = nil
+  client.areaCompositionBase = TextSnapshot()
+  client.areaCompositionStart = 0
+  client.areaCompositionText.setLen(0)
+  client.areaCompositionActive = false
+  client.areaCommittedMark = platform.TextRange()
+  client.areaHasCommittedMark = false
   client.resetAreaCache(client.bufferSnapshot.lineCount())
   client.revealAreaCaret()
 
@@ -274,10 +308,15 @@ proc syncTextAreaBuffer(client: TextFieldClient): bool =
   if not client.multiline or client.boundBuffer == nil:
     return false
   let snapshot = client.boundBuffer.snapshot()
+  let expectedVersion = if client.areaCompositionBuffer != nil:
+      client.areaCompositionBase.version()
+    else:
+      client.bufferSnapshot.version()
   if client.areaInitialized and
-      snapshot.version() == client.bufferSnapshot.version():
+      snapshot.version() == expectedVersion:
     return false
   let initial = not client.areaInitialized
+  client.clearAreaComposition(restoreBase = false)
   client.bufferSnapshot = snapshot
   client.text.setLen(0)
   client.lastBoundValue.setLen(0)
@@ -516,6 +555,104 @@ proc replaceAreaText(client: TextFieldClient; range: platform.TextRange;
   client.revealAreaCaret()
   result = true
 
+proc beginAreaComposition(client: TextFieldClient; range: platform.TextRange;
+                          mergeComposition: bool): bool =
+  discard client.syncTextAreaBuffer()
+  let target = platform.normalizeTextRange(range)
+  let before = client.bufferSnapshot
+  let beforeAnchor = client.anchor
+  let beforeCaret = client.caret
+  if target.start == target.`end`:
+    client.recordAreaEdit(before, before, target, "", beforeAnchor,
+      beforeCaret, mergeComposition)
+    client.anchor = target.start
+    client.caret = target.start
+    client.areaHasDesiredX = false
+  elif not client.replaceAreaText(target, "", mergeComposition):
+    return false
+  client.areaCompositionBase = client.bufferSnapshot
+  client.areaCompositionBuffer = forkTextBuffer(client.areaCompositionBase)
+  client.areaCompositionStart = client.caret
+  client.areaCompositionText.setLen(0)
+  client.areaCompositionActive = true
+  client.areaCommittedMark = platform.TextRange()
+  client.areaHasCommittedMark = false
+  client.areaUndoGroupOpen = false
+  client.hasMark = false
+  client.mark = platform.TextRange()
+  result = true
+
+proc updateAreaComposition(client: TextFieldClient; value: string;
+                           selected: platform.TextRange): bool =
+  if client.areaCompositionBuffer == nil:
+    return false
+  let target = if client.hasMark: client.mark
+    else: platform.TextRange(start: client.areaCompositionStart,
+                             `end`: client.areaCompositionStart)
+  let edit = client.areaCompositionBuffer.replaceUtf16IfCurrent(
+    client.bufferSnapshot, target, value)
+  if not edit.committed:
+    let snapshot = client.boundBuffer.snapshot()
+    client.clearAreaComposition(restoreBase = false)
+    client.bufferSnapshot = snapshot
+    let limit = snapshot.utf16Len()
+    client.caret = max(0, min(client.caret, limit))
+    client.anchor = max(0, min(client.anchor, limit))
+    client.rebaseAreaUndo(snapshot, client.anchor, client.caret)
+    client.resetAreaCache(snapshot.lineCount())
+    return false
+  client.bufferSnapshot = edit.snapshot
+  client.areaCompositionText = value
+  let units = platform.utf16Len(value)
+  client.mark = platform.TextRange(start: client.areaCompositionStart,
+                                    `end`: client.areaCompositionStart + units)
+  client.hasMark = value.len > 0
+  let normalized = platform.normalizeTextRange(selected)
+  client.anchor = client.areaCompositionStart + min(normalized.start, units)
+  client.caret = client.areaCompositionStart + min(normalized.`end`, units)
+  client.areaHasDesiredX = false
+  client.resetAreaCache(client.bufferSnapshot.lineCount())
+  if client.areaLineHeight > 0:
+    client.areaHeights.setEstimate(float64(client.areaLineHeight))
+  client.revealAreaCaret()
+  result = true
+
+proc commitAreaComposition(client: TextFieldClient;
+                          keepTransaction: bool): bool =
+  if client.areaCompositionBuffer == nil:
+    return false
+  if client.areaCompositionText.len == 0:
+    client.clearAreaComposition(restoreBase = true,
+                                keepTransaction = keepTransaction)
+    return true
+  let before = client.areaCompositionBase
+  let value = client.areaCompositionText
+  let committedMark = client.mark
+  let insertion = platform.TextRange(start: client.areaCompositionStart,
+                                      `end`: client.areaCompositionStart)
+  let edit = client.boundBuffer.replaceUtf16IfCurrent(before, insertion, value)
+  if not edit.committed:
+    client.clearAreaComposition(restoreBase = false)
+    client.bufferSnapshot = edit.snapshot
+    let limit = edit.snapshot.utf16Len()
+    client.caret = max(0, min(client.caret, limit))
+    client.anchor = max(0, min(client.anchor, limit))
+    client.rebaseAreaUndo(edit.snapshot, client.anchor, client.caret)
+    client.resetAreaCache(edit.snapshot.lineCount())
+    return false
+  client.invalidateAreaEdit(before, edit.snapshot, edit.replacedRange, value)
+  client.recordAreaEdit(before, edit.snapshot, edit.replacedRange, value,
+    client.anchor, client.caret, mergeComposition = true)
+  client.bufferSnapshot = edit.snapshot
+  client.clearAreaComposition(restoreBase = false,
+                              keepTransaction = keepTransaction)
+  client.areaCommittedMark = committedMark
+  client.areaHasCommittedMark = keepTransaction
+  client.areaStringChanged = client.areaStringBound
+  client.areaUndoGroupOpen = false
+  client.revealAreaCaret()
+  result = true
+
 method textForRange*(client: TextFieldClient; r: platform.TextRange):
     tuple[s: string, actual: platform.TextRange] =
   if client.multiline:
@@ -546,9 +683,37 @@ method replaceText*(client: TextFieldClient; r: ref platform.TextRange;
   if client.readOnly:
     return
   if client.multiline:
-    let target = if r == nil: client.fieldRange()
-      else: platform.normalizeTextRange(r[])
-    discard client.replaceAreaText(target, value)
+    var target: platform.TextRange
+    var mergeComposition = false
+    if client.areaCompositionBuffer != nil:
+      if r == nil:
+        let start = client.areaCompositionStart
+        client.clearAreaComposition(restoreBase = true,
+                                    keepTransaction = true)
+        client.anchor = start
+        client.caret = start
+        target = platform.TextRange(start: start, `end`: start)
+      else:
+        if not client.commitAreaComposition(keepTransaction = true):
+          return
+        target = platform.normalizeTextRange(r[])
+      mergeComposition = true
+    else:
+      target = if r == nil: client.fieldRange()
+        else: platform.normalizeTextRange(r[])
+      mergeComposition = client.areaCompositionActive and
+        client.areaHasCommittedMark and r != nil and
+        platform.normalizeTextRange(r[]) == client.areaCommittedMark
+      if client.areaCompositionActive and not mergeComposition:
+        client.areaUndoGroupOpen = false
+    if client.replaceAreaText(target, value, mergeComposition):
+      client.areaCompositionActive = false
+      client.areaCommittedMark = platform.TextRange()
+      client.areaHasCommittedMark = false
+    elif client.areaCompositionActive:
+      client.areaCompositionActive = false
+      client.areaCommittedMark = platform.TextRange()
+      client.areaHasCommittedMark = false
     return
   let target = if r == nil: client.fieldRange()
     else: platform.normalizeTextRange(r[])
@@ -573,22 +738,24 @@ method setMarkedText*(client: TextFieldClient; r: ref platform.TextRange;
   if client.readOnly:
     return
   if client.multiline:
-    discard client.syncTextAreaBuffer()
-    let mergeComposition = client.hasMark
-    let target = if client.hasMark: client.mark
-      elif r == nil: client.fieldRange()
-      else: platform.normalizeTextRange(r[])
-    if not client.replaceAreaText(target, value, mergeComposition):
-      return
-    let start = client.caret - platform.utf16Len(value)
-    client.mark = platform.TextRange(start: start,
-      `end`: client.caret)
-    client.hasMark = true
-    let normalizedSelection = platform.normalizeTextRange(selected)
-    client.anchor = start + min(normalizedSelection.start,
-      platform.utf16Len(value))
-    client.caret = start + min(normalizedSelection.`end`,
-      platform.utf16Len(value))
+    if client.areaCompositionBuffer != nil:
+      if r != nil:
+        if not client.commitAreaComposition(keepTransaction = true):
+          return
+        if not client.beginAreaComposition(platform.normalizeTextRange(r[]),
+                                            mergeComposition = true):
+          return
+      else:
+        discard client.updateAreaComposition(value, selected)
+        return
+    else:
+      discard client.syncTextAreaBuffer()
+      client.areaCompositionActive = false
+      let target = if r == nil: client.fieldRange()
+        else: platform.normalizeTextRange(r[])
+      if not client.beginAreaComposition(target, mergeComposition = false):
+        return
+    discard client.updateAreaComposition(value, selected)
     return
   let mergeComposition = client.hasMark
   let before = client.text
@@ -617,6 +784,8 @@ method setMarkedText*(client: TextFieldClient; r: ref platform.TextRange;
   client.rebuildFieldLayout()
 
 method unmarkText*(client: TextFieldClient) =
+  if client.multiline and client.areaCompositionBuffer != nil:
+    discard client.commitAreaComposition(keepTransaction = true)
   client.hasMark = false
   client.textUndoGroupOpen = false
   if client.multiline:
@@ -891,6 +1060,13 @@ proc leaveTextAreaMode(client: TextFieldClient) =
   client.areaUndo.setLen(0)
   client.areaRedo.setLen(0)
   client.areaUndoGroupOpen = false
+  client.areaCompositionBuffer = nil
+  client.areaCompositionBase = TextSnapshot()
+  client.areaCompositionStart = 0
+  client.areaCompositionText.setLen(0)
+  client.areaCompositionActive = false
+  client.areaCommittedMark = platform.TextRange()
+  client.areaHasCommittedMark = false
   client.areaScroll = nil
   client.areaLayouts.clear()
 
@@ -912,6 +1088,13 @@ proc initializeTextArea(client: TextFieldClient; buffer: TextBuffer) =
   client.areaUndo.setLen(0)
   client.areaRedo.setLen(0)
   client.areaUndoGroupOpen = false
+  client.areaCompositionBuffer = nil
+  client.areaCompositionBase = TextSnapshot()
+  client.areaCompositionStart = 0
+  client.areaCompositionText.setLen(0)
+  client.areaCompositionActive = false
+  client.areaCommittedMark = platform.TextRange()
+  client.areaHasCommittedMark = false
 
 proc updateTextAreaPlaceholder(client: TextFieldClient; e: Element) =
   let node = e.node
@@ -1047,6 +1230,7 @@ proc textAreaCore(c: Context; buffer: TextBuffer;
     client.textKeyPending = false
     client.textKeyPendingValue.setLen(0)
   elif boundValue[] != client.areaStringValue:
+    client.clearAreaComposition(restoreBase = false)
     client.boundBuffer.set(boundValue[])
     let snapshot = client.boundBuffer.snapshot()
     client.rebaseAreaUndo(snapshot, snapshot.utf16Len(),
@@ -1244,6 +1428,11 @@ proc setTextSelection*(e: Element; start, `end`: int): Element =
   result = e
   let client = e.fieldClient()
   if client != nil:
+    if client.multiline:
+      if client.areaCompositionBuffer != nil:
+        discard client.commitAreaComposition(keepTransaction = false)
+      else:
+        client.areaCompositionActive = false
     client.textUndoGroupOpen = false
     let count = client.fieldRuneLen()
     let first = max(0, min(start, count))
