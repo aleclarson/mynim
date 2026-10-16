@@ -57,7 +57,8 @@ type
     precision*: float64
     velocity*: float32
 
-  Animation* = object ## A timed easing curve or spring for scrolling.
+  Animation* = object ## A timed easing curve or spring for scalar motion and
+                        ## scrolling.
     duration*: Duration ## Positive selects a curve; zero selects a spring.
     ease*: Easing ## Defaults to easeOut for timed animations.
     spring*: SpringOptions ## Spring settings when duration is zero.

@@ -1534,25 +1534,102 @@ proc applyTableFits(nodes: var seq[ElementNode]; natural: seq[NaturalSize]): boo
         nodes[other].tableFitMeasure = false
     result = true
 
-proc advance(channel: var ScalarAnimation; now: MonoTime) =
-  if not channel.moving:
+proc step(channel: var ScalarAnimation; now: MonoTime) =
+  let dt = float64((now - channel.at).inNanoseconds) / 1_000_000_000
+  if dt <= 0:
+    channel.at = now
     return
-  let durationNs = channel.duration.inNanoseconds
-  let elapsedNs = max((now - channel.startAt).inNanoseconds, 0'i64)
-  let progress = min(float32(float64(elapsedNs) / float64(durationNs)), 1'f32)
-  let inverse = 1'f32 - progress
-  let eased = 1'f32 - inverse * inverse * inverse
-  channel.value = channel.fromValue +
-    (channel.target - channel.fromValue) * eased
-  if progress >= 1:
+  channel.at = now
+  let wasJumped = channel.jumped
+  channel.jumped = false
+  if not channel.moving:
+    if not wasJumped or dt > 0.1:
+      channel.velocity = 0
+    return
+  if channel.curve:
+    let duration = float64(channel.duration.inNanoseconds) / 1_000_000_000
+    let progress = float64((now - channel.startAt).inNanoseconds) /
+      1_000_000_000 / duration
+    if progress >= 1:
+      channel.value = channel.target
+      channel.velocity = 0
+      channel.moving = false
+      return
+    let t = max(progress, 0.0)
+    let easing = if channel.ease == nil: easeOut else: channel.ease
+    let eased = easing(float32(t))
+    if not finiteMotion(float64(eased)):
+      raise newException(ValueError, "ui: easing result must be finite")
+    let span = channel.target - channel.fromValue
+    channel.value = channel.fromValue + span * float64(eased)
+    let lo = max(t - 1e-3, 0.0)
+    let hi = min(t + 1e-3, 1.0)
+    if hi > lo:
+      let slope = float64(easing(float32(hi)) - easing(float32(lo))) /
+        (hi - lo) / duration
+      if not finiteMotion(slope) or not finiteMotion(span * slope):
+        raise newException(ValueError, "ui: easing slope must be finite")
+      channel.velocity = span * slope
+    else:
+      channel.velocity = 0
+    return
+  let moved = solveSpring(channel.value - channel.target, channel.velocity,
+    channel.mass, channel.stiffness, channel.damping, dt)
+  channel.value = channel.target + moved.x
+  channel.velocity = moved.velocity
+  if abs(moved.x) <= channel.precision and
+      abs(moved.velocity) <= channel.precision *
+        sqrt(channel.stiffness / channel.mass):
     channel.value = channel.target
+    channel.velocity = 0
     channel.moving = false
 
+proc retarget(channel: var ScalarAnimation; target: float64;
+              animation: Animation; now: MonoTime) =
+  channel.target = target
+  channel.moving = true
+  channel.jumped = false
+  if animation.duration > DurationZero:
+    channel.curve = true
+    channel.fromValue = channel.value
+    channel.startAt = now
+    channel.duration = animation.duration
+    channel.ease = if animation.ease == nil: easeOut else: animation.ease
+    return
+  let physics = springPhysics(animation.spring)
+  channel.curve = false
+  channel.mass = physics.mass
+  channel.stiffness = physics.stiffness
+  channel.damping = physics.damping
+  channel.precision = physics.precision
+  if animation.spring.velocity != 0:
+    channel.velocity = float64(animation.spring.velocity)
+
+proc advance(channel: var ScalarAnimation; now: MonoTime) =
+  if channel.pending and now >= channel.pendingAt:
+    channel.step(channel.pendingAt)
+    let target = channel.pendingTarget
+    let animation = channel.pendingAnimation
+    channel.pending = false
+    channel.retarget(target, animation, channel.pendingAt)
+    channel.at = channel.pendingAt
+  channel.step(now)
+
+proc goal(channel: ScalarAnimation): float64 =
+  if channel.pending: channel.pendingTarget else: channel.target
+
+proc cubicEaseOut(progress: float32): float32 =
+  let inverse = 1'f32 - progress
+  1'f32 - inverse * inverse * inverse
+
 proc animate*(e: Element; key: string; target: float32;
-              duration: Duration): float32 =
-  ## Moves a keyed scalar value to target with cubic ease-out and requests
-  ## frames while it moves. The first target appears immediately. Reduced
-  ## motion preferences also apply immediately.
+              animation: Animation): float32 =
+  ## Moves a keyed scalar value with a timed easing curve or spring and
+  ## requests frames while it moves. The first target appears immediately.
+  ## Reduced motion preferences also apply immediately.
+  if not finiteMotion(float64(target)):
+    raise newException(ValueError, "ui: animation values must be finite")
+  animation.validateAnimation()
   let node = e.node
   if node == nil:
     return target
@@ -1563,39 +1640,116 @@ proc animate*(e: Element; key: string; target: float32;
   if not channel.initialized or
       (channel.generation != owner.generation and
        channel.generation + 1 != owner.generation):
-    channel = ScalarAnimation(value: target, fromValue: target,
-      target: target, generation: owner.generation, initialized: true)
+    channel = ScalarAnimation(value: float64(target),
+      fromValue: float64(target), target: float64(target),
+      at: owner.frameNow, generation: owner.generation,
+      initialized: true)
     channels[key] = channel
     owner.animations[node.identity] = channels
     return target
 
+  let to = float64(target)
   if owner.reduceMotion:
-    channel.value = target
-    channel.fromValue = target
-    channel.target = target
+    channel.value = to
+    channel.velocity = 0
+    channel.fromValue = to
+    channel.target = to
+    channel.at = owner.frameNow
     channel.moving = false
+    channel.pending = false
+    channel.jumped = false
   else:
-    if channel.moving:
-      channel.advance(owner.frameNow)
-    if target != channel.target:
-      channel.fromValue = channel.value
-      channel.target = target
-      channel.startAt = owner.frameNow
-      channel.duration = if duration < initDuration(milliseconds = 1):
-          initDuration(milliseconds = 1)
-        else:
-          duration
-      channel.moving = channel.fromValue != target
-      if not channel.moving:
-        channel.value = target
-    if channel.moving:
-      channel.advance(owner.frameNow)
-      owner.animating = owner.animating or channel.moving
+    channel.advance(owner.frameNow)
+    if to != channel.goal() and animation.delay > DurationZero:
+      channel.pending = true
+      channel.pendingTarget = to
+      channel.pendingAt = owner.frameNow + animation.delay
+      channel.pendingAnimation = animation
+      channel.pendingAnimation.delay = DurationZero
+    elif to != channel.goal():
+      channel.pending = false
+      channel.retarget(to, animation, owner.frameNow)
+    elif channel.moving and not channel.curve and
+        animation.duration == DurationZero and not channel.pending:
+      let physics = springPhysics(animation.spring)
+      channel.mass = physics.mass
+      channel.stiffness = physics.stiffness
+      channel.damping = physics.damping
+      channel.precision = physics.precision
+    owner.animating = owner.animating or channel.moving or channel.pending
 
   channel.generation = owner.generation
   channels[key] = channel
   owner.animations[node.identity] = channels
-  channel.value
+  float32(channel.value)
+
+proc animate*(e: Element; key: string; target: float32;
+              duration: Duration): float32 =
+  ## Moves a keyed scalar value with cubic ease-out over duration.
+  ## Durations below 1 ms are treated as 1 ms for compatibility.
+  let minimum = initDuration(milliseconds = 1)
+  e.animate(key, target, Animation(duration: max(duration, minimum),
+    ease: cubicEaseOut))
+
+proc spring*(e: Element; key: string; target: float32;
+             options = SpringOptions()): float32 =
+  ## Moves a keyed scalar value to target with a spring.
+  e.animate(key, target, Animation(spring: options))
+
+proc jump*(e: Element; key: string; value: float32): float32 =
+  ## Sets a keyed scalar value immediately and tracks drag velocity for a
+  ## spring that takes over shortly after the jump.
+  if not finiteMotion(float64(value)):
+    raise newException(ValueError, "ui: animation values must be finite")
+  let node = e.node
+  if node == nil:
+    return value
+  let owner = e.owner
+  var channels = owner.animations.mgetOrPut(node.identity,
+    initTable[string, ScalarAnimation]())
+  var channel = channels.getOrDefault(key)
+  if not channel.initialized or
+      (channel.generation != owner.generation and
+       channel.generation + 1 != owner.generation):
+    channel = ScalarAnimation(value: float64(value),
+      fromValue: float64(value), target: float64(value), at: owner.frameNow,
+      generation: owner.generation, initialized: true)
+  else:
+    let dt = float64((owner.frameNow - channel.at).inNanoseconds) /
+      1_000_000_000
+    if dt > 0 and dt <= 0.1 and channel.jumped:
+      channel.velocity = (float64(value) - channel.value) / dt
+    elif dt > 0:
+      channel.advance(owner.frameNow)
+      if dt > 0.1:
+        channel.velocity = 0
+    channel.value = float64(value)
+    channel.target = float64(value)
+    channel.moving = false
+    channel.pending = false
+    channel.jumped = true
+    channel.at = owner.frameNow
+  channel.generation = owner.generation
+  channels[key] = channel
+  owner.animations[node.identity] = channels
+  value
+
+proc velocity*(e: Element; key: string): float32 =
+  ## Returns the current velocity of a keyed scalar animation, or zero.
+  let node = e.node
+  if node == nil:
+    return 0
+  let channels = e.owner.animations.getOrDefault(node.identity)
+  float32(channels.getOrDefault(key).velocity)
+
+proc settled*(e: Element; key: string): bool =
+  ## Reports whether a keyed scalar animation is at rest or has not started.
+  let node = e.node
+  if node == nil:
+    return true
+  let channels = e.owner.animations.getOrDefault(node.identity)
+  let channel = channels.getOrDefault(key)
+  not channel.initialized or (not channel.moving and not channel.pending)
 
 proc layoutAt(c: Context; bounds: Rect; now: MonoTime;
               reduceMotion: bool): LayoutResult =

@@ -50,11 +50,15 @@ type
     action: proc() {.closure.}
 
   ScalarAnimation = object
-    value, fromValue, target: float32
-    startAt: MonoTime
+    value, velocity, fromValue, target: float64
+    at, startAt, pendingAt: MonoTime
     duration: Duration
+    ease: Easing
+    mass, stiffness, damping, precision: float64
+    pendingTarget: float64
+    pendingAnimation: Animation
     generation: uint32
-    initialized, moving: bool
+    initialized, moving, curve, pending, jumped: bool
 
   ElementOwner = ref object
     nodes: seq[ElementNode]
