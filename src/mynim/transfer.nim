@@ -5,6 +5,11 @@
 import std/[locks, uri, strutils, os]
 import ./image
 
+proc cloneBytes(b: openArray[byte]): seq[byte] =
+  result = newSeq[byte](b.len)
+  for i, value in b:
+    result[i] = value
+
 proc bytesToString*(b: seq[byte]): string =
   result = newString(b.len)
   if b.len > 0: copyMem(addr result[0], unsafeAddr b[0], b.len)
@@ -85,9 +90,11 @@ proc bytes*(format: Format, b: seq[byte] | string): Representation =
   initLock(v.lock)
   v.done = true
   when b is string:
-    v.bytes = @(toOpenArrayByte(b, 0, b.len - 1))
+    v.bytes = newSeq[byte](b.len)
+    for i, value in b:
+      v.bytes[i] = byte(value)
   else:
-    v.bytes = b
+    v.bytes = cloneBytes(b)
   Representation(format: format, value: v)
 
 proc lazy*(format: Format,
@@ -112,6 +119,9 @@ type
 proc newItem*(reps: varargs[Representation]): Item =
   ## Makes an item. Duplicate formats and zero representations are a
   ## programming error (Go panics).
+  if reps.len == 0:
+    raise newException(ValueError,
+      "transfer: invalid or duplicate representation")
   var seen: seq[Format]
   for r in reps:
     if r.value == nil or r.format in seen:
@@ -123,31 +133,42 @@ proc formats*(i: Item): seq[Format] =
   result = newSeq[Format](i.reps.len)
   for n, r in i.reps: result[n] = r.format
 
-proc read*(i: Item, format: Format): tuple[data: seq[byte], err: ref CatchableError] =
-  ## Returns a copy of the requested bytes. Safe from any thread.
-  for r in i.reps:
-    if r.format != format: continue
-    let v = r.value
-    if not v.done:
-      acquire(v.lock)
-      try:
-        if not v.done:
-          v.done = true
-          try:
-            if v.provider != nil:
-              let res = v.provider()
-              v.err = res.err
-              v.bytes = if res.err != nil: @[] else: res.data
-          except CatchableError as e:
-            v.bytes = @[]
-            v.err = errProviderPanic(e.msg)
-          except Exception as e:
-            v.bytes = @[]
-            v.err = errProviderPanic(e.msg)
-      finally:
-        release(v.lock)
-    return (v.bytes, v.err)
+proc readItem(i: ptr Item; format: Format):
+    tuple[data: seq[byte], err: ref CatchableError] =
+  ## Returns a copy of the requested bytes. Provider evaluation and caching
+  ## are serialized across callers. When sharing these values across OS
+  ## threads, follow Nim's memory-manager rules: under ORC use a thread-safe
+  ## transfer such as a Channel, or compile with atomic reference counting.
+  for repIndex in 0..<i[].reps.len:
+    if i[].reps[repIndex].format != format: continue
+    let value = addr i[].reps[repIndex].value[]
+    acquire(value.lock)
+    try:
+      if not value.done:
+        try:
+          if value.provider != nil:
+            let res = value.provider()
+            value.err = res.err
+            value.bytes = if res.err != nil: @[] else:
+              cloneBytes(res.data)
+        except CatchableError as e:
+          value.bytes = @[]
+          value.err = errProviderPanic(e.msg)
+        except Defect as e:
+          # Go's recover contains every provider panic at this boundary.
+          # Nim separates programmer defects from catchable errors, so
+          # translate both here to preserve that public contract.
+          value.bytes = @[]
+          value.err = errProviderPanic(e.msg)
+        value.done = true
+      return (cloneBytes(value.bytes), value.err)
+    finally:
+      release(value.lock)
   (@[], errFormat())
+
+proc read*(i: Item, format: Format):
+    tuple[data: seq[byte], err: ref CatchableError] =
+  readItem(unsafeAddr i, format)
 
 type
   Data* = object
@@ -156,7 +177,11 @@ type
 
 proc newData*(items: varargs[Item]): Data = Data(items: @items)
 
-proc items*(d: Data): seq[Item] = d.items
+proc items*(d: Data): seq[Item] =
+  ## Returns a copy of the collection; editing it does not change the data.
+  result = newSeq[Item](d.items.len)
+  for i, item in d.items:
+    result[i] = Item(reps: item.reps)
 
 proc formats*(d: Data): seq[Format] =
   ## Lists all formats, in item order, without invoking providers.
@@ -186,7 +211,7 @@ proc snapshot*(d: Data): Data =
       let v = Value(provider: r.value.provider)
       initLock(v.lock)
       if v.provider == nil:
-        v.bytes = r.value.bytes
+        v.bytes = cloneBytes(r.value.bytes)
         v.done = true
       reps.add(Representation(format: r.format, value: v))
     items[n] = Item(reps: reps)
@@ -198,9 +223,14 @@ proc read*(d: Data, format: Format): tuple[data: seq[byte], err: ref CatchableEr
   ## formats use the first item offering them; macOS preserves separate
   ## items.
   var parts: seq[seq[byte]]
-  for i in d.items:
-    if format notin i.formats: continue
-    let (b, err) = i.read(format)
+  for itemIndex in 0..<d.items.len:
+    var offered = false
+    for repIndex in 0..<d.items[itemIndex].reps.len:
+      if d.items[itemIndex].reps[repIndex].format == format:
+        offered = true
+        break
+    if not offered: continue
+    let (b, err) = readItem(addr d.items[itemIndex], format)
     if err != nil: return (@[], err)
     parts.add(b)
     if format != Text and format != URIList and format != FileList:
