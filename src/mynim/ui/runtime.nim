@@ -599,6 +599,7 @@ proc accessibilityTree(layout: LayoutResult;
       bounds: platform.RectF(x: rect.x.float64, y: rect.y.float64,
         w: rect.w.float64, h: rect.h.float64))
     accessible.description = node.accessDescription
+    accessible.value = node.accessValue
     accessible.states = accessible.states or node.accessSort
     accessible.states = accessible.states or node.accessExtraStates
     accessible.actions = accessible.actions or node.accessExtraActions
@@ -1487,6 +1488,16 @@ proc sliderAncestor(layout: LayoutResult; slot: int): int =
     current = int(node.parent)
   -1
 
+proc colorPlaneAncestor(owner: ElementOwner; slot: int): int =
+  if owner == nil or owner.closed or slot <= 0 or slot >= owner.nodes.len:
+    return -1
+  var current = slot
+  while current > 0 and current < owner.nodes.len:
+    if owner.nodes[current].colorPlane:
+      return current
+    current = int(owner.nodes[current].parent)
+  -1
+
 proc queueSliderValue(rt: Runtime; slot: int; value: float64): bool =
   let layout = rt.frameLayout
   let owner = layout.owner
@@ -1677,6 +1688,36 @@ proc queueSliderPointer(rt: Runtime; slot: int;
     (node.sliderHigh - node.sliderLow)
   rt.queueSliderValue(slot, value)
 
+proc queueColorPlanePointer(rt: Runtime; slot: int): bool =
+  let layout = rt.frameLayout
+  let owner = layout.owner
+  if owner == nil or owner.closed or layout.generation != owner.generation or
+      slot <= 0 or slot >= owner.nodes.len or slot >= layout.rects.len:
+    return false
+  let node = owner.nodes[slot]
+  if not node.colorPlane or
+      classify(rt.pointerX) in {fcNan, fcInf, fcNegInf} or
+      classify(rt.pointerY) in {fcNan, fcInf, fcNegInf}:
+    return false
+  let bounds = layout.rects[slot]
+  let left = bounds.x + node.border[3] + node.pad[3]
+  let top = bounds.y + node.border[0] + node.pad[0]
+  let width = bounds.w - node.contentInsetX
+  let height = bounds.h - node.contentInsetY
+  if width <= 0 or height <= 0:
+    return false
+  let current = owner.pendingColorPlanes.getOrDefault(node.identity,
+    ColorPlaneValue(saturation: node.colorPlaneSaturation,
+                    brightness: node.colorPlaneBrightness))
+  let next = ColorPlaneValue(
+    saturation: min(max(float64((rt.pointerX - left) / width), 0), 1),
+    brightness: min(max(float64(1 - (rt.pointerY - top) / height), 0), 1))
+  if next == current:
+    return false
+  owner.pendingColorPlanes[node.identity] = next
+  rt.requestFrame()
+  true
+
 proc sliderKey(rt: Runtime; key: platform.Key;
                mods: platform.Modifiers): bool =
   if mods != 0 or not rt.frameLayout.focusableSlot(rt.focusSlot):
@@ -1685,6 +1726,26 @@ proc sliderKey(rt: Runtime; key: platform.Key;
   if owner == nil or rt.focusSlot <= 0 or rt.focusSlot >= owner.nodes.len:
     return false
   let node = owner.nodes[rt.focusSlot]
+  if node.colorPlane:
+    let current = owner.pendingColorPlanes.getOrDefault(node.identity,
+      ColorPlaneValue(saturation: node.colorPlaneSaturation,
+                      brightness: node.colorPlaneBrightness))
+    var next = current
+    case key
+    of platform.keyLeft:
+      next.saturation = max(0, current.saturation - 0.01)
+    of platform.keyRight:
+      next.saturation = min(1, current.saturation + 0.01)
+    of platform.keyDown:
+      next.brightness = max(0, current.brightness - 0.01)
+    of platform.keyUp:
+      next.brightness = min(1, current.brightness + 0.01)
+    else:
+      return false
+    if next != current:
+      owner.pendingColorPlanes[node.identity] = next
+      rt.requestFrame()
+    return true
   if not node.slider:
     return false
   let identity = node.identity
@@ -2271,10 +2332,15 @@ proc event(rt: Runtime; ev: platform.SurfaceEvent): bool =
         rt.requestFrame()
       return false
     if rt.pressTarget.owner == rt.frameLayout.owner:
-      let sliderSlot = rt.frameLayout.sliderAncestor(
-        int(rt.pressTarget.slot))
-      if sliderSlot >= 0:
-        discard rt.queueSliderPointer(sliderSlot)
+      let owner = rt.frameLayout.owner
+      let pressSlot = int(rt.pressTarget.slot)
+      let colorPlaneSlot = owner.colorPlaneAncestor(pressSlot)
+      if colorPlaneSlot >= 0:
+        discard rt.queueColorPlanePointer(colorPlaneSlot)
+      else:
+        let sliderSlot = rt.frameLayout.sliderAncestor(pressSlot)
+        if sliderSlot >= 0:
+          discard rt.queueSliderPointer(sliderSlot)
     if rt.hoverSlots != previousHover or rt.pressedSlots != previousPressed:
       rt.requestFrame()
     false
@@ -2340,13 +2406,18 @@ proc event(rt: Runtime; ev: platform.SurfaceEvent): bool =
             rt.pressedSlots != previousPressed:
           rt.requestFrame()
         return rt.pressTarget.owner != nil
-      let sliderSlot = rt.frameLayout.sliderAncestor(slot)
-      if sliderSlot >= 0:
-        slot = sliderSlot
-        if rt.frameLayout.owner.nodes[sliderSlot].splitHandle:
-          rt.beginSplitPointer(sliderSlot)
-        else:
-          discard rt.queueSliderPointer(sliderSlot, activatePointer = true)
+      let colorPlaneSlot = rt.frameLayout.owner.colorPlaneAncestor(slot)
+      if colorPlaneSlot >= 0:
+        slot = colorPlaneSlot
+        discard rt.queueColorPlanePointer(colorPlaneSlot)
+      else:
+        let sliderSlot = rt.frameLayout.sliderAncestor(slot)
+        if sliderSlot >= 0:
+          slot = sliderSlot
+          if rt.frameLayout.owner.nodes[sliderSlot].splitHandle:
+            rt.beginSplitPointer(sliderSlot)
+          else:
+            discard rt.queueSliderPointer(sliderSlot, activatePointer = true)
       var targetNode = rt.frameLayout.owner.nodes[slot]
       if targetNode.listState != nil and targetNode.listRowIndex >= 0 and
           not targetNode.listRowHeader:
@@ -2437,15 +2508,21 @@ proc event(rt: Runtime; ev: platform.SurfaceEvent): bool =
         rt.frameLayout.sliderAncestor(int(rt.pressTarget.slot))
       else:
         -1
+    let colorPlaneSlot = if rt.pressTarget.owner == rt.frameLayout.owner:
+        rt.frameLayout.owner.colorPlaneAncestor(int(rt.pressTarget.slot))
+      else:
+        -1
     if sliderSlot >= 0:
       let rangeIdentity = rt.frameLayout.owner.rangeSliderIdentity(sliderSlot)
       discard rt.queueSliderPointer(sliderSlot)
       if rangeIdentity != 0:
         rt.frameLayout.owner.rangeSliderDrags.del(rangeIdentity)
+    if colorPlaneSlot >= 0:
+      discard rt.queueColorPlanePointer(colorPlaneSlot)
     var clickedSlot = -1
     let clicked = rt.frameLayout.dispatchClick(rt.pressTarget,
       rt.pointerX, rt.pointerY, rt.pressMods, clickedSlot)
-    result = clicked or sliderSlot >= 0
+    result = clicked or sliderSlot >= 0 or colorPlaneSlot >= 0
     rt.clickedSlots.setLen(0)
     if clicked:
       rt.clickedSlots.add(clickedSlot)
@@ -2594,23 +2671,41 @@ proc event(rt: Runtime; ev: platform.SurfaceEvent): bool =
       let slot = int(ev.id - 1)
       let owner = rt.frameLayout.owner
       if owner != nil and slot > 0 and slot < owner.nodes.len and
-          owner.nodes[slot].textClient != nil and
           not owner.effectivelyDisabled(slot):
-        let client = owner.nodes[slot].textClient
-        if client of TextFieldClient and TextFieldClient(client).readOnly:
-          return false
-        let before = platform.clientTextContext(client).text
-        let (_, actual) = client.textForRange(platform.TextRange(
-          start: 0, `end`: high(int)))
-        let replacement = new platform.TextRange
-        replacement.start = max(0, actual.start)
-        replacement.`end` = max(replacement.start, actual.`end`)
-        client.replaceText(replacement, ev.text)
-        rt.focusSlot = slot
-        rt.keyboardFocusVisible = false
-        rt.inputComposition.reset()
-        rt.inputChanged(slot, before)
-        result = true
+        let node = owner.nodes[slot]
+        if node.colorPlane:
+          try:
+            let saturation = parseFloat(ev.text) / 100
+            if classify(saturation) notin {fcNan, fcInf, fcNegInf} and
+                saturation >= 0 and saturation <= 1:
+              let value = owner.pendingColorPlanes.getOrDefault(node.identity,
+                ColorPlaneValue(saturation: node.colorPlaneSaturation,
+                                brightness: node.colorPlaneBrightness))
+              owner.pendingColorPlanes[node.identity] = ColorPlaneValue(
+                saturation: saturation, brightness: value.brightness)
+              rt.focusSlot = slot
+              rt.keyboardFocusVisible = false
+              rt.cancelKeyPress()
+              rt.requestFrame()
+              result = true
+          except ValueError:
+            discard
+        elif node.textClient != nil:
+          let client = node.textClient
+          if client of TextFieldClient and TextFieldClient(client).readOnly:
+            return false
+          let before = platform.clientTextContext(client).text
+          let (_, actual) = client.textForRange(platform.TextRange(
+            start: 0, `end`: high(int)))
+          let replacement = new platform.TextRange
+          replacement.start = max(0, actual.start)
+          replacement.`end` = max(replacement.start, actual.`end`)
+          client.replaceText(replacement, ev.text)
+          rt.focusSlot = slot
+          rt.keyboardFocusVisible = false
+          rt.inputComposition.reset()
+          rt.inputChanged(slot, before)
+          result = true
     return result
   else:
     false

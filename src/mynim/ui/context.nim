@@ -111,6 +111,15 @@ type
     open, filtering, hasPendingChoice, tokenField,
       pendingTokenSubmission: bool
 
+  ColorPickerState = ref object
+    hue, saturation, brightness, alpha: float64
+    lastColor: Color
+    hexFieldIdentity: uint64
+    hex: string
+
+  ColorPlaneValue = object
+    saturation, brightness: float64
+
   Toast* = object ## A message shown in the window's toast viewport.
     id*: string
     title*, description*, kind*: string
@@ -143,6 +152,7 @@ type
     actions: seq[UiAction]
     pendingNotices: Table[uint64, uint8]
     pendingSliderValues: Table[uint64, float64]
+    pendingColorPlanes: Table[uint64, ColorPlaneValue]
     stepperRepeats: Table[uint64, StepperRepeat]
     numberInputStates: Table[uint64, NumberInputState]
     popoverStates: Table[uint64, PopoverState]
@@ -150,6 +160,7 @@ type
     dialogOrdinals: Table[uint64, uint64]
     activeModalIdentity: uint64
     comboBoxStates: Table[uint64, ComboBoxState]
+    colorPickerStates: Table[uint64, ColorPickerState]
     toasts: seq[ToastEntry]
     toastState: ToastState
     announcements: seq[string]
@@ -276,10 +287,12 @@ type
     listRowAction: bool
     slider, sliderVertical, rating, stepper, numberInput, comboBoxRoot,
       comboBoxInput, rangeSlider,
-      rangeSliderThumb, splitPane, splitHandle, splitVertical: bool
+      rangeSliderThumb, splitPane, splitHandle, splitVertical,
+      colorPlane, colorPickerRoot: bool
     rangeSliderHandle: int8
     sliderLow, sliderHigh, sliderValue, sliderStep: float64
     sliderClampLow, sliderClampHigh: float64
+    colorPlaneSaturation, colorPlaneBrightness: float64
     hasAccessRange: bool
     accessMin, accessMax, accessNow: float64
     accessStep: float64
@@ -289,6 +302,7 @@ type
       valueChangedInBuild: bool
     label: string
     accessDescription: string
+    accessValue: string
     accessPosInSet, accessSetSize: int
     tooltipText: string
     tooltipBuild: proc(tip: Element) {.closure.}
@@ -463,12 +477,14 @@ proc newContext*(): Context =
   result.owner.keyedSeen = initHashSet[string]()
   result.owner.pendingNotices = initTable[uint64, uint8]()
   result.owner.pendingSliderValues = initTable[uint64, float64]()
+  result.owner.pendingColorPlanes = initTable[uint64, ColorPlaneValue]()
   result.owner.stepperRepeats = initTable[uint64, StepperRepeat]()
   result.owner.numberInputStates = initTable[uint64, NumberInputState]()
   result.owner.popoverStates = initTable[uint64, PopoverState]()
   result.owner.dialogStates = initTable[uint64, DialogState]()
   result.owner.dialogOrdinals = initTable[uint64, uint64]()
   result.owner.comboBoxStates = initTable[uint64, ComboBoxState]()
+  result.owner.colorPickerStates = initTable[uint64, ColorPickerState]()
   result.owner.toastState = ToastState()
   result.owner.rangeSliderDrags = initTable[uint64, int8]()
   result.owner.pendingTextCallbacks =
@@ -815,6 +831,7 @@ proc retire(owner: ElementOwner) =
   owner.actions = @[]
   owner.pendingNotices.clear()
   owner.pendingSliderValues.clear()
+  owner.pendingColorPlanes.clear()
   owner.stepperRepeats.clear()
   owner.numberInputStates.clear()
   owner.popoverStates.clear()
@@ -822,6 +839,7 @@ proc retire(owner: ElementOwner) =
   owner.dialogOrdinals.clear()
   owner.activeModalIdentity = 0
   owner.comboBoxStates.clear()
+  owner.colorPickerStates.clear()
   owner.toasts.setLen(0)
   owner.announcements.setLen(0)
   owner.toastState = ToastState()
@@ -1149,12 +1167,14 @@ proc build*(c: Context; view: proc(c: Context) {.closure.}) =
     c.owner.keyedSeen = initHashSet[string]()
     c.owner.pendingNotices = initTable[uint64, uint8]()
     c.owner.pendingSliderValues = initTable[uint64, float64]()
+    c.owner.pendingColorPlanes = initTable[uint64, ColorPlaneValue]()
     c.owner.stepperRepeats = initTable[uint64, StepperRepeat]()
     c.owner.numberInputStates = initTable[uint64, NumberInputState]()
     c.owner.popoverStates = initTable[uint64, PopoverState]()
     c.owner.dialogStates = initTable[uint64, DialogState]()
     c.owner.dialogOrdinals = initTable[uint64, uint64]()
     c.owner.comboBoxStates = initTable[uint64, ComboBoxState]()
+    c.owner.colorPickerStates = initTable[uint64, ColorPickerState]()
     c.owner.toastState = ToastState()
     c.owner.toasts.setLen(0)
     c.owner.announcements.setLen(0)
@@ -1305,6 +1325,14 @@ proc build*(c: Context; view: proc(c: Context) {.closure.}) =
         staleComboBoxes.add(identity)
     for identity in staleComboBoxes:
       c.owner.comboBoxStates.del(identity)
+    var staleColorPickers: seq[uint64]
+    for identity in c.owner.colorPickerStates.keys:
+      let slot = c.owner.idSlots.getOrDefault(identity, -1)
+      if slot <= 0 or slot >= c.owner.nodes.len or
+          not c.owner.nodes[slot].colorPickerRoot:
+        staleColorPickers.add(identity)
+    for identity in staleColorPickers:
+      c.owner.colorPickerStates.del(identity)
     built = true
   finally:
     c.owner.inBuild = false
@@ -1318,6 +1346,7 @@ proc build*(c: Context; view: proc(c: Context) {.closure.}) =
     c.owner.pendingTextSubmitCallbacks.clear()
     if built:
       c.owner.pendingSliderValues.clear()
+      c.owner.pendingColorPlanes.clear()
     c.hasPendingKey = false
     c.pendingKey.setLen(0)
     c.owner.previousInteraction.clear()
