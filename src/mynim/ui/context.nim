@@ -421,6 +421,8 @@ type
     shapedText: textStack.Layout
     textClient: platform.TextInputClient
     textAreaOwner: platform.TextInputClient
+    textAreaInput: bool
+    textAreaMinLines, textAreaMaxLines: int
     textAreaLine: int
     clickHandler: proc(mods: platform.Modifiers) {.closure.}
     menuBuilder: proc(menu: Menu) {.closure.}

@@ -1018,6 +1018,7 @@ proc textAreaCore(c: Context; buffer: TextBuffer;
   let node = result.node
   if node == nil:
     return
+  node[].textAreaInput = true
   let client = result.acquireTextField("")
   client.onPaste = nil
   client.onTextKey = nil
@@ -1104,6 +1105,16 @@ proc textAreaCore(c: Context; buffer: TextBuffer;
   )
   if not result.deliverTextFieldCallbacks():
     return
+
+proc lines*(e: Element; min, max: int): Element =
+  ## Grows a text area with its wrapped text up to `max` lines.
+  ## The area remains at least `min` lines high. A nonpositive `max` leaves
+  ## its natural height unconstrained.
+  result = e
+  let node = e.node
+  if node != nil and node[].textAreaInput:
+    node[].textAreaMinLines = min
+    node[].textAreaMaxLines = max
 
 proc textAreaBase*(c: Context; value: var string): Element =
   ## Creates an unstyled multiline editor bound to a string. Native edits are
