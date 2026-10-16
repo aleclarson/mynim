@@ -1,0 +1,81 @@
+import std/assertions
+
+include "../src/mynim.nim"
+import mynim/internal/fake as fakeBackend
+import mynim/ui as ui
+import mynim/ui/editor as editor
+
+let fake = fakeBackend.newFakeBackend()
+theBackend = platform.Backend(fake)
+backendMade = true
+fake.init(AppHandlerImpl(), platform.AppOptions(name: "editor view test"))
+app.initialized = true
+app.handleReady()
+
+let editorState = editor.newState("a😀b")
+editorState.label = "Source"
+let uiContent = ui.newContent(proc(ctx: ui.Context) =
+  discard editor.view(ctx, editorState).size(240, 100)
+)
+let win = newWindow(WindowOptions(width: 260, height: 130, hidden: true,
+  content: uiContent))
+let native = fake.windows[^1].surface
+
+doAssert native.frame()
+doAssert native.send(platform.SurfaceEvent(kind: platform.accessibilityOn))
+var fieldId = 0'u64
+for node in native.accessibility()[0].nodes:
+  if node.role == platform.roleTextField and node.label == "Source":
+    fieldId = node.id
+    doAssert node.value == $editorState.buffer
+doAssert fieldId != 0
+doAssert native.send(platform.SurfaceEvent(kind: platform.accessAction,
+  id: fieldId, action: platform.accessFocus))
+doAssert native.frame()
+
+editorState.select(5, 1)
+discard native.send(platform.SurfaceEvent(kind: platform.surfaceResize))
+doAssert native.frame()
+let reversed = native.lastTextInput().client.selection()
+doAssert reversed.`range`.start == 1 and reversed.`range`.`end` == 3
+doAssert reversed.reversed
+doAssert editorState.selection() == editor.Selection(anchor: 5, head: 1)
+doAssert editorState.selectedText() == "😀"
+
+editorState.select(1, 5)
+discard native.send(platform.SurfaceEvent(kind: platform.surfaceResize))
+doAssert native.frame()
+doAssert native.send(platform.SurfaceEvent(kind: platform.textInput,
+  text: "Z"))
+doAssert $editorState.buffer == "aZb"
+doAssert native.frame()
+doAssert editorState.selection() == editor.Selection(anchor: 2, head: 2)
+
+doAssert native.send(platform.SurfaceEvent(kind: platform.keyPressed,
+  key: platform.keyZ, mods: platform.modSuper))
+doAssert native.frame()
+doAssert $editorState.buffer == "a😀b"
+doAssert native.send(platform.SurfaceEvent(kind: platform.keyPressed,
+  key: platform.keyZ, mods: platform.modSuper or platform.modShift))
+doAssert native.frame()
+doAssert $editorState.buffer == "aZb"
+
+editorState.select(1, 2)
+editorState.insert("Q")
+doAssert $editorState.buffer == "aQb"
+doAssert editorState.selection() == editor.Selection(anchor: 2, head: 2)
+doAssert editorState.buffer.undo()
+doAssert $editorState.buffer == "aZb"
+doAssert editorState.buffer.redo()
+doAssert $editorState.buffer == "aQb"
+
+editorState.readOnly = true
+discard native.send(platform.SurfaceEvent(kind: platform.surfaceResize))
+doAssert native.frame()
+doAssert native.send(platform.SurfaceEvent(kind: platform.textInput,
+  text: "ignored"))
+doAssert native.frame()
+doAssert $editorState.buffer == "aQb"
+
+win.destroy()
+loop.shutdown()

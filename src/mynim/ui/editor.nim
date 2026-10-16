@@ -31,6 +31,15 @@ type
     transactionDepth: int
     transactionBefore: ui.TextSnapshot
 
+  State* = ref object ## App-owned state for one native code-editor view.
+    buffer*: Buffer ## The document edited by the view.
+    readOnly*: bool ## Keeps text selectable while preventing edits.
+    label*: string ## Accessible name; defaults to "Code editor".
+    fontFamily*: string ## Text family; defaults to the system monospace family.
+    fontSize*: float32 ## Text size in DIPs; defaults to 13.
+    caretSelection: Selection
+    selectionPending: bool
+
 const
   maxUndoSteps = 10_000
 
@@ -270,6 +279,106 @@ proc transact*(buffer: Buffer; body: proc() {.closure.}) =
         let before = buffer.transactionBefore
         buffer.transactionBefore = default(ui.TextSnapshot)
         buffer.recordEdit(before)
+
+proc normalizeOffset(snapshot: Snapshot; byteOffset: int): int =
+  snapshot.document.byteOffset(
+    snapshot.document.runeOffsetAtByte(byteOffset))
+
+proc ensureState(state: State) =
+  if state == nil:
+    raise newException(ValueError, "ui/editor: state cannot be nil")
+  if state.buffer == nil:
+    state.buffer = newBuffer()
+    state.caretSelection = Selection(anchor: 0, head: 0)
+    state.selectionPending = false
+
+proc newState*(text = ""): State =
+  ## Creates editor state with a new buffer and the caret at its end.
+  let buffer = newBuffer(text)
+  let caret = buffer.len()
+  State(buffer: buffer, caretSelection: Selection(anchor: caret, head: caret),
+    fontFamily: "monospace", fontSize: 13'f32)
+
+proc selection*(state: State): Selection =
+  ## Returns the primary selection in UTF-8 byte offsets.
+  if state != nil:
+    result = state.caretSelection
+
+proc selections*(state: State): seq[Selection] =
+  ## Returns the editor's current selection. Multiple carets are not yet
+  ## supported by the native view.
+  if state != nil:
+    result.add(state.caretSelection)
+
+proc cursor*(state: State): int =
+  ## Returns the byte offset of the primary caret.
+  state.selection().head
+
+proc cursorPos*(state: State): Pos =
+  ## Returns the primary caret's line and UTF-8 byte column.
+  if state != nil and state.buffer != nil:
+    result = state.buffer.pos(state.cursor())
+
+proc selectedText*(state: State): string =
+  ## Returns the text in the primary selection.
+  if state != nil and state.buffer != nil:
+    let selection = state.caretSelection
+    result = state.buffer.slice(selection.start(), selection.pastLast())
+
+proc select*(state: State; start, pastLast: int) =
+  ## Sets the primary selection using clamped UTF-8 byte offsets.
+  state.ensureState()
+  let snapshot = state.buffer.snapshot()
+  state.caretSelection = Selection(
+    anchor: snapshot.normalizeOffset(start),
+    head: snapshot.normalizeOffset(pastLast))
+  state.selectionPending = true
+
+proc goTo*(state: State; position: Pos) =
+  ## Places the caret at a clamped line and UTF-8 byte column.
+  state.ensureState()
+  let offset = state.buffer.snapshot().offset(position)
+  state.caretSelection = Selection(anchor: offset, head: offset)
+  state.selectionPending = true
+
+proc insert*(state: State; text: string) =
+  ## Replaces the primary selection with text and moves the caret after it.
+  state.ensureState()
+  let selection = state.caretSelection
+  let start = selection.start()
+  let inserted = lf(text)
+  state.buffer.edit(Edit(start: start, pastLast: selection.pastLast(),
+                         text: inserted))
+  let snapshot = state.buffer.snapshot()
+  let caret = snapshot.normalizeOffset(start + inserted.len)
+  state.caretSelection = Selection(anchor: caret, head: caret)
+  state.selectionPending = true
+
+proc view*(c: ui.Context; state: State): ui.Element =
+  ## Builds a native, editable code-editor surface over `state.buffer`.
+  ## The caller chooses its size with `fill`, `grow`, or an explicit size.
+  ## Text rendering and native editing use the UI's virtualized text area;
+  ## line gutters, syntax styling, multi-caret input, and editor commands are
+  ## added by later editor layers.
+  state.ensureState()
+  let snapshot = state.buffer.snapshot()
+  result = c.textAreaBufferBase(state.buffer.document)
+  let family = if state.fontFamily.len == 0: "monospace" else: state.fontFamily
+  let size = if state.fontSize <= 0: 13'f32 else: state.fontSize
+  discard result.textFamily(family).textSize(size)
+    .readOnly(state.readOnly)
+    .label(if state.label.len == 0: "Code editor" else: state.label)
+  if state.selectionPending:
+    let anchor = snapshot.document.runeOffsetAtByte(
+      state.caretSelection.anchor)
+    let head = snapshot.document.runeOffsetAtByte(state.caretSelection.head)
+    discard result.setTextSelection(anchor, head)
+    state.selectionPending = false
+  let native = result.textAnchorCaret()
+  let current = state.buffer.snapshot()
+  state.caretSelection = Selection(
+    anchor: current.document.byteOffset(native.anchor),
+    head: current.document.byteOffset(native.caret))
 
 type TextWriter* = ui.TextWriter
 
