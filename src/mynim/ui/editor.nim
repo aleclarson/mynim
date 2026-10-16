@@ -42,6 +42,11 @@ type
     owner: State
     beforeSelection, afterSelection: Selection
     hasSelection: bool
+    firstChangedLine: int
+
+  SyntaxChange = object
+    version: uint64
+    firstChangedLine: int
 
   Buffer* = ref object ## Thread-safe document text, save state, and undo history.
     mu: Lock
@@ -52,9 +57,12 @@ type
     language: syntax.Language
     transactionDepth: int
     transactionBefore: ui.TextSnapshot
+    transactionFirstChangedLine: int
+    syntaxChanges: seq[SyntaxChange]
 
 const
   maxUndoSteps = 10_000
+  maxSyntaxChanges = 20_000
 
 proc start*(selection: Selection): int =
   ## Returns the lower byte offset, regardless of selection direction.
@@ -174,15 +182,46 @@ proc clearSyntaxCache(state: State; language: syntax.Language;
   state.syntaxVersion = version
   state.syntaxStates = @[0'u64]
 
+proc syntaxChangesSince(buffer: Buffer; oldVersion, newVersion: uint64):
+    tuple[complete: bool, firstChangedLine: int] =
+  result.firstChangedLine = high(int)
+  if buffer == nil:
+    return
+  withLock buffer.mu:
+    if oldVersion == newVersion:
+      result.complete = true
+      return
+    var expected = oldVersion + 1
+    for change in buffer.syntaxChanges:
+      if change.version <= oldVersion:
+        continue
+      if change.version > newVersion:
+        break
+      if change.version != expected:
+        return
+      result.firstChangedLine = min(result.firstChangedLine,
+        change.firstChangedLine)
+      inc expected
+    result.complete = expected == newVersion + 1
+
 proc cachedTokens(state: State; snapshot: Snapshot;
                   language: syntax.Language; line: int): seq[syntax.Token] =
   if language == nil or language.tokenizer == nil or line < 0 or
       line >= snapshot.lineCount():
     return
   if state.syntaxBuffer != state.buffer or
-      state.syntaxLanguage != language or
-      state.syntaxVersion != snapshot.version():
+      state.syntaxLanguage != language:
     state.clearSyntaxCache(language, snapshot.version())
+  elif state.syntaxVersion != snapshot.version():
+    let changes = state.buffer.syntaxChangesSince(state.syntaxVersion,
+      snapshot.version())
+    if changes.complete:
+      if changes.firstChangedLine != high(int):
+        state.syntaxStates.setLen(min(state.syntaxStates.len,
+          changes.firstChangedLine + 1))
+    else:
+      state.syntaxStates = @[0'u64]
+    state.syntaxVersion = snapshot.version()
   var scratch: seq[syntax.Token]
   while state.syntaxStates.len <= line:
     let index = state.syntaxStates.len - 1
@@ -244,10 +283,27 @@ proc same*(a, b: Snapshot): bool =
   ## excluded.
   a.document.same(b.document)
 
+proc recordSyntaxChange(buffer: Buffer; firstChangedLine: int) =
+  if firstChangedLine == high(int):
+    return
+  let version = buffer.document.version()
+  if buffer.syntaxChanges.len > 0 and
+      buffer.syntaxChanges[^1].version == version:
+    buffer.syntaxChanges[^1].firstChangedLine = min(
+      buffer.syntaxChanges[^1].firstChangedLine, firstChangedLine)
+  else:
+    buffer.syntaxChanges.add(SyntaxChange(version: version,
+      firstChangedLine: max(firstChangedLine, 0)))
+  if buffer.transactionDepth > 0:
+    buffer.transactionFirstChangedLine = min(
+      buffer.transactionFirstChangedLine, firstChangedLine)
+  if buffer.syntaxChanges.len > maxSyntaxChanges:
+    buffer.syntaxChanges = buffer.syntaxChanges[(maxSyntaxChanges div 2) .. ^1]
+
 proc recordHistory(buffer: Buffer; before, after: ui.TextSnapshot;
                    owner: State;
                    beforeSelection, afterSelection: Selection;
-                   grouped = false) =
+                   firstChangedLine: int; grouped = false) =
   if before.same(after):
     return
   if buffer.transactionDepth > 0:
@@ -255,19 +311,23 @@ proc recordHistory(buffer: Buffer; before, after: ui.TextSnapshot;
   if grouped and buffer.undo.len > 0 and
       buffer.undo[^1].owner == owner and buffer.undo[^1].after.same(before):
     buffer.undo[^1].after = after
+    buffer.undo[^1].firstChangedLine = min(
+      buffer.undo[^1].firstChangedLine, firstChangedLine)
     if owner != nil:
       buffer.undo[^1].afterSelection = afterSelection
   else:
     buffer.undo.add(BufferUndoEntry(before: before, after: after,
       owner: owner, beforeSelection: beforeSelection,
-      afterSelection: afterSelection, hasSelection: owner != nil))
+      afterSelection: afterSelection, hasSelection: owner != nil,
+      firstChangedLine: firstChangedLine))
   if buffer.undo.len > maxUndoSteps:
     buffer.undo = buffer.undo[(buffer.undo.len - maxUndoSteps) .. ^1]
   buffer.redo.setLen(0)
 
-proc recordEdit(buffer: Buffer; before: ui.TextSnapshot) =
+proc recordEdit(buffer: Buffer; before: ui.TextSnapshot;
+                firstChangedLine: int) =
   buffer.recordHistory(before, buffer.document.snapshot(), nil,
-    default(Selection), default(Selection))
+    default(Selection), default(Selection), firstChangedLine)
 
 proc recordTextAreaEdit(buffer: Buffer; owner: State; edit: ui.TextAreaEdit) =
   if buffer == nil or owner == nil or owner.buffer != buffer:
@@ -278,11 +338,14 @@ proc recordTextAreaEdit(buffer: Buffer; owner: State; edit: ui.TextAreaEdit) =
   let afterSelection = Selection(
     anchor: edit.after.byteOffset(edit.after.runeOffset(edit.afterAnchor)),
     head: edit.after.byteOffset(edit.after.runeOffset(edit.afterCaret)))
+  let firstChangedLine = edit.before.lineAt(edit.before.runeOffset(
+    min(edit.beforeAnchor, edit.beforeCaret)))
   withLock buffer.mu:
     if not buffer.document.snapshot().same(edit.after):
       return
+    buffer.recordSyntaxChange(firstChangedLine)
     buffer.recordHistory(edit.before, edit.after, owner, beforeSelection,
-      afterSelection, edit.grouped)
+      afterSelection, firstChangedLine, edit.grouped)
 
 proc setSelectionAfter(buffer: Buffer; owner: State; selection: Selection) =
   if buffer == nil or owner == nil or owner.buffer != buffer:
@@ -326,6 +389,7 @@ proc edit*(buffer: Buffer; edits: varargs[Edit]) =
       first, pastLast: int
       text: string
     var ranges: seq[EditRange]
+    var firstChangedLine = high(int)
     var previousEnd = 0
     for entry in ordered:
       let edit = entry.edit
@@ -342,7 +406,10 @@ proc edit*(buffer: Buffer; edits: varargs[Edit]) =
       if before.slice(edit.first, edit.pastLast) == edit.text:
         continue
       buffer.document.replace(edit.first, edit.pastLast, edit.text)
-    buffer.recordEdit(before)
+      let changedLine = before.lineAt(edit.first)
+      firstChangedLine = min(firstChangedLine, changedLine)
+      buffer.recordSyntaxChange(changedLine)
+    buffer.recordEdit(before, firstChangedLine)
 
 proc set*(buffer: Buffer; text: string) =
   ## Replaces the document as one undoable edit, preserving its line ending.
@@ -356,6 +423,7 @@ proc reset*(buffer: Buffer; text: string) =
     buffer.crlf = "\r\n" in text
     buffer.document.set(lf(text))
     buffer.saved = buffer.document.snapshot()
+    buffer.recordSyntaxChange(0)
     buffer.undo.setLen(0)
     buffer.redo.setLen(0)
     if buffer.transactionDepth > 0:
@@ -389,6 +457,7 @@ proc undo*(buffer: Buffer): bool =
     let entry = buffer.undo.pop()
     buffer.redo.add(entry)
     buffer.document.restore(entry.before)
+    buffer.recordSyntaxChange(entry.firstChangedLine)
     if entry.owner != nil and entry.owner.buffer == buffer and
         entry.hasSelection:
       entry.owner.caretSelection = entry.beforeSelection
@@ -403,6 +472,7 @@ proc redo*(buffer: Buffer): bool =
     let entry = buffer.redo.pop()
     buffer.undo.add(entry)
     buffer.document.restore(entry.after)
+    buffer.recordSyntaxChange(entry.firstChangedLine)
     if entry.owner != nil and entry.owner.buffer == buffer and
         entry.hasSelection:
       entry.owner.caretSelection = entry.afterSelection
@@ -415,6 +485,7 @@ proc transact*(buffer: Buffer; body: proc() {.closure.}) =
   withLock buffer.mu:
     if buffer.transactionDepth == 0:
       buffer.transactionBefore = buffer.document.snapshot()
+      buffer.transactionFirstChangedLine = high(int)
     inc buffer.transactionDepth
   try:
     if body != nil:
@@ -424,8 +495,10 @@ proc transact*(buffer: Buffer; body: proc() {.closure.}) =
       dec buffer.transactionDepth
       if buffer.transactionDepth == 0:
         let before = buffer.transactionBefore
+        let firstChangedLine = buffer.transactionFirstChangedLine
         buffer.transactionBefore = default(ui.TextSnapshot)
-        buffer.recordEdit(before)
+        buffer.transactionFirstChangedLine = high(int)
+        buffer.recordEdit(before, firstChangedLine)
 
 proc normalizeOffset(snapshot: Snapshot; byteOffset: int): int =
   snapshot.document.byteOffset(
