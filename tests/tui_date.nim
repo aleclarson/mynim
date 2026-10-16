@@ -116,6 +116,27 @@ doAssert inputSurface.frame()
 doAssert inputDate == dateTime(2025, mJan, 18, 14, 25, zone = testZone)
 doAssert inputChanges == 3
 
+# A pointer activation chooses the cursor day as well.
+tree = inputSurface.accessibility()[0]
+let dateButtonForPointer = accessNode(tree, platform.rolePopUpButton, "Date")
+doAssert inputSurface.send(platform.SurfaceEvent(kind: platform.accessAction,
+  id: dateButtonForPointer.id, action: platform.accessPress))
+doAssert inputSurface.frame()
+doAssert inputSurface.send(platform.SurfaceEvent(kind: platform.keyPressed,
+  key: platform.keyRight))
+doAssert inputSurface.frame()
+tree = inputSurface.accessibility()[0]
+let pointerDay = focusedNode(tree)
+let pointerX = pointerDay.bounds.x + pointerDay.bounds.w / 2
+let pointerY = pointerDay.bounds.y + pointerDay.bounds.h / 2
+doAssert inputSurface.send(platform.SurfaceEvent(kind: platform.pointerDown,
+  x: pointerX, y: pointerY))
+doAssert inputSurface.send(platform.SurfaceEvent(kind: platform.pointerUp,
+  x: pointerX, y: pointerY))
+doAssert inputSurface.frame()
+doAssert inputDate == dateTime(2025, mJan, 19, 14, 25, zone = testZone)
+doAssert inputChanges == 4
+
 # Escape dismisses the anchored calendar.
 tree = inputSurface.accessibility()[0]
 let dateButtonAgain = accessNode(tree, platform.rolePopUpButton, "Date")
