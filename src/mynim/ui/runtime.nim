@@ -27,6 +27,7 @@ type
     lastTextInput: platform.TextInputState
     inputComposition: platform.InputComposition
     pointerX, pointerY: float32
+    splitPointerOffset: float64
     hasPointer: bool
     hoverSlots, pressHoverSlots, pressedSlots, clickedSlots: seq[int]
     frameScene: scene.Scene
@@ -392,6 +393,16 @@ proc pruneFocusGroups(rt: Runtime; layout: LayoutResult) =
   for groupIdentity in stale:
     rt.focusGroupLast.del(groupIdentity)
 
+proc splitRootSlot(owner: ElementOwner; slot: int): int =
+  if owner == nil or slot <= 0 or slot >= owner.nodes.len:
+    return -1
+  var current = slot
+  while current > 0 and current < owner.nodes.len:
+    if owner.nodes[current].splitPane:
+      return current
+    current = int(owner.nodes[current].parent)
+  -1
+
 proc accessibilityTree(layout: LayoutResult;
                       focusSlot: int): platform.AccessTree =
   let owner = layout.owner
@@ -460,6 +471,13 @@ proc accessibilityTree(layout: LayoutResult;
     if node.slider:
       accessible.min = node.sliderLow
       accessible.max = node.sliderHigh
+      if node.splitHandle:
+        let ancestor = owner.splitRootSlot(slot)
+        if ancestor > 0 and ancestor < layout.rects.len:
+          let bounds = layout.rects[ancestor]
+          let total = if node.splitVertical: bounds.h else: bounds.w
+          accessible.max = max(float64(total) - 1 - node.sliderLow,
+            node.sliderLow)
       accessible.now = node.sliderValue
       accessible.step = node.sliderStep
       if not isDisabled:
@@ -1181,10 +1199,23 @@ proc textInputSlot(owner: ElementOwner; slot: int): int =
 proc updatePointerCursor(rt: Runtime) =
   var cursor = platform.cursorDefault
   if rt.hasPointer:
-    let target = rt.frameLayout.targetAt(rt.pointerX, rt.pointerY)
-    if target.owner != nil:
-      let node = rt.frameLayout.owner.nodes[int(target.slot)]
-      if node.tableResizeHandle:
+    var slot = -1
+    let owner = rt.frameLayout.owner
+    if owner != nil and rt.pressTarget.owner == owner and
+        int(rt.pressTarget.slot) > 0 and
+        int(rt.pressTarget.slot) < owner.nodes.len and
+        owner.nodes[int(rt.pressTarget.slot)].splitHandle:
+      slot = int(rt.pressTarget.slot)
+    else:
+      let target = rt.frameLayout.targetAt(rt.pointerX, rt.pointerY)
+      if target.owner != nil:
+        slot = int(target.slot)
+    if slot > 0 and slot < owner.nodes.len:
+      let node = owner.nodes[slot]
+      if node.splitHandle:
+        cursor = if node.splitVertical: platform.cursorResizeNS
+          else: platform.cursorResizeEW
+      elif node.tableResizeHandle:
         cursor = platform.cursorResizeEW
       elif node.textClient != nil or node.textAreaOwner != nil:
         cursor = platform.cursorText
@@ -1237,14 +1268,44 @@ proc queueSliderValue(rt: Runtime; slot: int; value: float64): bool =
   let identity = node.identity
   let current = owner.pendingSliderValues.getOrDefault(identity,
     node.sliderValue)
-  let snapped = value.snapSliderValue(node.sliderLow, node.sliderHigh,
-    node.sliderStep)
-  let next = min(max(snapped, node.sliderClampLow), node.sliderClampHigh)
+  var low = node.sliderLow
+  var high = node.sliderHigh
+  if node.splitHandle:
+    let ancestor = owner.splitRootSlot(slot)
+    if ancestor > 0 and ancestor < layout.rects.len:
+      let bounds = layout.rects[ancestor]
+      let total = if node.splitVertical: bounds.h else: bounds.w
+      high = max(float64(total) - 1 - low, low)
+  let next = if node.splitHandle:
+      min(max(value, low), high)
+    else:
+      let snapped = value.snapSliderValue(low, high, node.sliderStep)
+      min(max(snapped, node.sliderClampLow), node.sliderClampHigh)
   if next == current:
     return false
   owner.pendingSliderValues[identity] = next
   rt.requestFrame()
   true
+
+proc beginSplitPointer(rt: Runtime; slot: int) =
+  let layout = rt.frameLayout
+  let owner = layout.owner
+  if owner == nil or slot <= 0 or slot >= owner.nodes.len:
+    return
+  let rootSlot = owner.splitRootSlot(slot)
+  if rootSlot <= 0 or rootSlot >= layout.rects.len:
+    return
+  let node = owner.nodes[slot]
+  let bounds = layout.rects[rootSlot]
+  let raw = if node.splitVertical:
+      rt.pointerY - bounds.y - 0.5'f32
+    elif node.rightToLeft:
+      bounds.x + bounds.w - rt.pointerX - 0.5'f32
+    else:
+      rt.pointerX - bounds.x - 0.5'f32
+  let current = owner.pendingSliderValues.getOrDefault(node.identity,
+    node.sliderValue)
+  rt.splitPointerOffset = float64(raw) - current
 
 proc rangeSliderThumbSlot(owner: ElementOwner; rootSlot: int;
                           handle: int8): int =
@@ -1335,6 +1396,21 @@ proc queueSliderPointer(rt: Runtime; slot: int;
   let node = owner.nodes[slot]
   if node.rangeSlider or node.rangeSliderThumb:
     return rt.queueRangeSliderPointer(slot, activatePointer)
+  if node.splitHandle:
+    if activatePointer:
+      return false
+    let ancestor = owner.splitRootSlot(slot)
+    if ancestor <= 0 or ancestor >= layout.rects.len:
+      return false
+    let bounds = layout.rects[ancestor]
+    let position = if node.splitVertical:
+        rt.pointerY - bounds.y
+      elif node.rightToLeft:
+        bounds.x + bounds.w - rt.pointerX
+      else:
+        rt.pointerX - bounds.x
+    return rt.queueSliderValue(slot,
+      float64(position - 0.5'f32) - rt.splitPointerOffset)
   if node.stepper or (node.rating and not activatePointer):
     return false
   let bounds = layout.rects[slot]
@@ -1383,6 +1459,23 @@ proc sliderKey(rt: Runtime; key: platform.Key;
   let identity = node.identity
   let current = owner.pendingSliderValues.getOrDefault(identity,
     node.sliderValue)
+  if node.splitHandle:
+    var value = current
+    let step = node.sliderStep
+    if node.sliderVertical:
+      case key
+      of platform.keyUp: value -= step
+      of platform.keyDown: value += step
+      else: return false
+    else:
+      case key
+      of platform.keyLeft:
+        value += (if node.rightToLeft: step else: -step)
+      of platform.keyRight:
+        value += (if node.rightToLeft: -step else: step)
+      else: return false
+    discard rt.queueSliderValue(rt.focusSlot, value)
+    return true
   let range = node.sliderHigh - node.sliderLow
   let step = if node.sliderStep > 0: node.sliderStep else: range / 100
   let pageStep = max(step, range / 10)
@@ -1957,6 +2050,7 @@ proc event(rt: Runtime; ev: platform.SurfaceEvent): bool =
     rt.cancelKeyPress()
     rt.pointerX = float32(ev.x)
     rt.pointerY = float32(ev.y)
+    rt.splitPointerOffset = 0
     rt.hasPointer = true
     if rt.frameLayout.scrollbarPress(rt.pointerX, rt.pointerY,
         rt.scrollbarDrag):
@@ -1995,7 +2089,10 @@ proc event(rt: Runtime; ev: platform.SurfaceEvent): bool =
       let sliderSlot = rt.frameLayout.sliderAncestor(slot)
       if sliderSlot >= 0:
         slot = sliderSlot
-        discard rt.queueSliderPointer(sliderSlot, activatePointer = true)
+        if rt.frameLayout.owner.nodes[sliderSlot].splitHandle:
+          rt.beginSplitPointer(sliderSlot)
+        else:
+          discard rt.queueSliderPointer(sliderSlot, activatePointer = true)
       var targetNode = rt.frameLayout.owner.nodes[slot]
       if targetNode.listState != nil and targetNode.listRowIndex >= 0 and
           not targetNode.listRowHeader:
@@ -2100,6 +2197,7 @@ proc event(rt: Runtime; ev: platform.SurfaceEvent): bool =
       rt.clickedSlots.add(clickedSlot)
     rt.pressTarget = Element()
     rt.pressMods = 0
+    rt.splitPointerOffset = 0
     rt.pressHoverSlots.setLen(0)
     rt.refreshPointer()
     if result or rt.hoverSlots != previousHover or
@@ -2125,6 +2223,7 @@ proc event(rt: Runtime; ev: platform.SurfaceEvent): bool =
     rt.context.owner.rangeSliderDrags.clear()
     rt.pressTarget = Element()
     rt.pressMods = 0
+    rt.splitPointerOffset = 0
     rt.pressHoverSlots.setLen(0)
     rt.refreshPointer()
     rt.updateTextInput()

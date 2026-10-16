@@ -41,6 +41,7 @@ include mynim/ui/progress
 include mynim/ui/rating
 include mynim/ui/stepper
 include mynim/ui/number_input
+include mynim/ui/split
 include mynim/ui/spinner
 include mynim/ui/avatar
 include mynim/ui/badge

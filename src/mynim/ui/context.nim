@@ -220,7 +220,7 @@ type
     textMaxLines: int
     listRowAction: bool
     slider, sliderVertical, rating, stepper, numberInput, rangeSlider,
-      rangeSliderThumb: bool
+      rangeSliderThumb, splitPane, splitHandle, splitVertical: bool
     rangeSliderHandle: int8
     sliderLow, sliderHigh, sliderValue, sliderStep: float64
     sliderClampLow, sliderClampHigh: float64
