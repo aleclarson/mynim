@@ -2,6 +2,7 @@
 
 import std/[algorithm, math, monotimes, parseutils, sequtils, sets, strutils,
             tables, times, unicode]
+import std/uri as uri
 import mynim/internal/gamut
 import mynim/internal/scene as scene
 import mynim/internal/platform
@@ -26,6 +27,7 @@ elif (defined(linux) and (defined(amd64) or defined(arm64))) or
 include mynim/ui/color
 include mynim/ui/theme
 include mynim/ui/element
+include mynim/ui/router
 include mynim/ui/context
 include mynim/ui/list_state
 include mynim/ui/menu
