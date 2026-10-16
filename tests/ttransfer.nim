@@ -7,25 +7,26 @@ proc byteSeq(value: string): seq[byte] =
   for i, ch in value:
     result[i] = byte(ch)
 
-type ReadWork = object
-  data: ptr transfer.Data
-  result: ptr int
-  expectsError: bool
+when defined(gcAtomicArc):
+  type ReadWork = object
+    data: ptr transfer.Data
+    result: ptr int
+    expectsError: bool
 
-proc readWorker(work: ReadWork) {.thread, gcsafe.} =
-  {.cast(gcsafe).}:
-    for _ in 0..<64:
-      let (value, err) = work.data[].read(transfer.HTML)
-      if work.expectsError:
-        if err == nil:
-          work.result[] = 1
-        elif err.msg != "encode failed":
-          work.result[] = 2
-      elif err != nil:
-        work.result[] = 100
-      elif transfer.bytesToString(value) != "<b>plain</b>":
-        work.result[] = value.len * 100 +
-          (if value.len > 0: int(value[0]) else: 0)
+  proc readWorker(work: ReadWork) {.thread, gcsafe.} =
+    {.cast(gcsafe).}:
+      for _ in 0..<64:
+        let (value, err) = work.data[].read(transfer.HTML)
+        if work.expectsError:
+          if err == nil:
+            work.result[] = 1
+          elif err.msg != "encode failed":
+            work.result[] = 2
+        elif err != nil:
+          work.result[] = 100
+        elif transfer.bytesToString(value) != "<b>plain</b>":
+          work.result[] = value.len * 100 +
+            (if value.len > 0: int(value[0]) else: 0)
 
 block immutable_values_and_collections:
   var input = byteSeq("plain")
@@ -70,24 +71,24 @@ block negotiation_and_lazy_snapshot:
   doAssert second.read(transfer.HTML).err == nil and calls == 2
   doAssert transfer.preferredFormat(data.formats(), transfer.PNG).ok == false
 
-block concurrent_lazy_read:
-  var calls = 0
-  let data = transfer.newData(transfer.newItem(
-    transfer.lazy(transfer.HTML, proc(): tuple[data: seq[byte],
-        err: ref CatchableError] =
-      inc calls
-      (data: byteSeq("<b>plain</b>"), err: nil))))
-  var results: array[8, int]
-  var threads: array[8, Thread[ReadWork]]
-  for i, thread in threads.mpairs:
-    createThread(thread, readWorker,
-      ReadWork(data: unsafeAddr data, result: addr results[i]))
-  for thread in threads.mitems:
-    joinThread(thread)
-  doAssert calls == 1
-  doAssert results == default(array[8, int]), $results
+when defined(gcAtomicArc):
+  block concurrent_lazy_read:
+    var calls = 0
+    let data = transfer.newData(transfer.newItem(
+      transfer.lazy(transfer.HTML, proc(): tuple[data: seq[byte],
+          err: ref CatchableError] =
+        inc calls
+        (data: byteSeq("<b>plain</b>"), err: nil))))
+    var results: array[8, int]
+    var threads: array[8, Thread[ReadWork]]
+    for i, thread in threads.mpairs:
+      createThread(thread, readWorker,
+        ReadWork(data: unsafeAddr data, result: addr results[i]))
+    for thread in threads.mitems:
+      joinThread(thread)
+    doAssert calls == 1
+    doAssert results == default(array[8, int]), $results
 
-  when defined(gcAtomicArc):
     var failureCalls = 0
     let failedData = transfer.newData(transfer.newItem(
       transfer.lazy(transfer.HTML, proc(): tuple[data: seq[byte],
