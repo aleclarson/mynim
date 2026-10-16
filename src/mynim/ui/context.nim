@@ -252,6 +252,7 @@ type
     pendingDataDrops: Table[uint64, transfer.Drop]
     pendingValueDrops: Table[uint64, RootRef]
     pendingFileDrops: Table[uint64, seq[string]]
+    localStates: Table[uint64, Table[string, RootRef]]
     dataOverIdentity, fileOverIdentity: uint64
     dataOverOffer: transfer.Offer
     dataOverLocalIdentity, dragSourceIdentity, dragOverIdentity: uint64
@@ -264,6 +265,8 @@ type
     lastBounds: Table[uint64, Rect]
     trackedBounds: HashSet[uint64]
     focusIdentity: uint64
+    pointerX, pointerY: float32
+    hasPointer: bool
     focusActive: bool
     afterDeadline: MonoTime
     invalidate: proc() {.closure.}
@@ -394,7 +397,7 @@ type
     accessStepHandler: proc(delta: float64) {.closure.}
     textAlign: Align
     hovered, pressed, clicked, changed, submitted,
-      valueChangedInBuild: bool
+      valueChangedInBuild, trackPointer: bool
     label: string
     accessDescription: string
     accessValue: string
@@ -493,6 +496,10 @@ type
     generation: uint32
     rects: seq[Rect]
     animating: bool
+
+  LocalCell*[T] = ref object of RootObj
+    ## State retained for an element and caller-chosen key across builds.
+    value*: T
 
 const
   identityHovered = 1'u8 shl 0
@@ -627,6 +634,7 @@ proc newContext*(): Context =
   result.owner.pendingDataDrops = initTable[uint64, transfer.Drop]()
   result.owner.pendingValueDrops = initTable[uint64, RootRef]()
   result.owner.pendingFileDrops = initTable[uint64, seq[string]]()
+  result.owner.localStates = initTable[uint64, Table[string, RootRef]]()
   result.accordionHeaders = initTable[uint64, seq[uint64]]()
   result.theme = lightTheme()
 
@@ -975,7 +983,8 @@ proc announce*(c: Context; text: string) =
       not c.owner.accessibilityActive or text.len == 0:
     return
   c.owner.announcements.add(text)
-  if c.owner.invalidate != nil:
+  # The active frame will submit this announcement after the build completes.
+  if not c.owner.inBuild and c.owner.invalidate != nil:
     c.owner.invalidate()
 
 proc retire(owner: ElementOwner) =
@@ -1018,6 +1027,7 @@ proc retire(owner: ElementOwner) =
   owner.pendingDataDrops.clear()
   owner.pendingValueDrops.clear()
   owner.pendingFileDrops.clear()
+  owner.localStates.clear()
   owner.dataOverIdentity = 0
   owner.fileOverIdentity = 0
   owner.dataOverOffer = transfer.Offer()
@@ -1032,6 +1042,9 @@ proc retire(owner: ElementOwner) =
   owner.lastBounds.clear()
   owner.trackedBounds.clear()
   owner.focusIdentity = 0
+  owner.pointerX = 0
+  owner.pointerY = 0
+  owner.hasPointer = false
   owner.focusActive = false
   owner.afterDeadline = MonoTime()
   owner.invalidate = nil
@@ -1394,6 +1407,7 @@ proc build*(c: Context; view: proc(c: Context) {.closure.}) =
       initTable[uint64, Table[string, ScalarSequence]]()
     c.owner.findBarStates = initTable[uint64, FindBarState]()
     c.owner.pendingDataDrops = initTable[uint64, transfer.Drop]()
+    c.owner.localStates = initTable[uint64, Table[string, RootRef]]()
     c.owner.pendingFileDrops = initTable[uint64, seq[string]]()
     c.accordion = nil
     c.accordionHeaders.clear()
@@ -1566,6 +1580,12 @@ proc build*(c: Context; view: proc(c: Context) {.closure.}) =
         staleEditableTexts.add(identity)
     for identity in staleEditableTexts:
       c.owner.editableTextStates.del(identity)
+    var staleLocals: seq[uint64]
+    for identity in c.owner.localStates.keys:
+      if not c.owner.idSlots.hasKey(identity):
+        staleLocals.add(identity)
+    for identity in staleLocals:
+      c.owner.localStates.del(identity)
     built = true
   finally:
     c.owner.inBuild = false

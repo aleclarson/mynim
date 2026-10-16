@@ -1,7 +1,9 @@
 ## Layout, axes, and marks for native UI charts.
 
 import mynim/ui as ui
+import mynim/internal/platform as platform
 import ./scales
+import ./nearest as chartNearest
 
 type
   Side* {.pure.} = enum
@@ -144,3 +146,82 @@ proc anchor*(c: ui.Context; x, y: float32; horizontal, vertical: ui.Align;
     .size(0, 0).alignItems(vertical).children(proc() =
       discard c.column().width(0).alignItems(horizontal).children(build)
     )
+
+type
+  SelectState = object
+    last: int
+    pointerX: float32
+    hovering, announce, changed: bool
+
+proc select*(c: ui.Context; area: ui.Element; index: var int;
+             xs: openArray[float32];
+             describe: proc(index: int): string {.closure.} = nil): bool =
+  ## Selects the nearest ordered x coordinate under the pointer or by keyboard.
+  ## The area is one Tab stop. Left/Right, Home, End, and Escape work while it
+  ## or one of its descendants has focus.
+  discard area.focusable()
+  let state = area.local("chart.select", proc(): SelectState =
+    SelectState(last: -1))
+  if state == nil:
+    return false
+
+  let old = index
+  let count = xs.len
+  if index >= count:
+    index = -1
+  let indexPtr = addr index
+  template bindMove(key: platform.Key; direction: int) =
+    discard area.onShortcut(0, key, proc() =
+      if count > 0:
+        let next = if indexPtr[] < 0:
+            (if direction > 0: 0 else: count - 1)
+          else:
+            max(0, min(count - 1, indexPtr[] + direction))
+        if next != indexPtr[]:
+          indexPtr[] = next
+          state.value.announce = true
+          state.value.changed = true
+    )
+
+  if count > 0:
+    bindMove(platform.keyRight, 1)
+    bindMove(platform.keyLeft, -1)
+    discard area.onShortcut(0, platform.keyHome, proc() =
+      if indexPtr[] != 0:
+        indexPtr[] = 0
+        state.value.announce = true
+        state.value.changed = true
+    )
+    discard area.onShortcut(0, platform.keyEnd, proc() =
+      if indexPtr[] != count - 1:
+        indexPtr[] = count - 1
+        state.value.announce = true
+        state.value.changed = true
+    )
+    if index >= 0:
+      discard area.onShortcut(0, platform.keyEscape, proc() =
+        if indexPtr[] >= 0:
+          indexPtr[] = -1
+          state.value.changed = true
+      )
+
+  let pointer = area.pointerPosition()
+  let bounds = area.bounds()
+  if pointer.over:
+    if bounds.w > 0 and count > 0 and not state.value.announce and
+        (not state.value.hovering or pointer.x != state.value.pointerX):
+      index = chartNearest.nearest(xs, pointer.x / bounds.w)
+  elif state.value.hovering:
+    index = -1
+  state.value.hovering = pointer.over
+  state.value.pointerX = pointer.x
+
+  if index >= 0 and index < count and describe != nil:
+    let description = describe(index)
+    discard area.value(description)
+    if state.value.announce and index != state.value.last:
+      c.announce(description)
+  result = index != old or state.value.changed
+  state.value.last = index
+  state.value.announce = false
+  state.value.changed = false

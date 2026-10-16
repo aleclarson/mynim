@@ -2423,6 +2423,46 @@ proc bounds*(layout: LayoutResult; element: Element): Rect =
     raise newException(ValueError, "ui: element is not part of this layout")
   layout.rects[int(element.slot)]
 
+proc bounds*(e: Element): Rect =
+  ## Returns the element's most recently laid out bounds.
+  let n = e.node
+  if n == nil:
+    return
+  e.owner.trackedBounds.incl(n[].identity)
+  e.owner.lastBounds.getOrDefault(n[].identity)
+
+proc pointerPosition*(e: Element): tuple[x, y: float32, over: bool] =
+  ## Returns pointer coordinates relative to the element and whether it is
+  ## hovered.
+  let n = e.node
+  if n == nil:
+    return
+  n[].trackPointer = true
+  let rect = e.bounds()
+  if not e.owner.hasPointer:
+    return
+  result.x = e.owner.pointerX - rect.x
+  result.y = e.owner.pointerY - rect.y
+  result.over = n[].hovered
+
+proc local*[T](e: Element; key: string;
+               init: proc(): T {.closure.}): LocalCell[T] =
+  ## Returns state retained for this element and key across frame builds.
+  let n = e.node
+  if n == nil or init == nil:
+    return
+  let identity = n[].identity
+  if not e.owner.localStates.hasKey(identity):
+    e.owner.localStates[identity] = initTable[string, RootRef]()
+  var values = e.owner.localStates[identity]
+  let existing = values.getOrDefault(key)
+  if existing != nil and existing of LocalCell[T]:
+    return LocalCell[T](existing)
+  new(result)
+  result.value = init()
+  values[key] = RootRef(result)
+  e.owner.localStates[identity] = values
+
 proc bounds*(handle: Handle; c: Context): Rect =
   ## Returns the last committed window-space bounds for handle in c.
   if c == nil or c.owner == nil or c.owner.closed:
@@ -2861,6 +2901,13 @@ proc hovered*(e: Element): bool =
   ## During a press, only elements under the pointer when the press began stay hovered.
   let n = e.node
   n != nil and n.hovered
+
+proc value*(e: Element; value: string): Element =
+  ## Sets the element's accessible value.
+  result = e
+  let n = e.node
+  if n != nil:
+    n[].accessValue = value
 
 proc pressed*(e: Element): bool =
   ## Reports whether a primary press began over this element and remains over it.

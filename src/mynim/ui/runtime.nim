@@ -1578,6 +1578,10 @@ proc updatePointerCursor(rt: Runtime) =
     rt.hasPointerCursor = true
 
 proc refreshPointer(rt: Runtime) =
+  if rt.frameLayout.owner != nil and not rt.frameLayout.owner.closed:
+    rt.frameLayout.owner.pointerX = rt.pointerX
+    rt.frameLayout.owner.pointerY = rt.pointerY
+    rt.frameLayout.owner.hasPointer = rt.hasPointer
   rt.hoverSlots.setLen(0)
   rt.pressedSlots.setLen(0)
   let under = if rt.hasPointer:
@@ -2030,6 +2034,10 @@ proc renderFrame(rt: Runtime; presentFrame = true) =
   rt.clickedSlots.setLen(0)
   rt.doubleClickedSlots.setLen(0)
   rt.context.reduceMotion = rt.systemPreferences.reduceMotion
+  if rt.context.owner != nil and not rt.context.owner.closed:
+    rt.context.owner.pointerX = rt.pointerX
+    rt.context.owner.pointerY = rt.pointerY
+    rt.context.owner.hasPointer = rt.hasPointer
   rt.context.build(rt.view)
   let currentOwner = rt.context.owner
   rt.hoverSlots = remapSlots(previousIdentities, currentOwner, rt.hoverSlots)
@@ -2850,7 +2858,16 @@ proc event(rt: Runtime; ev: platform.SurfaceEvent): bool =
         let sliderSlot = rt.frameLayout.sliderAncestor(pressSlot)
         if sliderSlot >= 0:
           discard rt.queueSliderPointer(sliderSlot)
-    if rt.hoverSlots != previousHover or rt.pressedSlots != previousPressed:
+    var tracksPointer = false
+    let owner = rt.frameLayout.owner
+    if owner != nil:
+      for slot in rt.hoverSlots:
+        if slot > 0 and slot < owner.nodes.len and
+            owner.nodes[slot].trackPointer:
+          tracksPointer = true
+          break
+    if tracksPointer or rt.hoverSlots != previousHover or
+        rt.pressedSlots != previousPressed:
       rt.requestFrame()
     false
   of platform.pointerDown:
