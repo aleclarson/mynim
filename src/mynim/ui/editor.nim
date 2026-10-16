@@ -21,16 +21,6 @@ type
     document: ui.TextSnapshot
     crlf: bool
 
-  Buffer* = ref object ## Thread-safe document text, save state, and undo history.
-    mu: Lock
-    document: ui.TextBuffer
-    saved: ui.TextSnapshot
-    undo: seq[ui.TextSnapshot]
-    redo: seq[ui.TextSnapshot]
-    crlf: bool
-    transactionDepth: int
-    transactionBefore: ui.TextSnapshot
-
   State* = ref object ## App-owned state for one native code-editor view.
     buffer*: Buffer ## The document edited by the view.
     readOnly*: bool ## Keeps text selectable while preventing edits.
@@ -39,6 +29,21 @@ type
     fontSize*: float32 ## Text size in DIPs; defaults to 13.
     caretSelection: Selection
     selectionPending: bool
+
+  BufferUndoEntry = object
+    before, after: ui.TextSnapshot
+    owner: State
+    beforeSelection, afterSelection: Selection
+    hasSelection: bool
+
+  Buffer* = ref object ## Thread-safe document text, save state, and undo history.
+    mu: Lock
+    document: ui.TextBuffer
+    saved: ui.TextSnapshot
+    undo, redo: seq[BufferUndoEntry]
+    crlf: bool
+    transactionDepth: int
+    transactionBefore: ui.TextSnapshot
 
 const
   maxUndoSteps = 10_000
@@ -153,16 +158,66 @@ proc same*(a, b: Snapshot): bool =
   ## excluded.
   a.document.same(b.document)
 
-proc recordEdit(buffer: Buffer; before: ui.TextSnapshot) =
-  let after = buffer.document.snapshot()
+proc recordHistory(buffer: Buffer; before, after: ui.TextSnapshot;
+                   owner: State;
+                   beforeSelection, afterSelection: Selection;
+                   grouped = false) =
   if before.same(after):
     return
   if buffer.transactionDepth > 0:
     return
-  buffer.undo.add(before)
+  if grouped and buffer.undo.len > 0 and
+      buffer.undo[^1].owner == owner and buffer.undo[^1].after.same(before):
+    buffer.undo[^1].after = after
+    if owner != nil:
+      buffer.undo[^1].afterSelection = afterSelection
+  else:
+    buffer.undo.add(BufferUndoEntry(before: before, after: after,
+      owner: owner, beforeSelection: beforeSelection,
+      afterSelection: afterSelection, hasSelection: owner != nil))
   if buffer.undo.len > maxUndoSteps:
     buffer.undo = buffer.undo[(buffer.undo.len - maxUndoSteps) .. ^1]
   buffer.redo.setLen(0)
+
+proc recordEdit(buffer: Buffer; before: ui.TextSnapshot) =
+  buffer.recordHistory(before, buffer.document.snapshot(), nil,
+    default(Selection), default(Selection))
+
+proc recordTextAreaEdit(buffer: Buffer; owner: State; edit: ui.TextAreaEdit) =
+  if buffer == nil or owner == nil or owner.buffer != buffer:
+    return
+  let beforeSelection = Selection(
+    anchor: edit.before.byteOffset(edit.before.runeOffset(edit.beforeAnchor)),
+    head: edit.before.byteOffset(edit.before.runeOffset(edit.beforeCaret)))
+  let afterSelection = Selection(
+    anchor: edit.after.byteOffset(edit.after.runeOffset(edit.afterAnchor)),
+    head: edit.after.byteOffset(edit.after.runeOffset(edit.afterCaret)))
+  withLock buffer.mu:
+    if not buffer.document.snapshot().same(edit.after):
+      return
+    buffer.recordHistory(edit.before, edit.after, owner, beforeSelection,
+      afterSelection, edit.grouped)
+
+proc setSelectionAfter(buffer: Buffer; owner: State; selection: Selection) =
+  if buffer == nil or owner == nil or owner.buffer != buffer:
+    return
+  withLock buffer.mu:
+    if buffer.undo.len > 0 and buffer.undo[^1].owner == owner and
+        buffer.undo[^1].after.same(buffer.document.snapshot()):
+      buffer.undo[^1].afterSelection = selection
+
+proc setEditOwner(buffer: Buffer; owner: State; before, after: Snapshot;
+                  beforeSelection, afterSelection: Selection) =
+  if buffer == nil or owner == nil or owner.buffer != buffer or
+      before.same(after):
+    return
+  withLock buffer.mu:
+    if buffer.undo.len > 0 and buffer.undo[^1].after.same(after.document) and
+        buffer.undo[^1].before.same(before.document):
+      buffer.undo[^1].owner = owner
+      buffer.undo[^1].beforeSelection = beforeSelection
+      buffer.undo[^1].afterSelection = afterSelection
+      buffer.undo[^1].hasSelection = true
 
 proc edit*(buffer: Buffer; edits: varargs[Edit]) =
   ## Applies byte-range edits from one source version as one undo step.
@@ -245,10 +300,13 @@ proc undo*(buffer: Buffer): bool =
   withLock buffer.mu:
     if buffer.transactionDepth > 0 or buffer.undo.len == 0:
       return false
-    let current = buffer.document.snapshot()
-    let previous = buffer.undo.pop()
-    buffer.redo.add(current)
-    buffer.document.restore(previous)
+    let entry = buffer.undo.pop()
+    buffer.redo.add(entry)
+    buffer.document.restore(entry.before)
+    if entry.owner != nil and entry.owner.buffer == buffer and
+        entry.hasSelection:
+      entry.owner.caretSelection = entry.beforeSelection
+      entry.owner.selectionPending = true
     result = true
 
 proc redo*(buffer: Buffer): bool =
@@ -256,10 +314,13 @@ proc redo*(buffer: Buffer): bool =
   withLock buffer.mu:
     if buffer.transactionDepth > 0 or buffer.redo.len == 0:
       return false
-    let current = buffer.document.snapshot()
-    let next = buffer.redo.pop()
-    buffer.undo.add(current)
-    buffer.document.restore(next)
+    let entry = buffer.redo.pop()
+    buffer.undo.add(entry)
+    buffer.document.restore(entry.after)
+    if entry.owner != nil and entry.owner.buffer == buffer and
+        entry.hasSelection:
+      entry.owner.caretSelection = entry.afterSelection
+      entry.owner.selectionPending = true
     result = true
 
 proc transact*(buffer: Buffer; body: proc() {.closure.}) =
@@ -333,6 +394,7 @@ proc select*(state: State; start, pastLast: int) =
     anchor: snapshot.normalizeOffset(start),
     head: snapshot.normalizeOffset(pastLast))
   state.selectionPending = true
+  state.buffer.setSelectionAfter(state, state.caretSelection)
 
 proc goTo*(state: State; position: Pos) =
   ## Places the caret at a clamped line and UTF-8 byte column.
@@ -340,10 +402,12 @@ proc goTo*(state: State; position: Pos) =
   let offset = state.buffer.snapshot().offset(position)
   state.caretSelection = Selection(anchor: offset, head: offset)
   state.selectionPending = true
+  state.buffer.setSelectionAfter(state, state.caretSelection)
 
 proc insert*(state: State; text: string) =
   ## Replaces the primary selection with text and moves the caret after it.
   state.ensureState()
+  let beforeSnapshot = state.buffer.snapshot()
   let selection = state.caretSelection
   let start = selection.start()
   let inserted = lf(text)
@@ -353,6 +417,30 @@ proc insert*(state: State; text: string) =
   let caret = snapshot.normalizeOffset(start + inserted.len)
   state.caretSelection = Selection(anchor: caret, head: caret)
   state.selectionPending = true
+  state.buffer.setEditOwner(state, beforeSnapshot, snapshot, selection,
+    state.caretSelection)
+
+proc undo*(state: State): bool =
+  ## Undoes the buffer's latest editor or application edit.
+  state.ensureState()
+  result = state.buffer.undo()
+  if result:
+    let snapshot = state.buffer.snapshot()
+    state.caretSelection = Selection(
+      anchor: snapshot.normalizeOffset(state.caretSelection.anchor),
+      head: snapshot.normalizeOffset(state.caretSelection.head))
+    state.selectionPending = true
+
+proc redo*(state: State): bool =
+  ## Redoes the buffer's latest undone editor or application edit.
+  state.ensureState()
+  result = state.buffer.redo()
+  if result:
+    let snapshot = state.buffer.snapshot()
+    state.caretSelection = Selection(
+      anchor: snapshot.normalizeOffset(state.caretSelection.anchor),
+      head: snapshot.normalizeOffset(state.caretSelection.head))
+    state.selectionPending = true
 
 proc view*(c: ui.Context; state: State): ui.Element =
   ## Builds a native, editable code-editor surface over `state.buffer`.
@@ -368,6 +456,28 @@ proc view*(c: ui.Context; state: State): ui.Element =
   discard result.textFamily(family).textSize(size)
     .readOnly(state.readOnly)
     .label(if state.label.len == 0: "Code editor" else: state.label)
+  let buffer = state.buffer
+  let recordAreaEdit = proc(edit: ui.TextAreaEdit) =
+    buffer.recordTextAreaEdit(state, edit)
+  let undoArea = proc(): ui.TextAreaHistoryResult =
+    result.changed = buffer.undo()
+    if result.changed:
+      let current = buffer.snapshot()
+      result.anchor = current.document.utf16Offset(
+        current.document.runeOffsetAtByte(state.caretSelection.anchor))
+      result.caret = current.document.utf16Offset(
+        current.document.runeOffsetAtByte(state.caretSelection.head))
+      state.selectionPending = false
+  let redoArea = proc(): ui.TextAreaHistoryResult =
+    result.changed = buffer.redo()
+    if result.changed:
+      let current = buffer.snapshot()
+      result.anchor = current.document.utf16Offset(
+        current.document.runeOffsetAtByte(state.caretSelection.anchor))
+      result.caret = current.document.utf16Offset(
+        current.document.runeOffsetAtByte(state.caretSelection.head))
+      state.selectionPending = false
+  discard result.textAreaHistory(recordAreaEdit, undoArea, redoArea)
   if state.selectionPending:
     let anchor = snapshot.document.runeOffsetAtByte(
       state.caretSelection.anchor)
@@ -379,6 +489,7 @@ proc view*(c: ui.Context; state: State): ui.Element =
   state.caretSelection = Selection(
     anchor: current.document.byteOffset(native.anchor),
     head: current.document.byteOffset(native.caret))
+  state.buffer.setSelectionAfter(state, state.caretSelection)
 
 type TextWriter* = ui.TextWriter
 

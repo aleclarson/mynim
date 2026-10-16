@@ -48,25 +48,37 @@ doAssert native.frame()
 doAssert native.send(platform.SurfaceEvent(kind: platform.textInput,
   text: "Z"))
 doAssert $editorState.buffer == "aZb"
+doAssert editorState.buffer.modified()
 doAssert native.frame()
 doAssert editorState.selection() == editor.Selection(anchor: 2, head: 2)
+doAssert editorState.buffer.canUndo() and not editorState.buffer.canRedo()
+doAssert native.send(platform.SurfaceEvent(kind: platform.textInput,
+  text: "!"))
+doAssert $editorState.buffer == "aZ!b"
+doAssert native.frame()
 
 doAssert native.send(platform.SurfaceEvent(kind: platform.keyPressed,
   key: platform.keyZ, mods: platform.modSuper))
 doAssert native.frame()
 doAssert $editorState.buffer == "a😀b"
+doAssert not editorState.buffer.modified()
+doAssert editorState.selection() == editor.Selection(anchor: 1, head: 5)
+doAssert not editorState.buffer.canUndo() and editorState.buffer.canRedo()
 doAssert native.send(platform.SurfaceEvent(kind: platform.keyPressed,
   key: platform.keyZ, mods: platform.modSuper or platform.modShift))
 doAssert native.frame()
-doAssert $editorState.buffer == "aZb"
+doAssert $editorState.buffer == "aZ!b"
+doAssert editorState.buffer.modified()
+doAssert editorState.selection() == editor.Selection(anchor: 3, head: 3)
 
-editorState.select(1, 2)
+editorState.select(1, 3)
 editorState.insert("Q")
 doAssert $editorState.buffer == "aQb"
 doAssert editorState.selection() == editor.Selection(anchor: 2, head: 2)
-doAssert editorState.buffer.undo()
-doAssert $editorState.buffer == "aZb"
-doAssert editorState.buffer.redo()
+doAssert editorState.undo()
+doAssert $editorState.buffer == "aZ!b"
+doAssert editorState.selection() == editor.Selection(anchor: 1, head: 3)
+doAssert editorState.redo()
 doAssert $editorState.buffer == "aQb"
 
 editorState.readOnly = true

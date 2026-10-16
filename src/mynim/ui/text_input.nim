@@ -18,10 +18,22 @@ type
     client: TextFieldClient
     sequence: uint64
 
+  TextAreaEdit* = object ## A committed multiline edit and its selection state.
+    before*, after*: TextSnapshot ## Immutable document versions around the edit.
+    beforeAnchor*, beforeCaret*: int ## UTF-16 endpoints before the edit.
+    afterAnchor*, afterCaret*: int ## UTF-16 endpoints after the edit.
+    grouped*: bool ## Whether this continues the preceding undo step.
+
+  TextAreaHistoryResult* = object ## Result of a delegated multiline undo/redo.
+    changed*: bool ## Whether the operation changed the document.
+    anchor*, caret*: int ## UTF-16 selection endpoints after the operation.
+
   TextFieldClient = ref object of platform.TextInputClient
     text, lastBoundValue, placeholder: string
     onPaste: proc(text: string): bool {.closure.}
     onTextKey: proc(key: TextKey): bool {.closure.}
+    onAreaEdit: proc(edit: TextAreaEdit) {.closure.}
+    onAreaUndo, onAreaRedo: proc(): TextAreaHistoryResult {.closure.}
     textKeySequence: uint64
     textKeyActive, textKeyPending, textKeySet: bool
     textKeyPendingValue: string
@@ -217,6 +229,10 @@ proc recordAreaEdit(client: TextFieldClient; before, after: TextSnapshot;
     client.areaUndo[^1] = entry
     client.areaRedo.setLen(0)
     client.areaUndoGroupOpen = false
+    if client.onAreaEdit != nil:
+      client.onAreaEdit(TextAreaEdit(before: before, after: after,
+        beforeAnchor: beforeAnchor, beforeCaret: beforeCaret,
+        afterAnchor: client.anchor, afterCaret: client.caret, grouped: true))
     return
   let groupable = inserted.len > 0 and client.anchor == client.caret
   let join = groupable and client.areaUndoGroupOpen and
@@ -238,8 +254,13 @@ proc recordAreaEdit(client: TextFieldClient; before, after: TextSnapshot;
     client.areaUndo.delete(0)
   client.areaRedo.setLen(0)
   client.areaUndoGroupOpen = groupable
+  if client.onAreaEdit != nil:
+    client.onAreaEdit(TextAreaEdit(before: before, after: after,
+      beforeAnchor: beforeAnchor, beforeCaret: beforeCaret,
+      afterAnchor: client.anchor, afterCaret: client.caret, grouped: join))
 
 proc revealAreaCaret(client: TextFieldClient)
+proc syncTextAreaBuffer(client: TextFieldClient): bool
 
 proc clearAreaComposition(client: TextFieldClient; restoreBase: bool;
                           keepTransaction = false) =
@@ -289,6 +310,21 @@ proc restoreAreaHistory(client: TextFieldClient; snapshot: TextSnapshot;
   client.revealAreaCaret()
 
 proc undoTextArea(client: TextFieldClient): bool =
+  if client.onAreaUndo != nil:
+    client.clearAreaComposition(restoreBase = false)
+    let history = client.onAreaUndo()
+    if not history.changed:
+      return false
+    client.areaUndo.setLen(0)
+    client.areaRedo.setLen(0)
+    client.areaUndoGroupOpen = false
+    discard client.syncTextAreaBuffer()
+    let limit = client.bufferSnapshot.utf16Len()
+    client.anchor = max(0, min(history.anchor, limit))
+    client.caret = max(0, min(history.caret, limit))
+    client.areaHasDesiredX = false
+    client.revealAreaCaret()
+    return true
   if client.areaUndo.len == 0:
     return false
   let entry = client.areaUndo[^1]
@@ -299,6 +335,21 @@ proc undoTextArea(client: TextFieldClient): bool =
   result = true
 
 proc redoTextArea(client: TextFieldClient): bool =
+  if client.onAreaRedo != nil:
+    client.clearAreaComposition(restoreBase = false)
+    let history = client.onAreaRedo()
+    if not history.changed:
+      return false
+    client.areaUndo.setLen(0)
+    client.areaRedo.setLen(0)
+    client.areaUndoGroupOpen = false
+    discard client.syncTextAreaBuffer()
+    let limit = client.bufferSnapshot.utf16Len()
+    client.anchor = max(0, min(history.anchor, limit))
+    client.caret = max(0, min(history.caret, limit))
+    client.areaHasDesiredX = false
+    client.revealAreaCaret()
+    return true
   if client.areaRedo.len == 0:
     return false
   let entry = client.areaRedo[^1]
@@ -1124,6 +1175,9 @@ proc textInputBase*(c: Context; value: var string): Element =
   let client = result.acquireTextField(value)
   client.onPaste = nil
   client.onTextKey = nil
+  client.onAreaEdit = nil
+  client.onAreaUndo = nil
+  client.onAreaRedo = nil
   client.leaveTextAreaMode()
   client.password = false
 
@@ -1169,6 +1223,9 @@ proc textInputBufferBase*(c: Context; buffer: TextBuffer): Element =
   let client = result.acquireTextField("")
   client.onPaste = nil
   client.onTextKey = nil
+  client.onAreaEdit = nil
+  client.onAreaUndo = nil
+  client.onAreaRedo = nil
   client.leaveTextAreaMode()
   client.password = false
   if client.boundBuffer != buffer:
@@ -1213,6 +1270,9 @@ proc textAreaCore(c: Context; buffer: TextBuffer;
   let client = result.acquireTextField("")
   client.onPaste = nil
   client.onTextKey = nil
+  client.onAreaEdit = nil
+  client.onAreaUndo = nil
+  client.onAreaRedo = nil
   var buffer = buffer
   if boundValue == nil:
     buffer.requireTextBuffer()
@@ -1412,6 +1472,19 @@ proc onTextKey*(e: Element;
   let client = e.fieldClient()
   if client != nil:
     client.onTextKey = action
+
+proc textAreaHistory*(e: Element;
+    onEdit: proc(edit: TextAreaEdit) {.closure.};
+    undo, redo: proc(): TextAreaHistoryResult {.closure.}): Element =
+  ## Lets an app-owned document supply edit history for this text area.
+  ## Edit callbacks receive committed snapshots and UTF-16 selection offsets;
+  ## undo and redo return the selection to show after restoring their snapshot.
+  result = e
+  let client = e.fieldClient()
+  if client != nil and client.multiline:
+    client.onAreaEdit = onEdit
+    client.onAreaUndo = undo
+    client.onAreaRedo = redo
 
 proc textSelection*(e: Element): tuple[start, `end`: int] =
   ## Returns the selected rune range, or the caret when both indices match.
