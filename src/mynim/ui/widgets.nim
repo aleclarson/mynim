@@ -335,6 +335,37 @@ proc link*(c: Context; label, url: string): Element =
     node[].accessRole = platform.roleLink
     node[].accessRoleSet = true
 
+proc icon*(c: Context; vector: Svg): Element =
+  ## Adds a decorative SVG icon sized to the text font and tinted with text
+  ## color. Add a label when the icon conveys information by itself.
+  result = c.newElement(false, identityKindIcon)
+  let node = result.node
+  if node != nil:
+    node[].icon = true
+    node[].vector = vector
+    node[].vectorColor = if c.themeEnabled: c.theme.text else: rgb(0, 0, 0)
+    node[].fit = Fit.Contain
+    node[].textStyle.size = if c.themeEnabled: c.theme.fontSize else: 16'f32
+    if c.themeEnabled:
+      node[].textStyle.family = c.theme.font
+    let parent = int(c.owner.parent)
+    var ancestor = parent
+    var inheritedColor, inheritedSize = false
+    while ancestor > 0 and ancestor < c.owner.nodes.len:
+      let inherited = c.owner.nodes[ancestor]
+      if not inheritedColor and inherited.textColorSet:
+        node[].vectorColor = inherited.textColor
+        node[].textColor = inherited.textColor
+        node[].textColorSet = true
+        inheritedColor = true
+      if not inheritedSize and inherited.textStyle.size > 0:
+        node[].textStyle.size = inherited.textStyle.size
+        inheritedSize = true
+      ancestor = int(inherited.parent)
+    if parent > 0 and parent < c.owner.nodes.len and
+        not c.owner.nodes[parent].row:
+      node[].selfAlign = Align.Start
+
 proc spacer*(c: Context): Element =
   ## Fills free space in its row or column, pushing siblings apart.
   c.box().grow()

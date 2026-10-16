@@ -299,7 +299,7 @@ type
     overlayGap: float32
     # Overlay text is painted but excluded from the node's natural size.
     hasText, textNoWrap, textColorSet, textOverlay, listRowSelected,
-      listRowFocusVisible, listRowHeader, listRowPinnedHeader: bool
+      listRowFocusVisible, listRowHeader, listRowPinnedHeader, icon: bool
     textMaxLines: int
     listRowAction: bool
     slider, sliderVertical, rating, stepper, numberInput, comboBoxRoot,
@@ -416,6 +416,7 @@ const
   identityKindText = 6'u8
   identityKindGrid = 7'u8
   identityKindTextInput = 8'u8
+  identityKindIcon = 9'u8
   logPadStart = 1'u8 shl 0
   logPadEnd = 1'u8 shl 1
   logMarginStart = 1'u8 shl 2

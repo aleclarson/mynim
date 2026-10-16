@@ -558,8 +558,21 @@ proc measureTree(nodes: seq[ElementNode]; natural: var seq[NaturalSize];
       contentW = max(contentW, source.w)
       contentH = max(contentH, source.h)
     if node.vector != nil:
-      contentW = max(contentW, node.vector.width)
-      contentH = max(contentH, node.vector.height)
+      if node.icon:
+        let em = if node.textStyle.size > 0: node.textStyle.size else: 16'f32
+        let aspect = if node.vector.height > 0:
+            node.vector.width / node.vector.height
+          else:
+            1'f32
+        contentW = max(contentW, em * aspect)
+        contentH = max(contentH, em)
+      else:
+        contentW = max(contentW, node.vector.width)
+        contentH = max(contentH, node.vector.height)
+    elif node.icon:
+      let em = if node.textStyle.size > 0: node.textStyle.size else: 16'f32
+      contentW = max(contentW, em)
+      contentH = max(contentH, em)
     var childCount = 0
     var child = int(node.firstChild)
     while child >= 0:
@@ -3155,21 +3168,25 @@ proc textSize*(e: Element; value: float32): Element =
   ## Sets the text font size in DIPs; zero selects the system default.
   result = e
   let n = e.node
-  if n != nil and (n.hasText or n.textClient != nil):
+  if n != nil:
     n.textStyle.size = if classify(value) notin {fcNan, fcInf, fcNegInf}:
         max(value, 0'f32)
       else:
         0'f32
-    e.propagateTextAreaStyle()
+    if n.hasText or n.textClient != nil:
+      e.propagateTextAreaStyle()
 
 proc textColor*(e: Element; value: Color): Element =
   ## Sets the text color.
   result = e
   let n = e.node
-  if n != nil and (n.hasText or n.textClient != nil):
+  if n != nil:
     n.textColor = value
     n.textColorSet = true
-    e.propagateTextAreaStyle()
+    if n.icon:
+      n.vectorColor = value
+    if n.hasText or n.textClient != nil:
+      e.propagateTextAreaStyle()
 
 proc textFamily*(e: Element; value: string): Element =
   ## Selects a font family for the text.
