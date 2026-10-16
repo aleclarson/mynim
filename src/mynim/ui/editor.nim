@@ -1,6 +1,7 @@
 ## Persistent text buffers and byte-based positions for native code editors.
 
 import std/[algorithm, locks, strutils]
+import mynim/internal/platform as platform
 import mynim/ui as ui
 import mynim/ui/editor/syntax as syntax
 
@@ -672,6 +673,116 @@ proc redo*(state: State): bool =
       head: snapshot.normalizeOffset(state.caretSelection.head))
     state.selectionPending = true
 
+proc leadingIndent(text: string): string =
+  var pastLast = 0
+  while pastLast < text.len and text[pastLast] in {' ', '\t'}:
+    inc pastLast
+  text[0 ..< pastLast]
+
+proc trailingSpaceStart(text: string): int =
+  result = text.len
+  while result > 0 and text[result - 1] in {' ', '\t'}:
+    dec result
+
+proc leadingSpaceEnd(text: string): int =
+  while result < text.len and text[result] in {' ', '\t'}:
+    inc result
+
+proc startsAfterIndent(text, prefix: string): bool =
+  let start = text.leadingSpaceEnd()
+  prefix.len > 0 and start + prefix.len <= text.len and
+    text[start ..< start + prefix.len] == prefix
+
+proc tokenKindAt(state: State; snapshot: Snapshot;
+                 language: syntax.Language; line, column: int):
+    syntax.TokenKind =
+  if language == nil or language.tokenizer == nil:
+    return syntax.tokenText
+  for token in state.cachedTokens(snapshot, language, line):
+    if column < token.pastLast:
+      return token.kind
+  syntax.tokenText
+
+proc indentationUnit(language: syntax.Language): string =
+  if language != nil and language.hardTabs:
+    return "\t"
+  let width = if language == nil or language.tabSize <= 0: 4
+    else: language.tabSize
+  repeat(' ', width)
+
+proc insertNewline(state: State) =
+  ## Inserts a newline with the current indentation and basic syntax hints.
+  state.ensureState()
+  if state.readOnly:
+    return
+  let snapshot = state.buffer.snapshot()
+  let selection = state.caretSelection
+  let start = selection.start()
+  let pastLast = selection.pastLast()
+  let startPos = snapshot.pos(start)
+  let line = snapshot.line(startPos.line)
+  let column = max(0, min(startPos.column, line.len))
+  let before = line[0 ..< column]
+  let endPos = snapshot.pos(pastLast)
+  let after = if endPos.line == startPos.line:
+      line[max(column, min(endPos.column, line.len)) .. ^1]
+    else:
+      ""
+  var indent = leadingIndent(line)
+  if indent.len > before.len:
+    indent = before
+  let trimmedEnd = before.trailingSpaceStart()
+  var nextIndent = indent
+  var opensBlock = false
+  let language = state.buffer.language
+  if language != nil and trimmedEnd > 0:
+    for pair in language.brackets:
+      if pair.open.len == 0 or trimmedEnd < pair.open.len or
+          before[trimmedEnd - pair.open.len ..< trimmedEnd] != pair.open:
+        continue
+      let openColumn = trimmedEnd - pair.open.len
+      if state.tokenKindAt(snapshot, language, startPos.line, openColumn) notin
+          {syntax.tokenString, syntax.tokenComment}:
+        opensBlock = true
+        break
+    if not opensBlock and language.name == "Python" and
+        before[trimmedEnd - 1] == ':' and
+        state.tokenKindAt(snapshot, language, startPos.line,
+          trimmedEnd - 1) notin {syntax.tokenString, syntax.tokenComment}:
+      opensBlock = true
+  if opensBlock:
+    nextIndent.add(language.indentationUnit())
+  if language != nil and language.lineComment.len > 0:
+    if before.startsAfterIndent(language.lineComment):
+      nextIndent = indent & language.lineComment & " "
+
+  var insertion = "\n" & nextIndent
+  var caretInInsertion = insertion.len
+  if selection.empty() and opensBlock:
+    let afterStart = after.leadingSpaceEnd()
+    for pair in language.brackets:
+      if pair.open.len == 0 or pair.close.len == 0 or
+          trimmedEnd < pair.open.len or afterStart + pair.close.len > after.len or
+          before[trimmedEnd - pair.open.len ..< trimmedEnd] != pair.open or
+          after[afterStart ..< afterStart + pair.close.len] != pair.close:
+        continue
+      let openColumn = trimmedEnd - pair.open.len
+      let closeColumn = column + afterStart
+      if state.tokenKindAt(snapshot, language, startPos.line, openColumn) in
+          {syntax.tokenString, syntax.tokenComment} or
+          state.tokenKindAt(snapshot, language, startPos.line, closeColumn) in
+          {syntax.tokenString, syntax.tokenComment}:
+        continue
+      insertion.add("\n" & indent)
+      caretInInsertion = 1 + nextIndent.len
+      break
+
+  state.insert(insertion)
+  let caret = state.buffer.snapshot().normalizeOffset(start + caretInInsertion)
+  state.caretSelection = Selection(anchor: caret, head: caret)
+  state.selectionPending = true
+  state.buffer.setSelectionAfter(state, state.caretSelection)
+
 proc view*(c: ui.Context; state: State): ui.Element =
   ## Builds a native, editable code-editor surface over `state.buffer`.
   ## The caller chooses its size with `fill`, `grow`, or an explicit size.
@@ -718,6 +829,14 @@ proc view*(c: ui.Context; state: State): ui.Element =
         current.document.runeOffsetAtByte(state.caretSelection.head))
       state.selectionPending = false
   discard result.textAreaHistory(recordAreaEdit, undoArea, redoArea)
+  discard result.onTextKey(proc(key: ui.TextKey): bool =
+    if key.key != platform.keyEnter or
+        (key.mods and not platform.modShift) != 0:
+      return false
+    if not state.readOnly:
+      state.insertNewline()
+    true
+  )
   if state.selectionPending:
     let anchor = snapshot.document.runeOffsetAtByte(
       state.caretSelection.anchor)

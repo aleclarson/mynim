@@ -90,5 +90,35 @@ doAssert native.send(platform.SurfaceEvent(kind: platform.textInput,
 doAssert native.frame()
 doAssert $editorState.buffer == "aQb"
 
+proc enter(text: string; language: editor.Language; caret: int;
+           mods: platform.Modifiers = 0): string =
+  editorState.readOnly = false
+  editorState.buffer.set(text)
+  editorState.buffer.setLanguage(language)
+  editorState.select(caret, caret)
+  discard native.send(platform.SurfaceEvent(kind: platform.surfaceResize))
+  doAssert native.frame()
+  doAssert native.send(platform.SurfaceEvent(kind: platform.keyPressed,
+    key: platform.keyEnter, mods: mods))
+  doAssert native.frame()
+  $editorState.buffer
+
+let go = editor.languageNamed("go")
+let emptyPair = "func main() {}"
+doAssert enter(emptyPair, go, emptyPair.len - 1) == "func main() {\n\t\n}"
+doAssert editorState.cursorPos() == editor.Pos(line: 1, column: 1)
+doAssert editorState.undo()
+doAssert $editorState.buffer == emptyPair,
+  "the automatic newline and indentation should be one undo step"
+
+let indented = "  value"
+doAssert enter(indented, go, indented.len) == "  value\n  "
+let comment = "\t// note"
+doAssert enter(comment, go, comment.len) == "\t// note\n\t// "
+let python = "def f():"
+doAssert enter(python, editor.languageNamed("python"), python.len) ==
+  "def f():\n    "
+doAssert enter("", nil, 0, platform.modShift) == "\n"
+
 win.destroy()
 loop.shutdown()
