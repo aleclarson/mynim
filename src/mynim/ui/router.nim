@@ -135,8 +135,9 @@ proc resolve(router: Router; target: string):
       directory.setLen(slash + 1)
     resolvedPath = directory & resolvedPath
 
-  result.path = cleanPath(resolvedPath)
-  result.location = escapeUriPart(result.path, query = false)
+  let escapedPath = cleanPath(resolvedPath)
+  result.path = uri.decodeUrl(escapedPath, decodePlus = false)
+  result.location = escapeUriPart(escapedPath, query = false)
   if query.len > 0:
     result.location.add('?')
     result.location.add(escapeUriPart(query, query = true))
@@ -259,7 +260,10 @@ proc replace*(router: Router; target: string) =
     let previous = router.entries[router.at]
     if previous.location == resolved.location:
       return
-    router.entries[router.at] = RouteEntry(location: resolved.location)
+    var entry = RouteEntry(location: resolved.location)
+    if resolved.path == pathOf(previous.location):
+      entry.title = previous.title
+    router.entries[router.at] = entry
 
 proc go*(router: Router; distance: int) =
   ## Moves distance entries through history, bounded by its first and last.

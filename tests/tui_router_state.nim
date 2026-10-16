@@ -62,6 +62,10 @@ doAssert route.param("id") == "42"
 doAssert route.query("tab") == "info"
 route.title("Edit note")
 doAssert routes.title() == "Edit note"
+routes.replace("?tab=detail")
+doAssert routes.query("tab") == "detail"
+doAssert routes.title() == "Edit note",
+  "replacing the query on the same path should keep its page title"
 doAssert not route.match("/users/{id}")
 doAssert route.param("id") == "42",
   "a failed match should leave the last successful parameters intact"
