@@ -247,6 +247,8 @@ type
     selectionPivotKey: string
     selectionPivotKeyValid: bool
     selectionSpan: int
+    externalKeySelection: Selection[string]
+    externalIndexSelection: Selection[int]
     anchor: int
     anchorKey: string
     anchorInset: float64

@@ -1,22 +1,24 @@
-## A set of selected row keys, usable as application-owned state.
+## An application-owned set of selected row keys.
+##
+## Its zero value is empty. Bind it to a list with `ListState.bindSelection`
+## to keep app-side and list-side changes in sync.
 
 type
-  Selection*[K] = object
+  Selection*[K] = ref object
     keys: HashSet[K]
-    initialized: bool
 
 proc ensure[K](selection: var Selection[K]) =
-  if not selection.initialized:
+  if selection == nil:
+    new(selection)
     selection.keys = initHashSet[K]()
-    selection.initialized = true
 
 proc has*[K](selection: Selection[K]; key: K): bool =
   ## Reports whether key is selected.
-  selection.initialized and selection.keys.contains(key)
+  selection != nil and selection.keys.contains(key)
 
 proc len*[K](selection: Selection[K]): int =
   ## Returns the number of selected keys.
-  if selection.initialized:
+  if selection != nil:
     result = selection.keys.len
 
 proc add*[K](selection: var Selection[K]; key: K) =
@@ -26,16 +28,16 @@ proc add*[K](selection: var Selection[K]; key: K) =
 
 proc remove*[K](selection: var Selection[K]; key: K) =
   ## Removes key from the selection.
-  if selection.initialized:
+  if selection != nil:
     selection.keys.excl(key)
 
 proc clear*[K](selection: var Selection[K]) =
   ## Clears the selection.
-  if selection.initialized:
+  if selection != nil:
     selection.keys.clear()
 
 iterator all*[K](selection: Selection[K]): K =
   ## Iterates selected keys in unspecified order.
-  if selection.initialized:
+  if selection != nil:
     for key in selection.keys:
       yield key

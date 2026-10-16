@@ -215,6 +215,108 @@ block multi_selection_follows_keyed_rows:
   doAssert state.selected() == -1
   doAssert state.selectedRows().len == 0
 
+block keyed_app_selection_stays_in_sync:
+  let context = newContext()
+  var offset = 0
+  let rowKey: ListRowKey = proc(row: int): string = $(offset + row)
+  let state = newListState(20, rowKey = rowKey)
+  var selected: Selection[string]
+  selected.add("2")
+  discard state.bindSelection(selected)
+  var count = 4
+
+  proc buildList() =
+    context.build(proc(ctx: Context) =
+      discard ctx.list(state, count, proc(row: int) =
+        discard ctx.box().height(20).shrink(0)
+      ).size(120, 40)
+    )
+
+  buildList()
+  discard context.layout(120, 40)
+  doAssert state.isSelected(2)
+  doAssert selected.has("2")
+
+  state.toggleSelection(1)
+  doAssert selected.has("1")
+  selected.add("3")
+  buildList()
+  discard context.layout(120, 40)
+  doAssert state.isSelected(1)
+  doAssert state.isSelected(2)
+  doAssert state.isSelected(3)
+
+  offset = -1
+  inc count
+  buildList()
+  discard context.layout(120, 40)
+  doAssert state.isSelected(2)
+  doAssert state.isSelected(3)
+  doAssert state.isSelected(4)
+
+  selected.remove("2")
+  buildList()
+  discard context.layout(120, 40)
+  doAssert not state.isSelected(3)
+  doAssert selected.len == 2
+
+  state.clearSelection()
+  doAssert selected.len == 0
+  doAssert state.selectedRows().len == 0
+
+block unkeyed_app_selection_uses_row_indices:
+  let context = newContext()
+  let state = newListState(20)
+  var selected: Selection[int]
+  selected.add(1)
+  discard state.bindSelection(selected)
+
+  context.build(proc(ctx: Context) =
+    discard ctx.list(state, 4, proc(row: int) =
+      discard ctx.box().height(20).shrink(0)
+    ).size(120, 40)
+  )
+  discard context.layout(120, 40)
+  doAssert state.isSelected(1)
+
+  state.toggleSelection(3)
+  doAssert selected.has(3)
+  state.clearSelection()
+  doAssert selected.len == 0
+
+block app_selection_key_type_must_match_list:
+  var keyed: Selection[int]
+  let keyedState = newListState(20, rowKey = proc(row: int): string = $row)
+  doAssertRaises ValueError:
+    discard keyedState.bindSelection(keyed)
+
+  var unkeyed: Selection[string]
+  let unkeyedState = newListState(20)
+  doAssertRaises ValueError:
+    discard unkeyedState.bindSelection(unkeyed)
+
+block list_click_updates_bound_selection:
+  var selected: Selection[string]
+  let state = newListState(20,
+    rowKey = proc(row: int): string = "id-" & $row,
+    rowLabel = proc(row: int): string = "Item " & $row)
+  discard state.bindSelection(selected)
+  let tester = newTester(proc(ctx: Context) =
+    discard ctx.list(state, 3, proc(row: int) =
+      discard ctx.text("Item " & $row).size(80, 20)
+    ).size(120, 60)
+  , 120, 60)
+  defer: tester.close()
+
+  doAssert tester.click("Item 0") == nil
+  doAssert selected.len == 1
+  doAssert selected.has("id-0")
+
+  doAssert tester.click("Item 2") == nil
+  doAssert selected.len == 1
+  doAssert selected.has("id-2")
+  doAssert not selected.has("id-0")
+
 block follow_end_tracks_growth_until_scrolled_away:
   let context = newContext()
   let state = newListState(20, followEnd = true)
