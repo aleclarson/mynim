@@ -2,4 +2,5 @@
 
 import mynim/ui/chart/scales
 import mynim/ui/chart/stack
-export scales, stack
+import mynim/ui/chart/nearest
+export scales, stack, nearest
