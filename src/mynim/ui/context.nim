@@ -124,6 +124,13 @@ type
     dayHandle, anchorHandle: Handle
     open, initialized, hasPendingValue: bool
 
+  TimeControlState = ref object
+    lastValue, pendingValue: DateTime
+    segmentHandles: array[3, Handle]
+    digitBuffers: array[3, string]
+    digitAt: array[3, MonoTime]
+    initialized, hasPendingValue: bool
+
   ColorPlaneValue = object
     saturation, brightness: float64
 
@@ -169,6 +176,7 @@ type
     comboBoxStates: Table[uint64, ComboBoxState]
     colorPickerStates: Table[uint64, ColorPickerState]
     dateControlStates: Table[uint64, DateControlState]
+    timeControlStates: Table[uint64, TimeControlState]
     toasts: seq[ToastEntry]
     toastState: ToastState
     announcements: seq[string]
@@ -296,7 +304,7 @@ type
     slider, sliderVertical, rating, stepper, numberInput, comboBoxRoot,
       comboBoxInput, rangeSlider,
       rangeSliderThumb, splitPane, splitHandle, splitVertical,
-      dateControl, colorPlane, colorPickerRoot: bool
+      dateControl, timeControlRoot, colorPlane, colorPickerRoot: bool
     rangeSliderHandle: int8
     sliderLow, sliderHigh, sliderValue, sliderStep: float64
     sliderClampLow, sliderClampHigh: float64
@@ -311,6 +319,7 @@ type
     label: string
     accessDescription: string
     accessValue: string
+    accessLabelFromParent: bool
     accessPosInSet, accessSetSize: int
     tooltipText: string
     tooltipBuild: proc(tip: Element) {.closure.}
@@ -494,6 +503,7 @@ proc newContext*(): Context =
   result.owner.comboBoxStates = initTable[uint64, ComboBoxState]()
   result.owner.colorPickerStates = initTable[uint64, ColorPickerState]()
   result.owner.dateControlStates = initTable[uint64, DateControlState]()
+  result.owner.timeControlStates = initTable[uint64, TimeControlState]()
   result.owner.toastState = ToastState()
   result.owner.rangeSliderDrags = initTable[uint64, int8]()
   result.owner.pendingTextCallbacks =
@@ -849,6 +859,7 @@ proc retire(owner: ElementOwner) =
   owner.activeModalIdentity = 0
   owner.comboBoxStates.clear()
   owner.colorPickerStates.clear()
+  owner.timeControlStates.clear()
   owner.toasts.setLen(0)
   owner.announcements.setLen(0)
   owner.toastState = ToastState()
@@ -1185,6 +1196,7 @@ proc build*(c: Context; view: proc(c: Context) {.closure.}) =
     c.owner.comboBoxStates = initTable[uint64, ComboBoxState]()
     c.owner.colorPickerStates = initTable[uint64, ColorPickerState]()
     c.owner.dateControlStates = initTable[uint64, DateControlState]()
+    c.owner.timeControlStates = initTable[uint64, TimeControlState]()
     c.owner.toastState = ToastState()
     c.owner.toasts.setLen(0)
     c.owner.announcements.setLen(0)
@@ -1351,6 +1363,14 @@ proc build*(c: Context; view: proc(c: Context) {.closure.}) =
         staleDateControls.add(identity)
     for identity in staleDateControls:
       c.owner.dateControlStates.del(identity)
+    var staleTimeControls: seq[uint64]
+    for identity in c.owner.timeControlStates.keys:
+      let slot = c.owner.idSlots.getOrDefault(identity, -1)
+      if slot <= 0 or slot >= c.owner.nodes.len or
+          not c.owner.nodes[slot].timeControlRoot:
+        staleTimeControls.add(identity)
+    for identity in staleTimeControls:
+      c.owner.timeControlStates.del(identity)
     built = true
   finally:
     c.owner.inBuild = false

@@ -599,6 +599,9 @@ proc accessibilityTree(layout: LayoutResult;
     if node.rangeSliderThumb and parentSlot > 0 and
         parentSlot < owner.nodes.len and owner.nodes[parentSlot].label.len > 0:
       label = owner.nodes[parentSlot].label & " " & label
+    elif node.accessLabelFromParent and parentSlot > 0 and
+        parentSlot < owner.nodes.len and owner.nodes[parentSlot].label.len > 0:
+      label = owner.nodes[parentSlot].label & " " & label
     let parent = if parentSlot >= 0: accessIndex[parentSlot] else: -1
     let rect = layout.rects[slot]
     var accessible = platform.AccessNode(id: uint64(slot + 1),

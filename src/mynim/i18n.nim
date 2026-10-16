@@ -598,6 +598,19 @@ proc formatDate*(locale: string; value: DateTime;
   let pattern = datePattern(locale, data, options)
   formatPattern(locale, data, value, pattern, digits).replace("\u202f", " ")
 
+proc formatInteger*(locale: string; value: int; minDigits = 1): string =
+  ## Formats an integer without grouping, using the locale's numbering
+  ## system and at least minDigits digits.
+  let data = formatLocaleIndex(locale)
+  dateNumber(value, minDigits, localizedDigits(locale, data))
+
+proc timePattern*(locale: string; hourCycle = 0): string =
+  ## Returns the CLDR pattern for hours and minutes. hourCycle may be 12 or
+  ## 24 to override the locale's preference.
+  let data = formatLocaleIndex(locale)
+  datePattern(locale, data, DateOptions(skeleton: "jm",
+    hourCycle: hourCycle)).replace("\u202f", " ")
+
 proc `match`*(want, supported: seq[string]): string =
   ## The supported tag want likes best (i18n's match): an exact
   ## normalized tag first, then its language with a different
