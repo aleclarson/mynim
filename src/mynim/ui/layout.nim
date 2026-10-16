@@ -3223,6 +3223,14 @@ proc onClick*(e: Element;
     if handler != nil:
       n.focusable = true
 
+proc cursor*(e: Element; value: platform.Cursor): Element =
+  ## Sets the pointer cursor while the pointer is over e.
+  result = e
+  let n = e.node
+  if n != nil:
+    n.pointerCursor = value
+    n.pointerCursorSet = true
+
 proc buttonBase*(c: Context): Element =
   ## Creates a button without a look. Use clicked() or onClick() to respond;
   ## the button activates with pointer, Enter, Space, and accessibility input.

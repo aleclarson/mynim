@@ -1454,7 +1454,9 @@ proc updatePointerCursor(rt: Runtime) =
         slot = int(target.slot)
     if slot > 0 and slot < owner.nodes.len:
       let node = owner.nodes[slot]
-      if node.splitHandle:
+      if node.pointerCursorSet:
+        cursor = node.pointerCursor
+      elif node.splitHandle:
         cursor = if node.splitVertical: platform.cursorResizeNS
           else: platform.cursorResizeEW
       elif node.tableResizeHandle:
@@ -1848,6 +1850,7 @@ proc renderFrame(rt: Runtime; presentFrame = true) =
   rt.context.localeTag = if rt.conn.locale == nil: "" else: rt.conn.locale()
   rt.context.region = if rt.conn.region == nil: i18n.Region()
     else: rt.conn.region()
+  rt.context.openURL = rt.conn.openURL
   rt.context.themeEnabled = true
   rt.context.themeBackground = false
 

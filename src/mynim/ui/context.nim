@@ -17,6 +17,7 @@ type
     rightToLeft: bool
     localeTag: string
     region: surface.Region
+    openURL: proc(url: string; done: proc(err: ref CatchableError)) {.closure.}
     hasPendingKey: bool
     themeEnabled, themeBackground: bool
 
@@ -342,6 +343,8 @@ type
     accessExtraActions: platform.AccessActions
     accessLevel: int
     accessRoleSet: bool
+    pointerCursor: platform.Cursor
+    pointerCursorSet: bool
     keyHandler: UiKeyHandler
     treeAccessAction: TreeAccessAction
     treeAccessFocus: TreeAccessFocus

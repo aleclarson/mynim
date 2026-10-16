@@ -39,6 +39,21 @@ proc primaryButton*(c: Context; label: string): Element =
   ## Creates an accent-colored button for the primary action.
   c.themedButton(label, primary = true)
 
+proc link*(c: Context; label, url: string): Element =
+  ## Creates accessible text that opens url in the system browser when clicked
+  ## or activated from the keyboard.
+  let open = c.openURL
+  result = c.text(label).textColor(c.theme.accent)
+    .cursor(platform.cursorPointer)
+    .onClick(proc() =
+      if url.len > 0 and open != nil:
+        open(url, nil)
+    )
+  let node = result.node
+  if node != nil:
+    node[].accessRole = platform.roleLink
+    node[].accessRoleSet = true
+
 proc spacer*(c: Context): Element =
   ## Fills free space in its row or column, pushing siblings apart.
   c.box().grow()
