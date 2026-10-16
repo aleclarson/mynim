@@ -1,0 +1,19 @@
+import std/assertions
+import mynim/ui as ui
+import ../src/main as starter
+
+proc testApp() =
+  var state = starter.AppState()
+  let tester = ui.newTester(proc(ctx: ui.Context) =
+    starter.appView(state, ctx)
+  , 480, 360)
+  defer: tester.close()
+
+  doAssert tester.hasText("Hello!")
+  doAssert tester.click("+") == nil
+  doAssert state.count == 1
+  doAssert tester.click("Name") == nil
+  tester.typeText("Ada")
+  doAssert tester.hasText("Hello, Ada!")
+
+testApp()

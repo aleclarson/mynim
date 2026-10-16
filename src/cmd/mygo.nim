@@ -2,6 +2,7 @@
 
 import std/os
 import ./doctor
+import ./init
 
 const
   version = "0.1.0"
@@ -13,6 +14,7 @@ Usage:
 
 Commands:
 
+  init       create a native UI project
   doctor     check that the development environment is ready
   version    print the MyGo version
   help       print this help
@@ -34,7 +36,11 @@ proc run(args: seq[string]): int =
     if args.len > 1:
       return runDoctor(args[1 .. ^1])
     return runDoctor(@[])
-  of "init", "install-skills", "vet", "migrate-ui", "generate", "gen",
+  of "init":
+    if args.len > 1:
+      return runInit(args[1 .. ^1])
+    return runInit(@[])
+  of "install-skills", "vet", "migrate-ui", "generate", "gen",
      "dev", "i18n", "build", "keygen":
     stderr.writeLine("mygo: command \"" & args[0] & "\" is not ported yet")
     return 1

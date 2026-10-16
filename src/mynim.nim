@@ -26,7 +26,8 @@ elif defined(macosx):
 elif defined(linux):
   import mynim/internal/linux
 
-export transfer, image, platform, i18n
+export transfer, image, i18n
+export platform except WindowOptions
 
 include mynim/core/color
 include mynim/core/events

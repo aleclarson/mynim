@@ -1,0 +1,41 @@
+import mynim
+import mynim/ui as ui
+
+type AppState* = ref object
+  name*: string
+  count*: int
+
+proc appView*(state: AppState; ctx: ui.Context) =
+  let theme = ctx.theme()
+  discard ctx.column().fill().center().gap(16).padding(24).children(proc() =
+    discard ctx.text({{APP_NAME}}).textSize(26).textWeight(700)
+    discard ctx.textInput(state.name).placeholder("Your name")
+      .label("Name").width(240)
+    let greeting = if state.name.len == 0: "Hello!"
+      else: "Hello, " & state.name & "!"
+    discard ctx.text(greeting).textColor(theme.textMuted)
+    discard ctx.row().gap(10).alignItems(ui.Align.Center).children(proc() =
+      if ctx.button("−").width(44).clicked():
+        dec state.count
+      discard ctx.text($state.count).textSize(20).width(48)
+        .textAlign(ui.Align.Center)
+      if ctx.primaryButton("+").width(44).clicked():
+        inc state.count
+    )
+  )
+
+when isMainModule:
+  app.setName({{APP_NAME}})
+  let state = AppState()
+  let content = ui.newContent(proc(ctx: ui.Context) = appView(state, ctx))
+  app.whenReady(proc() =
+    discard mynim.newWindow(mynim.WindowOptions(
+      title: {{APP_NAME}},
+      width: 480,
+      height: 360,
+      minWidth: 320,
+      minHeight: 280,
+      stateKey: "main",
+      content: content))
+  )
+  app.run()
