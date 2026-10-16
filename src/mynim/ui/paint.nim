@@ -287,23 +287,138 @@ proc effectiveTextColor(nodes: seq[ElementNode]; slot: int): Color =
     parent = int(ancestor.parent)
   node.textColor
 
+proc paintSpanFill(s: scene.Scene; rect: scene.Rect; color: Color;
+                  radius, opacity: float32) =
+  if rect.w <= 0 or rect.h <= 0 or color.a == 0:
+    return
+  let corner = max(radius, 0'f32)
+  var op = scene.Op(kind: scene.opFill, rect: rect,
+    color: sceneColor(color), paint: scene.paintSolid,
+    radii: [corner, corner, corner, corner], opacity: opacity)
+  op.wide = s.addWide(wideColors(color, transparent, transparent))
+  s.ops.add(op)
+
+proc paintRichBackgrounds(s: scene.Scene; node: ElementNode; root: Rect;
+                          scale, opacity, originX, originY: float32) =
+  for line in node.shapedText.lines:
+    var i = 0
+    while i < line.glyphs.len:
+      let spanIndex = node.richSpanAt(line.glyphs[i].cluster)
+      var j = i + 1
+      while j < line.glyphs.len and
+          node.richSpanAt(line.glyphs[j].cluster) == spanIndex:
+        inc j
+      if spanIndex >= 0 and node.textSpans[spanIndex].background.a > 0:
+        let span = node.textSpans[spanIndex]
+        var x0 = float32.high
+        var x1 = -float32.high
+        for k in i..<j:
+          let glyph = line.glyphs[k]
+          x0 = min(x0, min(glyph.x, glyph.x + glyph.advance))
+          x1 = max(x1, max(glyph.x, glyph.x + glyph.advance))
+        if x1 > x0:
+          var y = line.y
+          var h = line.height
+          if span.radius > 0:
+            let em = line.glyphs[i].size
+            let pad = min(em * 0.22'f32, span.radius)
+            x0 -= pad
+            x1 += pad
+            y = line.baseline - em * 0.98'f32
+            h = em * 1.32'f32
+          let pixels = Rect(x: root.x + originX + x0,
+            y: root.y + originY + y, w: x1 - x0, h: h).sceneRect(root, scale)
+          s.paintSpanFill(pixels, span.background,
+            span.radius.scaled(scale), opacity)
+      i = j
+
+proc paintWavyUnderline(s: scene.Scene; stroke: textStack.Stroke;
+                        color: Color; opacity: float32) =
+  let width = stroke.x1 - stroke.x0
+  let thick = max(stroke.bottom - stroke.top, 1'f32)
+  if width <= 0:
+    return
+  let period = max(thick * 6, 6'f32)
+  let step = max(period / 8, 1'f32)
+  let count = max(int(ceil(float64(width / step))), 1)
+  let center = (stroke.top + stroke.bottom) / 2
+  let amplitude = thick * 0.75'f32
+  for i in 0..<count:
+    let x0 = stroke.x0 + width * float32(i) / float32(count)
+    let x1 = stroke.x0 + width * float32(i + 1) / float32(count)
+    let mid = (x0 + x1) / 2
+    let y = center - amplitude * float32(sin(
+      float64((mid - stroke.x0) / period * 2'f32 * PI.float32)))
+    s.paintSpanFill(scene.Rect(x: x0, y: y - thick / 2,
+      w: x1 - x0 + 1, h: thick), color, thick / 2, opacity)
+
+proc paintRichDecorations(s: scene.Scene; node: ElementNode; textColor: Color;
+                          scale, opacity, originX, originY: float32;
+                          system: textStack.System) =
+  for lineIndex, line in node.shapedText.lines:
+    var i = 0
+    while i < line.glyphs.len:
+      let spanIndex = node.richSpanAt(line.glyphs[i].cluster)
+      var j = i + 1
+      while j < line.glyphs.len and
+          node.richSpanAt(line.glyphs[j].cluster) == spanIndex:
+        inc j
+      if spanIndex >= 0:
+        let span = node.textSpans[spanIndex]
+        let decorationColor = if span.decorationColor.a > 0:
+            span.decorationColor
+          elif span.color.a > 0: span.color
+          else: textColor
+        for decoration in [textStack.Underline, textStack.Strikethrough]:
+          let underline = decoration == textStack.Underline
+          if (underline and not (span.underline or span.wavyUnderline)) or
+              (not underline and not span.strikethrough):
+            continue
+          let strokes = system.decorate(node.shapedText, lineIndex, i, j,
+            originX, originY, scale, decoration, span.decorationThickness)
+          for stroke in strokes:
+            if stroke.x1 <= stroke.x0 or stroke.bottom <= stroke.top:
+              continue
+            if underline and span.wavyUnderline:
+              s.paintWavyUnderline(stroke, decorationColor, opacity)
+            else:
+              s.paintSpanFill(scene.Rect(x: stroke.x0, y: stroke.top,
+                w: stroke.x1 - stroke.x0, h: stroke.bottom - stroke.top),
+                decorationColor, 0, opacity)
+      i = j
+
 proc paintText(s: scene.Scene; node: ElementNode; textColor: Color;
                rect, root: Rect; scale, opacity: float32;
                system: textStack.System) =
-  if not node.hasText or node.shapedText == nil or textColor.a == 0:
+  if not node.hasText or node.shapedText == nil:
     return
+  if textColor.a == 0:
+    var spanPaints = false
+    for span in node.textSpans:
+      if span.color.a > 0 or span.background.a > 0 or
+          span.decorationColor.a > 0 or span.underline or
+          span.wavyUnderline or span.strikethrough:
+        spanPaints = true
+        break
+    if not spanPaints:
+      return
   let originX = rect.x - root.x + node.pad[3] + node.border[3]
   let originY = rect.y - root.y + node.pad[0] + node.border[0]
-  let color = sceneColor(textColor)
-  let wide = wideColors(textColor, transparent, transparent)
-  let wideIndex = s.addWide(wide)
+  s.paintRichBackgrounds(node, root, scale, opacity, originX, originY)
   let start = s.glyphs.len
-  let shade = textStack.shadeOf(textColor.r, textColor.g, textColor.b)
   for line in node.shapedText.lines:
     let baseline = system.baseline((originY + line.baseline) * scale)
     for glyph in line.glyphs:
       if glyph.`object` or glyph.font.isNil:
         continue
+      let spanIndex = node.richSpanAt(glyph.cluster)
+      let color = if spanIndex >= 0 and
+          node.textSpans[spanIndex].color.a > 0:
+          node.textSpans[spanIndex].color
+        else:
+          textColor
+      let wideIndex = s.addWide(wideColors(color, transparent, transparent))
+      let shade = textStack.shadeOf(color.r, color.g, color.b)
       let pen = (originX + glyph.x) * scale
       let image = system.glyph(glyph.font, glyph.id, scale, pen, shade, false)
       if not image.ok:
@@ -311,11 +426,13 @@ proc paintText(s: scene.Scene; node: ElementNode; textColor: Color;
       s.glyphs.add(scene.Glyph(x: floor(pen) + image.left,
         y: baseline + image.top, w: float32(image.w), h: float32(image.h),
         u: image.x, v: image.y, uw: image.w, vh: image.h,
-        color: color, wide: wideIndex, colored: image.colored,
+        color: sceneColor(color), wide: wideIndex, colored: image.colored,
         subpixel: image.subpixel, thin: image.thin))
   if s.glyphs.len > start:
     s.ops.add(scene.Op(kind: scene.opGlyphs, first: int32(start),
       last: int32(s.glyphs.len), opacity: opacity))
+  s.paintRichDecorations(node, textColor, scale, opacity, originX, originY,
+    system)
 
 proc paintTextSelection(s: scene.Scene; owner: ElementOwner;
                         node: ElementNode; rect, root: Rect;

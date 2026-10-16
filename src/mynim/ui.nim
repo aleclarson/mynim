@@ -30,6 +30,7 @@ include mynim/ui/theme
 include mynim/ui/element
 include mynim/ui/router
 include mynim/ui/context
+include mynim/ui/rich_text
 include mynim/ui/list_state
 include mynim/ui/menu
 include mynim/ui/layout

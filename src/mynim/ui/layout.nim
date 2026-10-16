@@ -82,7 +82,8 @@ proc shapeText(nodes: var seq[ElementNode]) =
     node.shapedText = system.layout(textStack.Params(text: node.textValue,
       style: node.textStyle, maxLines: node.textMaxLines,
       align: alignment, rtl: node.rightToLeft,
-      keepSpaces: true, noWrap: node.textNoWrap))
+      keepSpaces: true, noWrap: node.textNoWrap,
+      spans: node.textSpanStyles))
 
 proc shapeTextToBounds(nodes: var seq[ElementNode]; rects: seq[Rect]): bool =
   let system = textStack.shared()

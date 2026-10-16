@@ -99,6 +99,18 @@ type
     draft: string
     renameDeadline: MonoTime
 
+  Span* = object
+    ## One styled run in richText.
+    text*: string
+    font*, features*, lang*: string
+    size*, letterSpacing*: float32
+    weight*: int
+    italic*: bool
+    color*, decorationColor*, background*: Color
+    underline*, wavyUnderline*, strikethrough*: bool
+    decorationThickness*, radius*: float32
+    objectWidth*, objectHeight*: float32
+
   ScalarAnimation = object
     value, velocity, fromValue, target: float64
     at, startAt, pendingAt: MonoTime
@@ -389,6 +401,9 @@ type
     labelTargetSlot, fieldLabelSlot, fieldContentSlot,
       fieldControlSlot, focusTargetSlot: int32
     textValue: string
+    textSpans: seq[Span]
+    textSpanEnds: seq[int]
+    textSpanStyles: string
     placeholder: string
     textStyle: textStack.Style
     textColor, textSelectionColor: Color
