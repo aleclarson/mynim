@@ -1,7 +1,8 @@
 ## An application-owned set of selected row keys.
 ##
-## Its zero value is empty. Bind it to a list with `ListState.bindSelection`
-## to keep app-side and list-side changes in sync.
+## Its zero value is empty. Bind it to a list or grid with
+## `ListState.bindSelection` or `GridState.bindSelection` to keep app-side and
+## UI-side changes in sync.
 
 type
   Selection*[K] = ref object
