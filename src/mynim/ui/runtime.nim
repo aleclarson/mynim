@@ -449,6 +449,10 @@ proc accessibilityTree(layout: LayoutResult;
         platform.actionDecrement
       if node.sliderVertical:
         accessible.states = accessible.states or platform.accessVertical
+    elif node.hasAccessRange:
+      accessible.min = node.accessMin
+      accessible.max = node.accessMax
+      accessible.now = node.accessNow
     if node.textClient != nil:
       let (value, _) = node.textClient.textForRange(platform.TextRange(
         start: 0, `end`: high(int)))

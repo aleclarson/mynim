@@ -194,6 +194,8 @@ type
     listRowAction: bool
     slider, sliderVertical: bool
     sliderLow, sliderHigh, sliderValue, sliderStep: float64
+    hasAccessRange: bool
+    accessMin, accessMax, accessNow: float64
     textAlign: Align
     hovered, pressed, clicked, changed, submitted,
       valueChangedInBuild: bool
