@@ -105,6 +105,26 @@ proc mix*(c, other: Color; t: float32): Color =
                    b: mixByte(c.b, other.b))
   result.a = mixByte(c.a, other.a)
 
+proc mixPremultiplied(c, other: Color; t: float32): Color =
+  ## Interpolates color and alpha together so transparent colors do not tint
+  ## the visible color while fading.
+  let t = max(0'f32, min(t, 1'f32))
+  let alphaC = c.a.float32 / 255
+  let alphaOther = other.a.float32 / 255
+  let alpha = alphaC * (1 - t) + alphaOther * t
+  if alpha <= 0:
+    return transparent
+  if c.wide.wideOk or other.wide.wideOk:
+    result = mixWide(c, other, t * alphaOther / alpha)
+    result.a = alphaByte(alpha)
+    return
+  let mixChannel = proc(a, b: uint8): uint8 =
+    let value = (a.float32 * alphaC * (1 - t) +
+      b.float32 * alphaOther * t) / alpha
+    uint8(max(0'f32, min(value + 0.5'f32, 255'f32)))
+  Color(r: mixChannel(c.r, other.r), g: mixChannel(c.g, other.g),
+    b: mixChannel(c.b, other.b), a: alphaByte(alpha))
+
 proc over*(c, base: Color): Color =
   ## Returns c composited over base.
   result = c.mix(base, 1 - c.a.float32 / 255)

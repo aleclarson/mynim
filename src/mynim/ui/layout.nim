@@ -1739,6 +1739,48 @@ proc cubicEaseOut(progress: float32): float32 =
   let inverse = 1'f32 - progress
   1'f32 - inverse * inverse * inverse
 
+proc update(channel: var ScalarAnimation; owner: ElementOwner; target: float64;
+            animation: Animation; respectReduceMotion = true): float64 =
+  if not channel.initialized or
+      (channel.generation != owner.generation and
+       channel.generation + 1 != owner.generation):
+    channel = ScalarAnimation(value: target, fromValue: target,
+      target: target, at: owner.frameNow, generation: owner.generation,
+      initialized: true)
+    return target
+
+  if owner.reduceMotion and respectReduceMotion:
+    channel.value = target
+    channel.velocity = 0
+    channel.fromValue = target
+    channel.target = target
+    channel.at = owner.frameNow
+    channel.moving = false
+    channel.pending = false
+    channel.jumped = false
+  else:
+    channel.advance(owner.frameNow)
+    if target != channel.goal() and animation.delay > DurationZero:
+      channel.pending = true
+      channel.pendingTarget = target
+      channel.pendingAt = owner.frameNow + animation.delay
+      channel.pendingAnimation = animation
+      channel.pendingAnimation.delay = DurationZero
+    elif target != channel.goal():
+      channel.pending = false
+      channel.retarget(target, animation, owner.frameNow)
+    elif channel.moving and not channel.curve and
+        animation.duration == DurationZero and not channel.pending:
+      let physics = springPhysics(animation.spring)
+      channel.mass = physics.mass
+      channel.stiffness = physics.stiffness
+      channel.damping = physics.damping
+      channel.precision = physics.precision
+    owner.animating = owner.animating or channel.moving or channel.pending
+
+  channel.generation = owner.generation
+  channel.value
+
 proc animate*(e: Element; key: string; target: float32;
               animation: Animation): float32 =
   ## Moves a keyed scalar value with a timed easing curve or spring and
@@ -1754,51 +1796,10 @@ proc animate*(e: Element; key: string; target: float32;
   var channels = owner.animations.mgetOrPut(node.identity,
     initTable[string, ScalarAnimation]())
   var channel = channels.getOrDefault(key)
-  if not channel.initialized or
-      (channel.generation != owner.generation and
-       channel.generation + 1 != owner.generation):
-    channel = ScalarAnimation(value: float64(target),
-      fromValue: float64(target), target: float64(target),
-      at: owner.frameNow, generation: owner.generation,
-      initialized: true)
-    channels[key] = channel
-    owner.animations[node.identity] = channels
-    return target
-
-  let to = float64(target)
-  if owner.reduceMotion:
-    channel.value = to
-    channel.velocity = 0
-    channel.fromValue = to
-    channel.target = to
-    channel.at = owner.frameNow
-    channel.moving = false
-    channel.pending = false
-    channel.jumped = false
-  else:
-    channel.advance(owner.frameNow)
-    if to != channel.goal() and animation.delay > DurationZero:
-      channel.pending = true
-      channel.pendingTarget = to
-      channel.pendingAt = owner.frameNow + animation.delay
-      channel.pendingAnimation = animation
-      channel.pendingAnimation.delay = DurationZero
-    elif to != channel.goal():
-      channel.pending = false
-      channel.retarget(to, animation, owner.frameNow)
-    elif channel.moving and not channel.curve and
-        animation.duration == DurationZero and not channel.pending:
-      let physics = springPhysics(animation.spring)
-      channel.mass = physics.mass
-      channel.stiffness = physics.stiffness
-      channel.damping = physics.damping
-      channel.precision = physics.precision
-    owner.animating = owner.animating or channel.moving or channel.pending
-
-  channel.generation = owner.generation
+  let value = channel.update(owner, float64(target), animation)
   channels[key] = channel
   owner.animations[node.identity] = channels
-  float32(channel.value)
+  float32(value)
 
 proc animate*(e: Element; key: string; target: float32;
               duration: Duration): float32 =
@@ -1812,6 +1813,47 @@ proc spring*(e: Element; key: string; target: float32;
              options = SpringOptions()): float32 =
   ## Moves a keyed scalar value to target with a spring.
   e.animate(key, target, Animation(spring: options))
+
+proc animateColor*(e: Element; key: string; target: Color;
+                   animation: Animation): Color =
+  ## Moves a keyed color using premultiplied-alpha interpolation. Colors
+  ## continue to animate when reduced motion is enabled.
+  animation.validateAnimation()
+  let node = e.node
+  if node == nil:
+    return target
+  let owner = e.owner
+  var motions = owner.colorMotions.mgetOrPut(node.identity,
+    initTable[string, ColorMotion]())
+  var motion = motions.getOrDefault(key)
+  if not motion.initialized or
+      (motion.generation != owner.generation and
+       motion.generation + 1 != owner.generation):
+    motion = ColorMotion(fromColor: target, targetColor: target,
+      shown: target,
+      progress: ScalarAnimation(value: 1, fromValue: 1, target: 1,
+        at: owner.frameNow, generation: owner.generation, initialized: true),
+      generation: owner.generation, initialized: true)
+    motions[key] = motion
+    owner.colorMotions[node.identity] = motions
+    return target
+
+  if target != motion.targetColor:
+    motion.fromColor = motion.shown
+    motion.progress = ScalarAnimation(value: 0, fromValue: 0, target: 0,
+      at: owner.frameNow, generation: owner.generation, initialized: true)
+    motion.targetColor = target
+  let progress = motion.progress.update(owner, 1, animation,
+    respectReduceMotion = false)
+  if motion.progress.moving or motion.progress.pending:
+    motion.shown = motion.fromColor.mixPremultiplied(motion.targetColor,
+      max(0'f32, min(float32(progress), 1'f32)))
+  else:
+    motion.shown = motion.targetColor
+  motion.generation = owner.generation
+  motions[key] = motion
+  owner.colorMotions[node.identity] = motions
+  motion.shown
 
 proc jump*(e: Element; key: string; value: float32): float32 =
   ## Sets a keyed scalar value immediately and tracks drag velocity for a
@@ -1864,6 +1906,11 @@ proc settled*(e: Element; key: string): bool =
   let node = e.node
   if node == nil:
     return true
+  let motions = e.owner.colorMotions.getOrDefault(node.identity)
+  let motion = motions.getOrDefault(key)
+  if motion.initialized and
+      (motion.progress.moving or motion.progress.pending):
+    return false
   let sequences = e.owner.keyframes.getOrDefault(node.identity)
   let sequence = sequences.getOrDefault(key)
   if sequence.initialized and not sequence.done:

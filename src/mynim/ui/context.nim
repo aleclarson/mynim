@@ -68,6 +68,12 @@ type
     generation: uint32
     initialized, done: bool
 
+  ColorMotion = object
+    fromColor, targetColor, shown: Color
+    progress: ScalarAnimation
+    generation: uint32
+    initialized: bool
+
   ElementOwner = ref object
     nodes: seq[ElementNode]
     idSlots: Table[uint64, int]
@@ -82,6 +88,7 @@ type
     pendingTextSubmitCallbacks: Table[uint64, seq[proc() {.closure.}]]
     textInputClients: Table[uint64, platform.TextInputClient]
     animations: Table[uint64, Table[string, ScalarAnimation]]
+    colorMotions: Table[uint64, Table[string, ColorMotion]]
     keyframes: Table[uint64, Table[string, ScalarSequence]]
     frameNow: MonoTime
     committedRects: seq[Rect]
@@ -357,6 +364,8 @@ proc newContext*(): Context =
     initTable[uint64, platform.TextInputClient]()
   result.owner.animations =
     initTable[uint64, Table[string, ScalarAnimation]]()
+  result.owner.colorMotions =
+    initTable[uint64, Table[string, ColorMotion]]()
   result.owner.keyframes =
     initTable[uint64, Table[string, ScalarSequence]]()
   result.theme = lightTheme()
@@ -685,6 +694,7 @@ proc retire(owner: ElementOwner) =
   owner.pendingTextSubmitCallbacks.clear()
   owner.textInputClients.clear()
   owner.animations.clear()
+  owner.colorMotions.clear()
   owner.keyframes.clear()
   owner.committedRects = @[]
   owner.focusIdentity = 0
@@ -985,6 +995,8 @@ proc build*(c: Context; view: proc(c: Context) {.closure.}) =
       initTable[uint64, platform.TextInputClient]()
     c.owner.animations =
       initTable[uint64, Table[string, ScalarAnimation]]()
+    c.owner.colorMotions =
+      initTable[uint64, Table[string, ColorMotion]]()
     c.owner.keyframes =
       initTable[uint64, Table[string, ScalarSequence]]()
   inc c.owner.generation
@@ -1036,6 +1048,12 @@ proc build*(c: Context; view: proc(c: Context) {.closure.}) =
         staleAnimations.add(identity)
     for identity in staleAnimations:
       c.owner.animations.del(identity)
+    var staleColorMotions: seq[uint64]
+    for identity in c.owner.colorMotions.keys:
+      if not c.owner.idSlots.hasKey(identity):
+        staleColorMotions.add(identity)
+    for identity in staleColorMotions:
+      c.owner.colorMotions.del(identity)
     var staleKeyframes: seq[uint64]
     for identity in c.owner.keyframes.keys:
       if not c.owner.idSlots.hasKey(identity):

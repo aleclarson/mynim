@@ -31,6 +31,9 @@ var finiteSettled: bool
 var playLoop = false
 var loopValue: float32
 var loopSettled: bool
+var colorTarget = ui.rgba(255, 0, 0, 1)
+var colorValue: ui.Color
+var colorSettled: bool
 var finiteFrames = @[
   ui.Keyframe(value: 0),
   ui.Keyframe(at: initDuration(milliseconds = 100), value: 10)]
@@ -63,6 +66,9 @@ let uiContent = ui.newContent(proc(ctx: ui.Context) =
     loopValue = box.keyframes("loop", loopFrames,
       ui.KeyframeOptions(repeat: ui.RepeatForever, alternate: true))
     loopSettled = box.settled("loop")
+  colorValue = box.animateColor("color", colorTarget,
+    ui.Animation(duration: initDuration(milliseconds = 180)))
+  colorSettled = box.settled("color")
   discard ctx.switch(on).label("Enabled")
 )
 let win = newWindow(WindowOptions(width: 200, height: 80, hidden: true,
@@ -167,6 +173,21 @@ discard native.send(platform.SurfaceEvent(kind: platform.surfaceResize))
 doAssert native.frame()
 doAssert loopValue == 0
 doAssert loopSettled
+
+colorTarget = ui.rgba(0, 0, 255, 0)
+discard native.send(platform.SurfaceEvent(kind: platform.surfaceResize))
+doAssert native.frame()
+doAssert colorValue == ui.rgba(255, 0, 0, 1)
+doAssert not colorSettled
+sleep(100)
+doAssert native.frame()
+doAssert colorValue.r >= 250 and colorValue.b <= 1
+doAssert colorValue.a > 0 and colorValue.a < 255
+doAssert not colorSettled
+sleep(120)
+doAssert native.frame()
+doAssert colorValue == colorTarget
+doAssert colorSettled
 
 win.destroy()
 loop.shutdown()
