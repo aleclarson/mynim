@@ -198,6 +198,7 @@ type
       focusRingDisabled, scrollX, scrollY,
       revealInScroll, rightToLeft, directionSet: bool
     focusGroupSet, groupSelects: bool
+    tabStopSet, tabStop: bool
     formContainer, formField, formLabel, accessHidden, disabled,
       invalid, tooltipEnabled, tooltipOverlay, passThrough: bool
     focusOrientation: FocusOrientation
@@ -225,7 +226,7 @@ type
     tooltipText: string
     tooltipBuild: proc(tip: Element) {.closure.}
     labelTargetSlot, fieldLabelSlot, fieldContentSlot,
-      fieldControlSlot: int32
+      fieldControlSlot, focusTargetSlot: int32
     textValue: string
     placeholder: string
     textStyle: textStack.Style

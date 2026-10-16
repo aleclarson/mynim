@@ -203,6 +203,12 @@ proc focusableSlot(layout: LayoutResult; slot: int): bool =
   let node = owner.nodes[slot]
   node.focusable or node.clickHandler != nil
 
+proc tabStopSlot(layout: LayoutResult; slot: int): bool =
+  if not layout.focusableSlot(slot):
+    return false
+  let node = layout.owner.nodes[slot]
+  not node.tabStopSet or node.tabStop
+
 proc clickableSlot(layout: LayoutResult; slot: int): bool =
   let owner = layout.owner
   owner != nil and not owner.closed and not owner.inBuild and owner.hasFrame and
@@ -288,7 +294,7 @@ proc nextFocusSlot(rt: Runtime; layout: LayoutResult; current: int;
       if slot > last:
         slot = 1
     let candidateGroup = layout.focusGroupOf(slot)
-    if layout.focusableSlot(slot) and
+    if layout.tabStopSlot(slot) and
         (currentGroup < 0 or candidateGroup != currentGroup) and
         rt.isFocusGroupTabStop(layout, slot):
       return slot
@@ -1953,9 +1959,14 @@ proc event(rt: Runtime; ev: platform.SurfaceEvent): bool =
       var slot = int(rt.pressTarget.slot)
       if rt.pressTarget.owner == rt.frameLayout.owner and
           slot > 0 and slot < rt.frameLayout.owner.nodes.len:
+        let focusTarget = int(
+          rt.frameLayout.owner.nodes[slot].focusTargetSlot)
         let labelTarget = int(
           rt.frameLayout.owner.nodes[slot].labelTargetSlot)
-        if labelTarget > 0 and
+        if focusTarget > 0 and
+            focusTarget < rt.frameLayout.owner.nodes.len:
+          slot = focusTarget
+        elif labelTarget > 0 and
             labelTarget < rt.frameLayout.owner.nodes.len:
           slot = labelTarget
       if rt.pressTarget.owner == rt.frameLayout.owner and
@@ -2161,7 +2172,11 @@ proc event(rt: Runtime; ev: platform.SurfaceEvent): bool =
       if result:
         let clickedSlot = int(ev.id - 1)
         let targetNode = rt.frameLayout.owner.nodes[clickedSlot]
-        rt.focusSlot = if targetNode.listState != nil and
+        let focusTarget = int(targetNode.focusTargetSlot)
+        rt.focusSlot = if focusTarget > 0 and
+            focusTarget < rt.frameLayout.owner.nodes.len:
+          focusTarget
+        elif targetNode.listState != nil and
             targetNode.listRowIndex >= 0:
           int(targetNode.listState.frameSlot)
         else:

@@ -2583,6 +2583,14 @@ proc focusable*(e: Element): Element =
   if n != nil:
     n.focusable = true
 
+proc tabStop*(e: Element; enabled = true): Element =
+  ## Includes or excludes a focusable element from sequential Tab navigation.
+  result = e
+  let n = e.node
+  if n != nil:
+    n.tabStopSet = true
+    n.tabStop = enabled
+
 proc focusRing*(e: Element; show = true): Element =
   ## Shows the theme focus ring for keyboard focus, unless disabled here.
   result = e
@@ -3352,34 +3360,48 @@ proc radioBase*[T](c: Context; selected: var T; value: T): Element =
     if selected == value:
       n.accessExtraStates = n.accessExtraStates or platform.accessChecked
 
+proc delegatedControl(e: Element): Element
+
 proc changed*(e: Element): bool =
   ## Reports a value change delivered to this element in the current build.
-  let n = e.node
+  let n = e.delegatedControl().node
   n != nil and n[].changed
 
 proc submitted*(e: Element): bool =
   ## Reports a submission delivered to this element in the current build.
-  let n = e.node
+  let n = e.delegatedControl().node
   n != nil and n[].submitted
+
+proc delegatedControl(e: Element): Element =
+  result = e
+  let n = e.node
+  if n == nil:
+    return
+  let slot = int(n[].fieldControlSlot)
+  if slot > 0 and slot < e.owner.nodes.len:
+    result = Element(owner: e.owner, slot: uint32(slot),
+                     generation: e.generation)
 
 proc onChange*(e: Element; action: proc() {.closure.}): Element =
   ## Runs when input changes this element. Bound controls report synchronous
   ## edits during the build; text-field edits report after syncing on next build.
   result = e
-  let n = e.node
+  let target = e.delegatedControl()
+  let n = target.node
   if n != nil and action != nil:
-    e.owner.actions.add(UiAction(identity: n[].identity,
-      generation: e.generation, kind: actionChange, action: action))
+    target.owner.actions.add(UiAction(identity: n[].identity,
+      generation: target.generation, kind: actionChange, action: action))
     if n[].valueChangedInBuild:
       action()
 
 proc onSubmit*(e: Element; action: proc() {.closure.}): Element =
   ## Runs when Enter submits the focused text input on this element.
   result = e
-  let n = e.node
+  let target = e.delegatedControl()
+  let n = target.node
   if n != nil and action != nil:
-    e.owner.actions.add(UiAction(identity: n[].identity,
-      generation: e.generation, kind: actionSubmit, action: action))
+    target.owner.actions.add(UiAction(identity: n[].identity,
+      generation: target.generation, kind: actionSubmit, action: action))
 
 proc onShortcut*(e: Element; mods: platform.Modifiers; key: platform.Key;
                  action: proc() {.closure.}): Element =
@@ -3394,7 +3416,7 @@ proc onShortcut*(e: Element; mods: platform.Modifiers; key: platform.Key;
 proc label*(e: Element; value: string): Element =
   ## Gives an element an accessible name.
   result = e
-  let n = e.node
+  let n = e.delegatedControl().node
   if n != nil:
     n.label = value
 
