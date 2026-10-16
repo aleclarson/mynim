@@ -2116,6 +2116,17 @@ proc updateToolbarOverflow(owner: ElementOwner; natural: seq[NaturalSize];
       owner.nodes[more].absolute = true
       result = true
 
+proc gridColumns(width, minWidth, gap: float32; itemCount: int): int =
+  if minWidth <= 0:
+    return 1
+  let available = max(float64(width), 0.0)
+  let unit = float64(minWidth) + float64(gap)
+  let fit = floor((available + float64(gap)) / unit)
+  let limit = max(itemCount, 1)
+  if fit >= float64(limit):
+    return limit
+  max(int(fit), 1)
+
 proc layoutAt(c: Context; bounds: Rect; now: MonoTime;
               reduceMotion: bool): LayoutResult =
   ## Lays out the latest completed build inside bounds.
@@ -2202,6 +2213,22 @@ proc layoutAt(c: Context; bounds: Rect; now: MonoTime;
     for slot in 0..<result.rects.len:
       result.rects[slot] = c.owner.rectScratch[slot]
       let node = c.owner.nodes[slot]
+      if node.gridViewState != nil:
+        let state = node.gridViewState
+        let contentWidth = max(result.rects[slot].w - node.contentInsetX,
+          0'f32)
+        let columns = gridColumns(contentWidth, node.gridMinWidth,
+          node.gridGap, state.itemCount)
+        if columns != state.columns:
+          let previousColumns = state.columns
+          if previousColumns > 0 and state.rows != nil:
+            let visible = state.rows.visible()
+            if visible.first >= 0:
+              let firstItem = int64(visible.first) * int64(previousColumns)
+              state.rows.scrollTo(int(firstItem div int64(columns)),
+                Align.Start)
+          state.columns = columns
+          result.animating = true
       if node.listState != nil and
           node.listState.frameOwner == cast[pointer](c.owner) and
           node.listState.frameSlot == int32(slot) and

@@ -35,6 +35,7 @@ include mynim/ui/paragraph_heights
 include mynim/ui/text_input
 include mynim/ui/direction
 include mynim/ui/list
+include mynim/ui/gridview
 include mynim/ui/paint
 include mynim/ui/widgets
 include mynim/ui/toolbar

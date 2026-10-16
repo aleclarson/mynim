@@ -273,6 +273,23 @@ type
     frameSlot: int32
     generation: uint32
 
+  GridItemKey* = proc(item: int): string {.closure.}
+    ## Returns a stable, unique identity for a GridView item.
+  GridItemLabel* = proc(item: int): string {.closure.}
+    ## Returns an item's accessible name.
+  GridState* = ref object
+    ## Retained selection, column count, and scroll position for GridView.
+    selectedItem: int
+    itemKey*: GridItemKey
+    itemLabel*: GridItemLabel
+    columns*: int
+    selectable*: bool
+    rows: ListState
+    itemCount: int
+    itemHeight, gap: float32
+    rightToLeft: bool
+    pendingChanged, pendingSubmitted: bool
+
   ScrollbarDrag = object
     state: ScrollState
     horizontal, rightToLeft: bool

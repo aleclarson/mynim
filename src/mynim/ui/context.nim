@@ -310,6 +310,8 @@ type
     focusGroupSet, groupSelects: bool
     toolbarCollapsed, toolbarMore: bool
     toolbarState: ToolbarState
+    gridViewState: GridState
+    gridMinWidth, gridGap: float32
     modal, autoFocus: bool
     modalScopeIdentity, overlayOwnerIdentity: uint64
     dialogState: DialogState
