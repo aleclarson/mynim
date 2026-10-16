@@ -16,4 +16,5 @@ task compilecli, "Build the MyGo CLI with checks enabled":
 
 task verify, "Typecheck the library and CLI":
   exec "nim check src/mynim.nim"
+  exec "nim check src/mynim/audio.nim"
   exec "nim check src/cmd/mygo.nim"
