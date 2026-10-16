@@ -20,6 +20,8 @@ type
     focusSlot, keyPressSlot: int
     keyPressKey: platform.Key
     focusGroupLast: Table[uint64, uint64]
+    modalFocusReturns: Table[uint64, uint64]
+    activeModalIdentity: uint64
     listReorder, tableReorder: ListState
     pointerCursor: platform.Cursor
     hasPointerCursor: bool
@@ -488,7 +490,7 @@ proc dismissPopover(rt: Runtime): bool =
     return false
   for slot in countdown(owner.nodes.high, 1):
     let state = owner.nodes[slot].popoverState
-    if state != nil and state.open:
+    if state != nil and state.open and owner.inActiveModalScope(slot):
       let anchorSlot = owner.idSlots.getOrDefault(state.anchorIdentity, -1)
       if not owner.isWithinNode(slot, rt.focusSlot) and
           not owner.isWithinNode(anchorSlot, rt.focusSlot):
@@ -504,7 +506,8 @@ proc dismissPopoverOutside(rt: Runtime; x, y: float32): bool =
     return false
   for slot in countdown(owner.nodes.high, 1):
     let state = owner.nodes[slot].popoverState
-    if state == nil or not state.open:
+    if state == nil or not state.open or
+        not owner.inActiveModalScope(slot):
       continue
     let anchorSlot = owner.idSlots.getOrDefault(state.anchorIdentity, -1)
     let inPanel = slot < layout.rects.len and
@@ -517,6 +520,20 @@ proc dismissPopoverOutside(rt: Runtime; x, y: float32): bool =
     state.pendingDismiss = true
     rt.requestFrame()
     return true
+
+proc dismissModal(rt: Runtime): bool =
+  let owner = rt.frameLayout.owner
+  if owner == nil or owner.activeModalIdentity == 0:
+    return false
+  for slot in countdown(owner.nodes.high, 1):
+    let node = owner.nodes[slot]
+    if not node.modal or node.identity != owner.activeModalIdentity:
+      continue
+    if node.dialogState != nil and node.dialogState.dismissOnEscape:
+      node.dialogState.pendingDismiss = true
+      rt.requestFrame()
+      return true
+    return false
 
 proc accessibilityTree(layout: LayoutResult;
                       focusSlot: int): platform.AccessTree =
@@ -531,7 +548,7 @@ proc accessibilityTree(layout: LayoutResult;
     index = -1
   for slot in 1..<owner.nodes.len:
     let node = owner.nodes[slot]
-    if node.accessHidden:
+    if node.accessHidden or not owner.inActiveModalScope(slot):
       continue
     let isDisabled = owner.effectivelyDisabled(slot)
     let image = node.bitmap != nil or node.vector != nil
@@ -566,7 +583,12 @@ proc accessibilityTree(layout: LayoutResult;
     var label = node.label
     if label.len == 0 and node.hasText and not node.textOverlay:
       label = node.textValue
-    let parentSlot = int(node.parent)
+    var parentSlot = int(node.parent)
+    if node.overlayOwnerIdentity != 0:
+      let logicalParent = owner.idSlots.getOrDefault(
+        node.overlayOwnerIdentity, -1)
+      if logicalParent >= 0:
+        parentSlot = logicalParent
     if node.rangeSliderThumb and parentSlot > 0 and
         parentSlot < owner.nodes.len and owner.nodes[parentSlot].label.len > 0:
       label = owner.nodes[parentSlot].label & " " & label
@@ -733,6 +755,73 @@ proc applyHandleFocusRequests(rt: Runtime; layout: LayoutResult): bool =
   rt.requestFrame()
   true
 
+proc modalInitialFocus(layout: LayoutResult): int =
+  let owner = layout.owner
+  if owner == nil or owner.activeModalIdentity == 0:
+    return -1
+  var firstTabStop = -1
+  var fallback = -1
+  for slot in 1..<owner.nodes.len:
+    if not layout.focusableSlot(slot):
+      continue
+    let node = owner.nodes[slot]
+    if node.autoFocus:
+      return slot
+    if fallback < 0:
+      fallback = slot
+    if firstTabStop < 0 and layout.tabStopSlot(slot):
+      firstTabStop = slot
+  if firstTabStop > 0: firstTabStop else: fallback
+
+proc setRuntimeFocus(rt: Runtime; layout: LayoutResult; slot: int) =
+  let owner = layout.owner
+  if owner == nil:
+    return
+  for index in 1..<owner.nodes.len:
+    owner.nodes[index].focused = false
+    owner.nodes[index].focusVisible = false
+  owner.focusedSlots.setLen(0)
+  owner.focusVisibleSlots.setLen(0)
+  rt.focusSlot = -1
+  rt.keyboardFocusVisible = false
+  if slot > 0 and slot < owner.nodes.len and layout.focusableSlot(slot):
+    rt.focusSlot = slot
+    owner.nodes[slot].focused = true
+    owner.focusedSlots.add(slot)
+    owner.focusIdentity = owner.nodes[slot].identity
+    if layout.revealSlot(slot):
+      rt.requestFrame()
+  else:
+    owner.focusIdentity = 0
+  rt.cancelKeyPress()
+  rt.requestFrame()
+
+proc applyModalFocus(rt: Runtime; layout: LayoutResult;
+                     previousFocusIdentity: uint64) =
+  let owner = layout.owner
+  if owner == nil:
+    return
+  let previousModal = rt.activeModalIdentity
+  let modal = owner.activeModalIdentity
+  var target = -1
+  if modal != previousModal:
+    if modal != 0 and not rt.modalFocusReturns.hasKey(modal):
+      rt.modalFocusReturns[modal] = previousFocusIdentity
+    if previousModal != 0 and rt.modalFocusReturns.hasKey(previousModal):
+      let savedIdentity = rt.modalFocusReturns[previousModal]
+      let savedSlot = owner.idSlots.getOrDefault(savedIdentity, -1)
+      if savedSlot > 0 and (modal == 0 or
+          owner.nodes[savedSlot].modalScopeIdentity == modal):
+        target = savedSlot
+        rt.modalFocusReturns.del(previousModal)
+
+  if target < 0 and modal != 0 and
+      not layout.focusableSlot(rt.focusSlot):
+    target = layout.modalInitialFocus()
+  if target > 0:
+    rt.setRuntimeFocus(layout, target)
+  rt.activeModalIdentity = modal
+
 proc runShortcutAction(rt: Runtime; mods: platform.Modifiers;
                       key: platform.Key): bool =
   let owner = rt.context.owner
@@ -750,6 +839,9 @@ proc runShortcutAction(rt: Runtime; mods: platform.Modifiers;
         shortcut.identity == 0 or shortcut.generation != owner.generation:
       continue
     if owner.idSlots.getOrDefault(shortcut.identity, -1) < 0:
+      continue
+    let shortcutSlot = owner.idSlots.getOrDefault(shortcut.identity, -1)
+    if not owner.inActiveModalScope(shortcutSlot):
       continue
     if focusedIdentity == 0:
       if shortcut.identity == rootIdentity and bestDistance > 0:
@@ -1695,6 +1787,7 @@ proc renderFrame(rt: Runtime; presentFrame = true) =
       previousIdentities[rt.focusSlot]
     else:
       0'u64
+  let previousFocusIdentity = previousOwner.focusIdentity
   previousOwner.previousInteraction.clear()
   previousOwner.rememberInteraction(previousIdentities, rt.hoverSlots,
     identityHovered)
@@ -1773,6 +1866,7 @@ proc renderFrame(rt: Runtime; presentFrame = true) =
       layout.owner.nodes[slot].focused = false
       layout.owner.nodes[slot].focusVisible = false
     rt.requestFrame()
+  rt.applyModalFocus(layout, previousFocusIdentity)
   rt.frameLayout = layout
   rt.updatePointerCursor()
   if presentFrame and rt.listReorder != nil and
@@ -1979,8 +2073,22 @@ proc event(rt: Runtime; ev: platform.SurfaceEvent): bool =
         rt.refreshPointer()
         rt.requestFrame()
         return true
+      if rt.frameLayout.owner != nil and
+          rt.frameLayout.owner.activeModalIdentity != 0:
+        let fallback = if rt.frameLayout.focusableSlot(rt.focusSlot):
+            rt.focusSlot
+          else:
+            rt.frameLayout.modalInitialFocus()
+        if fallback > 0:
+          rt.setRuntimeFocus(rt.frameLayout, fallback)
+          rt.keyboardFocusVisible = true
+          rt.frameLayout.owner.nodes[fallback].focusVisible = true
+          rt.frameLayout.owner.focusVisibleSlots = @[fallback]
+        return true
       return false
     if ev.key == platform.keyEscape and ev.mods == 0 and rt.dismissPopover():
+      return true
+    if ev.key == platform.keyEscape and ev.mods == 0 and rt.dismissModal():
       return true
     if rt.comboBoxKey(ev.key, ev.mods):
       return true
@@ -2551,7 +2659,8 @@ method attachContent*(content: Content; conn: surface.Conn) =
   let rt = Runtime(conn: conn, view: content.view, context: newContext(),
                    focusSlot: -1, keyPressSlot: -1, surfaceFocused: true,
                    themeDirty: true,
-                   focusGroupLast: initTable[uint64, uint64]())
+                   focusGroupLast: initTable[uint64, uint64](),
+                   modalFocusReturns: initTable[uint64, uint64]())
   rt.context.owner.focusActive = true
   let frameSurface = conn.surface
   rt.context.owner.invalidate = proc() =

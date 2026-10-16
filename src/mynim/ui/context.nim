@@ -96,6 +96,10 @@ type
     anchorIdentity: uint64
     open, pendingDismiss: bool
 
+  DialogState = ref object
+    pendingDismiss, dismissOnEscape: bool
+    seenGeneration: uint32
+
   ComboBoxState = ref object
     query, lastSelected, pendingChoice, shownOption: string
     options, visibleOptions: seq[string]
@@ -142,6 +146,9 @@ type
     stepperRepeats: Table[uint64, StepperRepeat]
     numberInputStates: Table[uint64, NumberInputState]
     popoverStates: Table[uint64, PopoverState]
+    dialogStates: Table[uint64, DialogState]
+    dialogOrdinals: Table[uint64, uint64]
+    activeModalIdentity: uint64
     comboBoxStates: Table[uint64, ComboBoxState]
     toasts: seq[ToastEntry]
     toastState: ToastState
@@ -246,6 +253,10 @@ type
       focusRingDisabled, scrollX, scrollY,
       revealInScroll, rightToLeft, directionSet: bool
     focusGroupSet, groupSelects: bool
+    modal, autoFocus: bool
+    modalScopeIdentity, overlayOwnerIdentity: uint64
+    dialogState: DialogState
+    dialogDismissed: bool
     tabStopSet, tabStop: bool
     formContainer, formField, formLabel, accessHidden, disabled,
       invalid, tooltipEnabled, tooltipOverlay, passThrough: bool
@@ -455,6 +466,8 @@ proc newContext*(): Context =
   result.owner.stepperRepeats = initTable[uint64, StepperRepeat]()
   result.owner.numberInputStates = initTable[uint64, NumberInputState]()
   result.owner.popoverStates = initTable[uint64, PopoverState]()
+  result.owner.dialogStates = initTable[uint64, DialogState]()
+  result.owner.dialogOrdinals = initTable[uint64, uint64]()
   result.owner.comboBoxStates = initTable[uint64, ComboBoxState]()
   result.owner.toastState = ToastState()
   result.owner.rangeSliderDrags = initTable[uint64, int8]()
@@ -805,6 +818,9 @@ proc retire(owner: ElementOwner) =
   owner.stepperRepeats.clear()
   owner.numberInputStates.clear()
   owner.popoverStates.clear()
+  owner.dialogStates.clear()
+  owner.dialogOrdinals.clear()
+  owner.activeModalIdentity = 0
   owner.comboBoxStates.clear()
   owner.toasts.setLen(0)
   owner.announcements.setLen(0)
@@ -846,9 +862,16 @@ proc node(e: Element): ptr ElementNode =
     return nil
   addr e.owner.nodes[int(e.slot)]
 
+proc inActiveModalScope(owner: ElementOwner; slot: int): bool =
+  owner != nil and slot > 0 and slot < owner.nodes.len and
+    (owner.activeModalIdentity == 0 or
+     owner.nodes[slot].modalScopeIdentity == owner.activeModalIdentity)
+
 proc effectivelyDisabled(owner: ElementOwner; slot: int): bool =
   if owner == nil or slot <= 0 or slot >= owner.nodes.len:
     return false
+  if not owner.inActiveModalScope(slot):
+    return true
   var current = slot
   while current > 0 and current < owner.nodes.len:
     if owner.nodes[current].disabled:
@@ -953,6 +976,8 @@ proc newElement(c: Context; row: bool;
                          lastChild: -1, nextSibling: -1,
                          identity: childIdentity(parentIdentity,
                            childOrdinal, identityKind),
+                         modalScopeIdentity:
+                           c.owner.nodes[parentSlot].modalScopeIdentity,
                          row: row,
                          rightToLeft:
                            c.owner.nodes[parentSlot].rightToLeft,
@@ -1127,6 +1152,8 @@ proc build*(c: Context; view: proc(c: Context) {.closure.}) =
     c.owner.stepperRepeats = initTable[uint64, StepperRepeat]()
     c.owner.numberInputStates = initTable[uint64, NumberInputState]()
     c.owner.popoverStates = initTable[uint64, PopoverState]()
+    c.owner.dialogStates = initTable[uint64, DialogState]()
+    c.owner.dialogOrdinals = initTable[uint64, uint64]()
     c.owner.comboBoxStates = initTable[uint64, ComboBoxState]()
     c.owner.toastState = ToastState()
     c.owner.toasts.setLen(0)
@@ -1153,6 +1180,8 @@ proc build*(c: Context; view: proc(c: Context) {.closure.}) =
   inc c.owner.generation
   c.owner.frameNow = getMonoTime()
   c.owner.animating = false
+  c.owner.activeModalIdentity = 0
+  c.owner.dialogOrdinals.clear()
   c.owner.actions.setLen(0)
   c.owner.nodes.setLen(0)
   c.owner.idSlots.clear()
@@ -1180,6 +1209,9 @@ proc build*(c: Context; view: proc(c: Context) {.closure.}) =
       view(c)
     c.buildTooltips()
     c.buildToasts()
+    for slot in 1..<c.owner.nodes.len:
+      if c.owner.nodes[slot].modal:
+        c.owner.activeModalIdentity = c.owner.nodes[slot].identity
     for index in 0..<c.owner.actions.len:
       if c.owner.actions[index].kind == actionShortcut and
           c.owner.actions[index].handle != nil:
@@ -1227,6 +1259,12 @@ proc build*(c: Context; view: proc(c: Context) {.closure.}) =
         staleKeyframes.add(identity)
     for identity in staleKeyframes:
       c.owner.keyframes.del(identity)
+    var staleDialogs: seq[uint64]
+    for identity, state in c.owner.dialogStates:
+      if state == nil or state.seenGeneration != c.owner.generation:
+        staleDialogs.add(identity)
+    for identity in staleDialogs:
+      c.owner.dialogStates.del(identity)
     var staleStepperRepeats: seq[uint64]
     for identity in c.owner.stepperRepeats.keys:
       let slot = c.owner.idSlots.getOrDefault(identity, -1)

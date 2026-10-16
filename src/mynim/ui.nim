@@ -56,6 +56,7 @@ include mynim/ui/search_field
 include mynim/ui/tooltip
 include mynim/ui/overlay
 include mynim/ui/popover
+include mynim/ui/dialog
 include mynim/ui/combobox
 include mynim/ui/toast
 include mynim/ui/runtime

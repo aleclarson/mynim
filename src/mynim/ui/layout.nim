@@ -2236,7 +2236,8 @@ proc targetAt(layout: LayoutResult; x, y: float32): Element =
         layout.owner.paintSlots[orderIndex]
       else:
         orderIndex
-    if slot > 0 and not layout.pointerTransparent(slot) and
+    if slot > 0 and layout.owner.inActiveModalScope(slot) and
+        not layout.pointerTransparent(slot) and
         layout.rects[slot].contains(x, y) and
         layout.insideClips(slot, x, y):
       let target = Element(owner: layout.owner, slot: uint32(slot),
@@ -2449,7 +2450,8 @@ proc slotsAt(layout: LayoutResult; x, y: float32): seq[int] =
       layout.rects.len != layout.owner.nodes.len:
     return
   for slot in 1..<layout.rects.len:
-    if not layout.pointerTransparent(slot) and
+    if layout.owner.inActiveModalScope(slot) and
+        not layout.pointerTransparent(slot) and
         layout.rects[slot].contains(x, y) and
         layout.insideClips(slot, x, y):
       result.add(slot)
@@ -2621,6 +2623,14 @@ proc focusable*(e: Element): Element =
   let n = e.node
   if n != nil:
     n.focusable = true
+
+proc autoFocus*(e: Element): Element =
+  ## Gives a newly opened modal focus here before its first Tab press.
+  result = e
+  let n = e.node
+  if n != nil:
+    n.focusable = true
+    n.autoFocus = true
 
 proc tabStop*(e: Element; enabled = true): Element =
   ## Includes or excludes a focusable element from sequential Tab navigation.
