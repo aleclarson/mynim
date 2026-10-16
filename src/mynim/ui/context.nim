@@ -373,7 +373,9 @@ type
     overlayAnchorIdentity: uint64
     overlayGap: float32
     # Overlay text is painted but excluded from the node's natural size.
-    hasText, textNoWrap, textColorSet, textOverlay, listRowSelected,
+    hasText, textNoWrap, textColorSet, textOverlay, textInline,
+      textInlineParagraph, textFamilySet, textSizeSet, textWeightSet,
+      textItalicSet, backgroundSet, listRowSelected,
       listRowFocusVisible, listRowHeader, listRowPinnedHeader, icon: bool
     textMaxLines: int
     listRowAction: bool
@@ -404,9 +406,14 @@ type
     labelTargetSlot, fieldLabelSlot, fieldContentSlot,
       fieldControlSlot, focusTargetSlot: int32
     textValue: string
+    textOwnValue: string
     textSpans: seq[Span]
+    textOwnSpans: seq[Span]
     textSpanEnds: seq[int]
     textSpanStyles: string
+    textInlineRoot: int32
+    textInlineStart, textInlineEnd: int
+    textInlineRects: seq[Rect]
     placeholder: string
     textStyle: textStack.Style
     textColor, textSelectionColor: Color
@@ -1305,6 +1312,7 @@ proc text*(c: Context; value: string): Element =
   if n != nil:
     n.hasText = true
     n.textValue = value
+    n.textOwnValue = value
     n.textColor = if c.themeEnabled: c.theme.text else: rgb(0, 0, 0)
     if c.themeEnabled:
       if c.theme.font.len > 0:

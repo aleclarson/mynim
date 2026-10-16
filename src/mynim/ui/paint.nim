@@ -15,6 +15,7 @@ proc background*(e: Element; color: Color): Element =
   let n = e.node
   if n != nil:
     n.background = color
+    n.backgroundSet = true
     n.hasGradient = false
 
 proc opacity*(e: Element; value: float32): Element =
@@ -390,7 +391,7 @@ proc paintRichDecorations(s: scene.Scene; node: ElementNode; textColor: Color;
 proc paintText(s: scene.Scene; node: ElementNode; textColor: Color;
                rect, root: Rect; scale, opacity: float32;
                system: textStack.System) =
-  if not node.hasText or node.shapedText == nil:
+  if not node.hasText or node.textInline or node.shapedText == nil:
     return
   if textColor.a == 0:
     var spanPaints = false
@@ -788,13 +789,14 @@ proc paintListReorderIndicator(sceneFrame: scene.Scene; layout: LayoutResult;
   for _ in 0..<clips:
     sceneFrame.ops.add(scene.Op(kind: scene.opPopClip))
 
-proc paintFocusRing(sceneFrame: scene.Scene; layout: LayoutResult;
-                    slot: int; scale: float32; inset = false) =
+proc paintFocusRingRect(sceneFrame: scene.Scene; layout: LayoutResult;
+                        slot: int; boundsDip: Rect; scale: float32;
+                        inset: bool) =
   let node = layout.owner.nodes[slot]
   let color = node.focusRingColor
   if color.a == 0:
     return
-  let bounds = layout.rects[slot].sceneRect(layout.root, scale)
+  let bounds = boundsDip.sceneRect(layout.root, scale)
   let expand = 3'f32.scaled(scale)
   let width = 2'f32.scaled(scale)
   var rect = bounds
@@ -830,6 +832,16 @@ proc paintFocusRing(sceneFrame: scene.Scene; layout: LayoutResult;
   sceneFrame.ops.add(op)
   for _ in 0..<clips:
     sceneFrame.ops.add(scene.Op(kind: scene.opPopClip))
+
+proc paintFocusRing(sceneFrame: scene.Scene; layout: LayoutResult;
+                    slot: int; scale: float32; inset = false) =
+  let node = layout.owner.nodes[slot]
+  if node.textInline:
+    for rect in node.textInlineRects:
+      sceneFrame.paintFocusRingRect(layout, slot, rect, scale, inset)
+  else:
+    sceneFrame.paintFocusRingRect(layout, slot, layout.rects[slot], scale,
+      inset)
 
 proc collectPaintOrder(nodes: seq[ElementNode]; slot: int;
                        order: var seq[int]) =
@@ -885,11 +897,14 @@ proc paintScene*(layout: LayoutResult; scale = 1'f32;
           continue
         let fill = if node.hasGradient: node.gradient.fromColor else: node.background
         let fill2 = if node.hasGradient: node.gradient.toColor else: transparent
-        let fillVisible = if node.hasGradient:
+        let fillVisible = if node.textInline:
+            false
+          elif node.hasGradient:
             fill.a > 0 or fill2.a > 0
           else:
             fill.a > 0
-        let borderVisible = node.borderColor.a > 0 and scene.hasBorder(node.border)
+        let borderVisible = not node.textInline and
+          node.borderColor.a > 0 and scene.hasBorder(node.border)
         if not fillVisible and not borderVisible and node.shadows.len == 0 and
             not node.hasText and
             node.bitmap == nil and node.vector == nil:
@@ -909,7 +924,7 @@ proc paintScene*(layout: LayoutResult; scale = 1'f32;
             inc clipCount
           parent = int(layout.owner.nodes[parent].parent)
         for shadow in node.shadows:
-          if not shadow.inset:
+          if not node.textInline and not shadow.inset:
             result.paintShadow(node, layout.rects[slot], layout.root,
                                scale, opacity, shadow)
         if fillVisible or borderVisible:
@@ -938,7 +953,7 @@ proc paintScene*(layout: LayoutResult; scale = 1'f32;
           op.wide = result.addWide(wide)
           result.ops.add(op)
         for shadow in node.shadows:
-          if shadow.inset:
+          if not node.textInline and shadow.inset:
             result.paintShadow(node, layout.rects[slot], layout.root,
                                scale, opacity, shadow)
         let clipFieldText = node.textClient of TextFieldClient and

@@ -614,6 +614,13 @@ proc accessibilityTree(layout: LayoutResult;
         node.overlayOwnerIdentity, -1)
       if logicalParent >= 0:
         parentSlot = logicalParent
+    if node.textInline and node.clickHandler == nil and not node.focusable and
+        not node.accessRoleSet and node.label.len == 0:
+      accessIndex[slot] = if parentSlot >= 0 and parentSlot < accessIndex.len:
+          accessIndex[parentSlot]
+        else:
+          -1
+      continue
     if node.rangeSliderThumb and parentSlot > 0 and
         parentSlot < owner.nodes.len and owner.nodes[parentSlot].label.len > 0:
       label = owner.nodes[parentSlot].label & " " & label

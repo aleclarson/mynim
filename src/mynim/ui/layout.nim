@@ -67,9 +67,10 @@ proc crossSize(node: ElementNode; natural: NaturalSize; row: bool;
                align: Align): float32
 
 proc shapeText(nodes: var seq[ElementNode]) =
+  nodes.prepareInlineText()
   let system = textStack.shared()
   for node in nodes.mitems:
-    if not node.hasText:
+    if not node.hasText or node.textInline:
       continue
     let alignment = if node.textAlign == Align.Center:
         textStack.Center
@@ -88,7 +89,7 @@ proc shapeText(nodes: var seq[ElementNode]) =
 proc shapeTextToBounds(nodes: var seq[ElementNode]; rects: seq[Rect]): bool =
   let system = textStack.shared()
   for slot, node in nodes.mpairs:
-    if not node.hasText:
+    if not node.hasText or node.textInline:
       continue
     let width = max(rects[slot].w - node.contentInsetX, 0'f32)
     if width > 0 and node.shapedText.params.width != width:
@@ -551,7 +552,8 @@ proc measureTree(nodes: seq[ElementNode]; natural: var seq[NaturalSize];
     let previous = natural[slot]
     let node = nodes[slot]
     var contentW, contentH: float32
-    if node.hasText and not node.textOverlay and node.shapedText != nil:
+    if node.hasText and not node.textInline and not node.textOverlay and
+        node.shapedText != nil:
       contentW = node.shapedText.width
       contentH = node.shapedText.height
     if node.bitmap != nil and node.bitmap.image != nil:
@@ -578,28 +580,29 @@ proc measureTree(nodes: seq[ElementNode]; natural: var seq[NaturalSize];
     var child = int(node.firstChild)
     while child >= 0:
       let childNode = nodes[child]
-      let childSize = natural[child]
-      if not childNode.absolute and not node.grid:
-        if node.row:
-          let basis = childNode.basis.resolve(-1)
-          let mainW = if basis.ok:
-              childNode.clampWidth(basis.value, -1)
-            else:
-              childSize.w
-          contentW += mainW + childNode.marginX
-          contentH = max(contentH, childSize.h + childNode.marginY)
-        else:
-          contentW = max(contentW, childSize.w + childNode.marginX)
-          let basis = childNode.basis.resolve(-1)
-          let mainH = if basis.ok:
-              childNode.clampHeight(basis.value, -1)
-            else:
-              childSize.h
-          contentH += mainH + childNode.marginY
-        inc childCount
+      if not childNode.textInline:
+        let childSize = natural[child]
+        if not childNode.absolute and not node.grid:
+          if node.row:
+            let basis = childNode.basis.resolve(-1)
+            let mainW = if basis.ok:
+                childNode.clampWidth(basis.value, -1)
+              else:
+                childSize.w
+            contentW += mainW + childNode.marginX
+            contentH = max(contentH, childSize.h + childNode.marginY)
+          else:
+            contentW = max(contentW, childSize.w + childNode.marginX)
+            let basis = childNode.basis.resolve(-1)
+            let mainH = if basis.ok:
+                childNode.clampHeight(basis.value, -1)
+              else:
+                childSize.h
+            contentH += mainH + childNode.marginY
+          inc childCount
       child = int(childNode.nextSibling)
 
-    if node.grid:
+    if node.grid and not node.textInlineParagraph:
       let gridNatural = measureGrid(nodes, natural, slot, constraints, scratch)
       contentW = max(contentW, gridNatural.w)
       contentH = max(contentH, gridNatural.h)
@@ -632,7 +635,7 @@ proc measureTree(nodes: seq[ElementNode]; natural: var seq[NaturalSize];
       while child >= 0:
         let childSlot = child
         let childNode = nodes[childSlot]
-        if not childNode.absolute:
+        if not childNode.absolute and not childNode.textInline:
           let childNatural = natural[childSlot]
           let basis = childNode.basis.resolve(mainLimit)
           let dimension = (if node.row: childNode.width else:
@@ -798,12 +801,13 @@ proc placeNode(nodes: seq[ElementNode]; natural: seq[NaturalSize];
   var child = int(node.firstChild)
   var totalChildren = 0
   while child >= 0:
-    inc totalChildren
+    if not nodes[child].textInline:
+      inc totalChildren
     child = int(nodes[child].nextSibling)
   if totalChildren == 0:
     return
 
-  if node.grid:
+  if node.grid and not node.textInlineParagraph:
     placeGridChildren(nodes, natural, rects, sizes, bases, minimum, maximum,
       factors, flexSlots, flexLines, gridScratch, slot, bounds)
     return
@@ -840,7 +844,7 @@ proc placeNode(nodes: seq[ElementNode]; natural: seq[NaturalSize];
   while child >= 0:
     let childSlot = child
     let childNode = nodes[childSlot]
-    if not childNode.absolute:
+    if not childNode.absolute and not childNode.textInline:
       let childNatural = natural[childSlot]
       let mainBase = childNode.basis.resolve(mainSize)
       let fallback = childNode.preferredMain(childNatural, row,
@@ -1084,7 +1088,7 @@ proc placeNode(nodes: seq[ElementNode]; natural: seq[NaturalSize];
   while child >= 0:
     let childSlot = child
     let childNode = nodes[childSlot]
-    if childNode.absolute:
+    if childNode.absolute and not childNode.textInline:
       placeAbsoluteChild(nodes, natural, rects, sizes, bases, minimum,
         maximum, factors, flexSlots, flexLines, gridScratch, slot, childSlot,
         bounds)
@@ -2211,6 +2215,7 @@ proc layoutAt(c: Context; bounds: Rect; now: MonoTime;
           c.owner.flexSizes, c.owner.flexBases, c.owner.flexMin,
           c.owner.flexMax, c.owner.flexFactors, c.owner.flexSlots,
           c.owner.flexLines, c.owner.gridScratch, 0, result.root)
+    placeInlineText(c.owner.nodes, c.owner.rectScratch)
     for slot in 0..<result.rects.len:
       result.rects[slot] = c.owner.rectScratch[slot]
       let node = c.owner.nodes[slot]
@@ -2339,6 +2344,7 @@ proc layoutAt(c: Context; bounds: Rect; now: MonoTime;
         current = int(c.owner.nodes[current].parent)
       if current == slot:
         result.rects[descendant].y += delta
+  placeInlineText(c.owner.nodes, result.rects)
   c.owner.committedRects = result.rects
   for slot, node in c.owner.nodes:
     if node.identity in c.owner.trackedBounds:
@@ -2399,6 +2405,16 @@ proc pointerTransparent(layout: LayoutResult; slot: int): bool =
       return true
     current = int(layout.owner.nodes[current].parent)
 
+proc containsPointer(layout: LayoutResult; slot: int;
+                     x, y: float32): bool =
+  let node = layout.owner.nodes[slot]
+  if node.textInline:
+    for rect in node.textInlineRects:
+      if rect.contains(x, y):
+        return true
+    return false
+  layout.rects[slot].contains(x, y)
+
 proc targetAt(layout: LayoutResult; x, y: float32): Element =
   if layout.owner == nil or layout.owner.closed or layout.owner.inBuild or
       not layout.owner.hasFrame or
@@ -2419,7 +2435,7 @@ proc targetAt(layout: LayoutResult; x, y: float32): Element =
     if slot > 0 and layout.owner.inActiveModalScope(slot) and
         not layout.owner.effectivelyToolbarCollapsed(slot) and
         not layout.pointerTransparent(slot) and
-        layout.rects[slot].contains(x, y) and
+        layout.containsPointer(slot, x, y) and
         layout.insideClips(slot, x, y):
       let target = Element(owner: layout.owner, slot: uint32(slot),
                            generation: layout.generation)
@@ -2634,7 +2650,7 @@ proc slotsAt(layout: LayoutResult; x, y: float32): seq[int] =
     if layout.owner.inActiveModalScope(slot) and
         not layout.owner.effectivelyToolbarCollapsed(slot) and
         not layout.pointerTransparent(slot) and
-        layout.rects[slot].contains(x, y) and
+        layout.containsPointer(slot, x, y) and
         layout.insideClips(slot, x, y):
       result.add(slot)
 
@@ -3349,6 +3365,7 @@ proc textSize*(e: Element; value: float32): Element =
         max(value, 0'f32)
       else:
         0'f32
+    n.textSizeSet = n.textStyle.size > 0
     if n.hasText or n.textClient != nil:
       e.propagateTextAreaStyle()
 
@@ -3370,6 +3387,7 @@ proc textFamily*(e: Element; value: string): Element =
   let n = e.node
   if n != nil and (n.hasText or n.textClient != nil):
     n.textStyle.family = value
+    n.textFamilySet = value.len > 0
     e.propagateTextAreaStyle()
 
 proc textWeight*(e: Element; value: int): Element =
@@ -3378,6 +3396,7 @@ proc textWeight*(e: Element; value: int): Element =
   let n = e.node
   if n != nil and (n.hasText or n.textClient != nil):
     n.textStyle.weight = if value <= 0: 0 else: max(100, min(value, 900))
+    n.textWeightSet = n.textStyle.weight > 0
     e.propagateTextAreaStyle()
 
 proc textItalic*(e: Element; value = true): Element =
@@ -3386,6 +3405,7 @@ proc textItalic*(e: Element; value = true): Element =
   let n = e.node
   if n != nil and (n.hasText or n.textClient != nil):
     n.textStyle.italic = value
+    n.textItalicSet = value
     e.propagateTextAreaStyle()
 
 proc textAlign*(e: Element; value: Align): Element =
