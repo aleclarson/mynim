@@ -1,6 +1,7 @@
 ## Command-line entry point for the Nim port of MyGo.
 
 import std/os
+import ./doctor
 
 const
   version = "0.1.0"
@@ -12,6 +13,7 @@ Usage:
 
 Commands:
 
+  doctor     check that the development environment is ready
   version    print the MyGo version
   help       print this help
 
@@ -28,8 +30,12 @@ proc run(args: seq[string]): int =
     stdout.writeLine("mygo " & version)
   of "help", "-h", "--help":
     stdout.write(usage)
+  of "doctor":
+    if args.len > 1:
+      return runDoctor(args[1 .. ^1])
+    return runDoctor(@[])
   of "init", "install-skills", "vet", "migrate-ui", "generate", "gen",
-     "dev", "i18n", "build", "doctor", "keygen":
+     "dev", "i18n", "build", "keygen":
     stderr.writeLine("mygo: command \"" & args[0] & "\" is not ported yet")
     return 1
   else:
