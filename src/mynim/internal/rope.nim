@@ -158,6 +158,30 @@ proc byteOfRune*(n: Node; index: int): int =
     dec index
   result + n.text.len
 
+proc runeOfByte*(n: Node; index: int): int =
+  ## The rune containing byte index, rounding down inside a UTF-8 rune.
+  let target = max(0, min(index, sum(n).bytes))
+  var remaining = target
+  var n = n
+  while n != nil and n.left != nil:
+    if remaining <= n.left.sum.bytes:
+      n = n.left
+    else:
+      remaining -= n.left.sum.bytes
+      result += n.left.sum.runes
+      n = n.right
+  if n == nil:
+    return
+  if n.sum.bytes == n.sum.runes:
+    return result + min(remaining, n.sum.bytes)
+  var at = 0
+  while at < remaining:
+    let next = at + n.text.runeLenAt(at)
+    if next > remaining:
+      break
+    at = next
+    inc result
+
 proc runeOfUnit*(n: Node; index: int): int =
   ## The rune holding UTF-16 unit index, or after it.
   var index = index

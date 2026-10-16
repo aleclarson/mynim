@@ -61,6 +61,28 @@ proc version*(snapshot: TextSnapshot): uint64 =
   ## Returns the buffer edit version captured by this snapshot.
   snapshot.version
 
+proc same*(a, b: TextSnapshot): bool =
+  ## Reports whether snapshots share the same persistent document root.
+  a.root == b.root
+
+proc byteOffset*(snapshot: TextSnapshot; runeIndex: int): int =
+  ## Maps a clamped rune offset to a UTF-8 byte offset.
+  textRope.byteOfRune(snapshot.root, runeIndex)
+
+proc runeOffsetAtByte*(snapshot: TextSnapshot; byteIndex: int): int =
+  ## Maps a clamped byte offset to its containing rune, rounding down.
+  textRope.runeOfByte(snapshot.root, byteIndex)
+
+proc byteSlice*(snapshot: TextSnapshot; start, pastLast: int): string =
+  ## Returns an exact clamped UTF-8 byte range.
+  let total = snapshot.byteLen()
+  let first = max(0, min(start, total))
+  let last = max(0, min(pastLast, total))
+  if first >= last:
+    return
+  result = newStringOfCap(last - first)
+  textRope.read(snapshot.root, first, last, result)
+
 proc len*(buffer: TextBuffer): int =
   ## Returns the current document's rune count.
   buffer.snapshot().len()
