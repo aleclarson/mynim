@@ -316,6 +316,29 @@ proc button*(c: Context; label: string): Element =
   ## Creates a themed button. Respond to activation with clicked() or onClick().
   c.themedButton(label, primary = false)
 
+proc menuButton*(c: Context; label: string;
+                 build: proc(menu: Menu) {.closure.}): Element =
+  ## Creates a themed button that opens a native menu.
+  let theme = c.theme
+  result = c.themedButton("", primary = false).label(label)
+  discard result.children(proc() =
+    discard c.text(label)
+    let arrow = c.text("▾").textColor(theme.textMuted)
+    let arrowNode = arrow.node
+    if arrowNode != nil:
+      arrowNode[].accessHidden = true
+  )
+  let node = result.node
+  if node != nil:
+    node[].accessRole = platform.roleMenuButton
+    node[].accessRoleSet = true
+    node[].menuBuilder = build
+    let openMenu = c.openMenu
+    let identity = node[].identity
+    node[].clickHandler = proc(mods: platform.Modifiers) =
+      if openMenu != nil:
+        openMenu(identity, build)
+
 proc primaryButton*(c: Context; label: string): Element =
   ## Creates an accent-colored button for the primary action.
   c.themedButton(label, primary = true)

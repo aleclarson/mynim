@@ -18,6 +18,8 @@ type
     localeTag: string
     region: surface.Region
     openURL: proc(url: string; done: proc(err: ref CatchableError)) {.closure.}
+    openMenu: proc(identity: uint64;
+                   build: proc(menu: Menu) {.closure.}) {.closure.}
     hasPendingKey: bool
     themeEnabled, themeBackground: bool
 
@@ -337,6 +339,7 @@ type
     textAreaOwner: platform.TextInputClient
     textAreaLine: int
     clickHandler: proc(mods: platform.Modifiers) {.closure.}
+    menuBuilder: proc(menu: Menu) {.closure.}
     accessRole: platform.AccessRole
     accessSort: platform.AccessStates
     accessExtraStates: platform.AccessStates

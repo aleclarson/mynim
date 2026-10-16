@@ -1825,6 +1825,8 @@ proc sliderKey(rt: Runtime; key: platform.Key;
   true
 
 proc autoScrollListReorder(rt: Runtime; state: ListState): bool
+proc showMenuButton(rt: Runtime; identity: uint64;
+                    build: proc(menu: Menu) {.closure.})
 
 proc renderFrame(rt: Runtime; presentFrame = true) =
   if rt.closed or rt.inFrame:
@@ -1851,6 +1853,9 @@ proc renderFrame(rt: Runtime; presentFrame = true) =
   rt.context.region = if rt.conn.region == nil: i18n.Region()
     else: rt.conn.region()
   rt.context.openURL = rt.conn.openURL
+  rt.context.openMenu = proc(identity: uint64;
+      build: proc(menu: Menu) {.closure.}) =
+    rt.showMenuButton(identity, build)
   rt.context.themeEnabled = true
   rt.context.themeBackground = false
 
@@ -2066,6 +2071,39 @@ proc showTableHeaderMenu(rt: Runtime; target: Element;
     )
   true
 
+proc showMenuButton(rt: Runtime; identity: uint64;
+                    build: proc(menu: Menu) {.closure.}) =
+  if rt.closed or rt.conn.popupMenu == nil or build == nil or
+      rt.frameLayout.owner == nil:
+    return
+  let owner = rt.frameLayout.owner
+  let slot = owner.idSlots.getOrDefault(identity, -1)
+  if slot <= 0 or slot >= rt.frameLayout.rects.len or
+      owner.effectivelyDisabled(slot):
+    return
+  let node = owner.nodes[slot]
+  let bounds = rt.frameLayout.rects[slot]
+  let menu = newUiMenu(0, "", node.rightToLeft)
+  build(menu)
+  if menu.snapshot.items.len == 0:
+    return
+  let x = if node.rightToLeft: bounds.x + bounds.w else: bounds.x
+  let y = bounds.y + bounds.h
+  rt.conn.popupMenu(menu.snapshot, float64(x), float64(y),
+    proc(id: int) =
+      if rt.closed:
+        return
+      var chosenLabel = ""
+      for item in menu.snapshot.items:
+        if item.id == id:
+          chosenLabel = item.label
+          break
+      let selection = newUiMenu(id, chosenLabel, node.rightToLeft)
+      build(selection)
+      if selection.session.choiceSeen:
+        rt.requestFrame()
+  )
+
 proc listReorderTarget(rt: Runtime; state: ListState) =
   if state == nil or rt.frameLayout.owner == nil:
     return
@@ -2171,6 +2209,17 @@ proc event(rt: Runtime; ev: platform.SurfaceEvent): bool =
       return true
     if rt.sliderKey(ev.key, ev.mods):
       return true
+    let owner = rt.frameLayout.owner
+    if ev.mods == 0 and owner != nil and rt.focusSlot > 0 and
+        rt.focusSlot < owner.nodes.len:
+      let node = owner.nodes[rt.focusSlot]
+      if node.menuBuilder != nil and
+          ev.key in {platform.keyEnter, platform.keySpace, platform.keyDown}:
+        if not ev.repeat:
+          rt.showMenuButton(node.identity, node.menuBuilder)
+        rt.keyboardFocusVisible = true
+        rt.requestFrame()
+        return true
     if ev.mods == 0 and ev.key in {platform.keyUp, platform.keyDown}:
       let owner = rt.context.owner
       if owner != nil and rt.focusSlot > 0 and
@@ -2407,6 +2456,22 @@ proc event(rt: Runtime; ev: platform.SurfaceEvent): bool =
     rt.pressTarget = rt.frameLayout.targetAt(rt.pointerX, rt.pointerY)
     rt.pressMods = ev.mods
     rt.pressHoverSlots = rt.frameLayout.slotsAt(rt.pointerX, rt.pointerY)
+    if rt.pressTarget.owner == rt.frameLayout.owner and
+        rt.pressTarget.slot > 0 and
+        int(rt.pressTarget.slot) < rt.frameLayout.owner.nodes.len:
+      let slot = int(rt.pressTarget.slot)
+      let node = rt.frameLayout.owner.nodes[slot]
+      if node.menuBuilder != nil and
+          not rt.frameLayout.owner.effectivelyDisabled(slot):
+        rt.focusSlot = slot
+        rt.keyboardFocusVisible = false
+        rt.pressTarget = Element()
+        rt.pressMods = 0
+        rt.pressHoverSlots.setLen(0)
+        rt.showMenuButton(node.identity, node.menuBuilder)
+        rt.refreshPointer()
+        rt.requestFrame()
+        return true
     rt.beginListReorder(rt.pressTarget)
     if not rt.beginTableResize(rt.pressTarget):
       rt.beginTableReorder(rt.pressTarget)

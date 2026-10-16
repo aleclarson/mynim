@@ -2146,6 +2146,11 @@ proc attachContent*(w: Window) =
 
 ## contentMenu returns the items of a context menu of the Content,
 ## whose click passes the id of the item to chosen.
+proc contentMenuClick(chosen: proc(id: int); itemId: int):
+    proc(item: MenuItem; win: Window) {.closure.} =
+  ## Give each item its own captured ID rather than capturing the loop variable.
+  result = proc(item: MenuItem; win: Window) = chosen(itemId)
+
 proc contentMenu(m: platform.Menu; chosen: proc(id: int)): seq[MenuItem] =
   if m == nil:
     return @[]
@@ -2164,8 +2169,7 @@ proc contentMenu(m: platform.Menu; chosen: proc(id: int)): seq[MenuItem] =
       it.submenu = contentMenu(p.submenu, chosen)
     else:
       discard
-    let id = p.id
-    it.click = proc(i: MenuItem; w: Window) {.closure.} = chosen(id)
+    it.click = contentMenuClick(chosen, p.id)
     result.add it
 
 ## invalidate redraws the window's Content, as after a change of the
