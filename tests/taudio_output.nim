@@ -2,9 +2,16 @@ import std/[assertions, os, sequtils, times]
 import mynim/audio
 
 let player = newSound(48_000, 1,
-  newSeqWith(48_000, 0.25'f32)).play()
+  newSeqWith(48_000, 0'f32)).play()
+for attempt in 0 ..< 200:
+  if player.position().inNanoseconds > 0:
+    break
+  sleep(5)
 sleep(60)
 doAssert player.position().inNanoseconds > 0
 doAssert player.playing()
-doAssert err() != nil
+when defined(macosx):
+  doAssert err().isNil
+else:
+  doAssert err() != nil
 player.close()

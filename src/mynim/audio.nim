@@ -1,11 +1,13 @@
 ## Audio decoding, in-memory sounds, and playback controls.
 ##
 ## WAV decoding is built in. Other codecs can register a decoder with
-## `registerFormat`. Players mix and advance in real time, but the platform
-## output backends are not implemented yet; `err()` reports that audio is
-## currently silent.
+## `registerFormat`. Players mix and advance in real time. macOS uses CoreAudio;
+## other platforms currently advance silently and report that through `err()`.
 
-import std/[locks, math, monotimes, os, streams, times]
+import std/[exitprocs, locks, math, monotimes, os, streams, times]
+import ./internal/audio_output_types
+when defined(macosx):
+  import ./internal/darwin/audio_output as darwinAudioOutput
 
 type
   AudioError* = object of CatchableError ## An unsupported or malformed audio format.
@@ -88,6 +90,8 @@ var
   audioCond: Cond
   audioThread: Thread[void]
   audioThreadStarted = false
+  audioClosing = false
+  audioExitHookRegistered = false
   audioTestMode = false
   voices: seq[Voice]
   masterVolume = 1.0
@@ -540,33 +544,126 @@ proc mix(output: var seq[float32]): bool =
     output[i] = min(max(output[i], -1'f32), 1'f32)
   write > 0
 
+proc closeAudioOutput(device: AudioOutput) =
+  try:
+    device.close()
+  except CatchableError as error:
+    withLock audioLock:
+      audioOutputError = error
+
 proc runAudioOutput() {.thread.} =
   {.cast(gcsafe).}:
     var output = newSeq[float32](nullFrames * outputChannels)
-    let interval = initDuration(nanoseconds =
+    let nullInterval = initDuration(nanoseconds =
       int64(nullFrames) * 1_000_000_000 div outputSampleRate)
-    var deadline = getMonoTime()
+    let retryDelay = initDuration(nanoseconds = 2_000_000_000)
+    let idleLimit = 5_000_000_000'i64
     while true:
       acquire(audioLock)
-      while voices.len == 0:
+      while voices.len == 0 and not audioClosing:
         wait(audioCond, audioLock)
-      if audioOutputError.isNil:
-        audioOutputError = newException(AudioError,
-          "audio: no audio output on this platform")
+      let shuttingDown = audioClosing
       release(audioLock)
+      if shuttingDown:
+        return
 
-      discard mix(output)
-      deadline = deadline + interval
-      let delay = deadline - getMonoTime()
-      if delay.inNanoseconds < -100_000_000:
-        deadline = getMonoTime()
-      elif delay.inNanoseconds > 0:
-        sleep(max(1, int(delay.inMilliseconds)))
+      var device: AudioOutput
+      var deviceFrames = nullFrames
+      var canRetry = false
+      var retryAt = getMonoTime() + retryDelay
+      when defined(macosx):
+        try:
+          device = darwinAudioOutput.openAudioQueue()
+          deviceFrames = darwinAudioOutput.aqBufferFrames
+        except CatchableError as error:
+          withLock audioLock:
+            audioOutputError = error
+          canRetry = true
+      if device.isNil:
+        withLock audioLock:
+          if audioOutputError.isNil:
+            audioOutputError = newException(AudioError,
+              "audio: no audio output on this platform")
+      else:
+        withLock audioLock:
+          audioOutputError = nil
+        output.setLen(deviceFrames * outputChannels)
+
+      var idleTime = 0'i64
+      var deadline = getMonoTime()
+      while true:
+        acquire(audioLock)
+        let shuttingDown = audioClosing
+        release(audioLock)
+        if shuttingDown:
+          break
+
+        if device.isNil and canRetry and getMonoTime() >= retryAt:
+          when defined(macosx):
+            try:
+              device = darwinAudioOutput.openAudioQueue()
+              deviceFrames = darwinAudioOutput.aqBufferFrames
+              output.setLen(deviceFrames * outputChannels)
+              deadline = getMonoTime()
+              idleTime = 0
+              canRetry = false
+              withLock audioLock:
+                audioOutputError = nil
+            except CatchableError as error:
+              retryAt = getMonoTime() + retryDelay
+              withLock audioLock:
+                audioOutputError = error
+
+        let busy = mix(output)
+        let interval = initDuration(nanoseconds =
+          int64(output.len div outputChannels) * 1_000_000_000 div
+          outputSampleRate)
+        if device.isNil:
+          deadline = deadline + nullInterval
+          let delay = deadline - getMonoTime()
+          if delay.inNanoseconds < -100_000_000:
+            deadline = getMonoTime()
+          elif delay.inNanoseconds > 0:
+            sleep(max(1, int(delay.inMilliseconds)))
+        else:
+          try:
+            device.write(output)
+          except CatchableError as error:
+            closeAudioOutput(device)
+            device = nil
+            deviceFrames = nullFrames
+            output.setLen(nullFrames * outputChannels)
+            deadline = getMonoTime()
+            retryAt = getMonoTime() + retryDelay
+            canRetry = true
+            withLock audioLock:
+              audioOutputError = error
+
+        if busy:
+          idleTime = 0
+        else:
+          idleTime += interval.inNanoseconds
+          if idleTime >= idleLimit:
+            break
+      if not device.isNil:
+        closeAudioOutput(device)
+
+proc shutdownAudioOutput() =
+  var started = false
+  withLock audioLock:
+    audioClosing = true
+    started = audioThreadStarted
+    signal(audioCond)
+  if started:
+    joinThread(audioThread)
 
 proc wakeOutput() =
-  if audioTestMode:
+  if audioTestMode or audioClosing:
     return
   if not audioThreadStarted:
+    if not audioExitHookRegistered:
+      addExitProc(shutdownAudioOutput)
+      audioExitHookRegistered = true
     audioThreadStarted = true
     createThread(audioThread, runAudioOutput)
   signal(audioCond)
