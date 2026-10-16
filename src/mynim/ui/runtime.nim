@@ -868,6 +868,7 @@ proc textFieldCommand(rt: Runtime; command: string): bool =
       if rt.conn != nil and rt.conn.clipboard != nil:
         rt.conn.clipboard.writeText(text)
       client.areaUndoGroupOpen = false
+      client.textUndoGroupOpen = false
       rt.editTextField(client, actual, "")
     true
   of "paste", "pasteAndMatchStyle":
@@ -885,10 +886,14 @@ proc textFieldCommand(rt: Runtime; command: string): bool =
     if text.len > 0:
       let (_, actual) = client.textForRange(selected)
       client.areaUndoGroupOpen = false
+      client.textUndoGroupOpen = false
       rt.editTextField(client, actual, text)
       client.areaUndoGroupOpen = false
+      client.textUndoGroupOpen = false
     true
   of "selectAll":
+    client.areaUndoGroupOpen = false
+    client.textUndoGroupOpen = false
     client.anchor = 0
     client.caret = client.fieldUtf16Len()
     client.areaHasDesiredX = false
@@ -900,14 +905,20 @@ proc textFieldCommand(rt: Runtime; command: string): bool =
     let (_, actual) = client.textForRange(selected)
     if not client.readOnly and actual.start < actual.`end`:
       client.areaUndoGroupOpen = false
+      client.textUndoGroupOpen = false
       rt.editTextField(client, actual, "")
     true
   of "undo", "redo":
-    if not client.multiline or client.readOnly:
+    if client.readOnly:
       return true
     client.areaUndoGroupOpen = false
-    let changed = if command == "undo": client.undoTextArea()
-      else: client.redoTextArea()
+    client.textUndoGroupOpen = false
+    let changed = if command == "undo":
+      if client.multiline: client.undoTextArea()
+      else: client.undoTextField()
+    else:
+      if client.multiline: client.redoTextArea()
+      else: client.redoTextField()
     if changed:
       owner.deferTextInputChange(owner.nodes[rt.focusSlot].identity,
                                  owner.generation)
@@ -980,15 +991,18 @@ proc textFieldKey(rt: Runtime; key: platform.Key;
         discard
 
   let command = when defined(macosx): platform.modSuper else: platform.modCtrl
-  if client.multiline and key == platform.keyZ and
+  if key == platform.keyZ and
       (mods == command or mods == (command or platform.modShift)):
     client.areaUndoGroupOpen = false
+    client.textUndoGroupOpen = false
     if client.readOnly:
       return true
     let changed = if (mods and platform.modShift) != 0:
-        client.redoTextArea()
+        (if client.multiline: client.redoTextArea()
+          else: client.redoTextField())
       else:
-        client.undoTextArea()
+        (if client.multiline: client.undoTextArea()
+          else: client.undoTextField())
     if changed:
       let identity = owner.nodes[rt.focusSlot].identity
       owner.deferTextInputChange(identity, owner.generation)
@@ -1011,6 +1025,8 @@ proc textFieldKey(rt: Runtime; key: platform.Key;
     return rt.textFieldCommand("pasteAndMatchStyle")
 
   if key == platform.keyA and mods == command:
+    client.areaUndoGroupOpen = false
+    client.textUndoGroupOpen = false
     client.anchor = 0
     client.caret = client.fieldUtf16Len()
     client.areaHasDesiredX = false

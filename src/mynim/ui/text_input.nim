@@ -5,6 +5,10 @@ type
     before, after: TextSnapshot
     beforeAnchor, beforeCaret, afterAnchor, afterCaret: int
 
+  TextFieldUndoEntry = object
+    before, after: string
+    beforeAnchor, beforeCaret, afterAnchor, afterCaret: int
+
 type TextFieldClient = ref object of platform.TextInputClient
   text, lastBoundValue, placeholder: string
   onPaste: proc(text: string): bool {.closure.}
@@ -26,6 +30,8 @@ type TextFieldClient = ref object of platform.TextInputClient
   areaLayouts: Table[int, textStack.Layout]
   areaUndo, areaRedo: seq[TextAreaUndoEntry]
   areaUndoGroupOpen: bool
+  textUndo, textRedo: seq[TextFieldUndoEntry]
+  textUndoGroupOpen: bool
   areaFirst, areaPastLast: int
   areaWidth, areaHeight, areaLineHeight: float32
   areaHasLayout, areaHasDesiredX: bool
@@ -66,6 +72,89 @@ proc rebuildFieldLayout(client: TextFieldClient) =
   client.shaped = textStack.shared().layout(textStack.Params(
     text: client.text, style: client.style, noWrap: true,
     keepSpaces: true, rtl: client.rightToLeft))
+
+proc clearTextFieldHistory(client: TextFieldClient) =
+  client.textUndo.setLen(0)
+  client.textRedo.setLen(0)
+  client.textUndoGroupOpen = false
+
+proc rebaseTextFieldHistory(client: TextFieldClient; text: string;
+                            anchor, caret: int) =
+  if client.textUndo.len > 0:
+    var entry = client.textUndo[^1]
+    entry.after = text
+    entry.afterAnchor = anchor
+    entry.afterCaret = caret
+    client.textUndo[^1] = entry
+  client.textRedo.setLen(0)
+
+proc recordTextFieldEdit(client: TextFieldClient; before, after: string;
+                         range: platform.TextRange; inserted: string;
+                         beforeAnchor, beforeCaret: int;
+                         mergeComposition = false) =
+  if mergeComposition and client.textUndo.len > 0:
+    var entry = client.textUndo[^1]
+    entry.after = after
+    entry.afterAnchor = client.anchor
+    entry.afterCaret = client.caret
+    client.textUndo[^1] = entry
+    client.textRedo.setLen(0)
+    client.textUndoGroupOpen = false
+    return
+  if before == after:
+    return
+  let groupable = inserted.len > 0 and range.start == range.`end` and
+    client.anchor == client.caret
+  let join = groupable and client.textUndoGroupOpen and
+    client.textUndo.len > 0 and beforeAnchor == beforeCaret and
+    client.textUndo[^1].after == before and
+    client.textUndo[^1].afterAnchor == beforeAnchor and
+    client.textUndo[^1].afterCaret == beforeCaret
+  if join:
+    var entry = client.textUndo[^1]
+    entry.after = after
+    entry.afterAnchor = client.anchor
+    entry.afterCaret = client.caret
+    client.textUndo[^1] = entry
+  else:
+    client.textUndo.add(TextFieldUndoEntry(before: before, after: after,
+      beforeAnchor: beforeAnchor, beforeCaret: beforeCaret,
+      afterAnchor: client.anchor, afterCaret: client.caret))
+  if client.textUndo.len > 200:
+    client.textUndo.delete(0)
+  client.textRedo.setLen(0)
+  client.textUndoGroupOpen = groupable
+
+proc restoreTextFieldHistory(client: TextFieldClient; text: string;
+                             anchor, caret: int) =
+  client.text = text
+  let limit = platform.utf16Len(client.text)
+  client.anchor = max(0, min(anchor, limit))
+  client.caret = max(0, min(caret, limit))
+  client.hasMark = false
+  client.nativeChanged = true
+  client.textUndoGroupOpen = false
+  client.rebuildFieldLayout()
+
+proc undoTextField(client: TextFieldClient): bool =
+  if client.textUndo.len == 0:
+    return false
+  let entry = client.textUndo[^1]
+  client.textUndo.setLen(client.textUndo.len - 1)
+  client.textRedo.add(entry)
+  client.restoreTextFieldHistory(entry.before, entry.beforeAnchor,
+                                 entry.beforeCaret)
+  result = true
+
+proc redoTextField(client: TextFieldClient): bool =
+  if client.textRedo.len == 0:
+    return false
+  let entry = client.textRedo[^1]
+  client.textRedo.setLen(client.textRedo.len - 1)
+  client.textUndo.add(entry)
+  client.restoreTextFieldHistory(entry.after, entry.afterAnchor,
+                                 entry.afterCaret)
+  result = true
 
 proc resetAreaCache(client: TextFieldClient; lineCount: int) =
   client.areaLineHeights = newSeq[float32](max(lineCount, 0))
@@ -435,6 +524,9 @@ method replaceText*(client: TextFieldClient; r: ref platform.TextRange;
     return
   let target = if r == nil: client.fieldRange()
     else: platform.normalizeTextRange(r[])
+  let before = client.text
+  let beforeAnchor = client.anchor
+  let beforeCaret = client.caret
   let firstByte = platform.utf16ByteOffset(client.text, target.start)
   let pastLastByte = platform.utf16ByteOffset(client.text, target.`end`)
   let start = platform.utf16Len(client.text[0 ..< firstByte])
@@ -444,6 +536,8 @@ method replaceText*(client: TextFieldClient; r: ref platform.TextRange;
   client.anchor = client.caret
   client.hasMark = false
   client.nativeChanged = true
+  client.recordTextFieldEdit(before, client.text, target, value,
+    beforeAnchor, beforeCaret)
   client.rebuildFieldLayout()
 
 method setMarkedText*(client: TextFieldClient; r: ref platform.TextRange;
@@ -468,6 +562,10 @@ method setMarkedText*(client: TextFieldClient; r: ref platform.TextRange;
     client.caret = start + min(normalizedSelection.`end`,
       platform.utf16Len(value))
     return
+  let mergeComposition = client.hasMark
+  let before = client.text
+  let beforeAnchor = client.anchor
+  let beforeCaret = client.caret
   let target = if r == nil: client.fieldRange()
     else: platform.normalizeTextRange(r[])
   let firstByte = platform.utf16ByteOffset(client.text, target.start)
@@ -486,10 +584,13 @@ method setMarkedText*(client: TextFieldClient; r: ref platform.TextRange;
   client.anchor = start + selectedStart
   client.caret = start + selectedEnd
   client.nativeChanged = true
+  client.recordTextFieldEdit(before, client.text, target, value,
+    beforeAnchor, beforeCaret, mergeComposition)
   client.rebuildFieldLayout()
 
 method unmarkText*(client: TextFieldClient) =
   client.hasMark = false
+  client.textUndoGroupOpen = false
   if client.multiline:
     client.areaUndoGroupOpen = false
 
@@ -615,6 +716,7 @@ proc finishTextField(c: Context; e: Element; client: TextFieldClient) =
 proc leaveTextAreaMode(client: TextFieldClient) =
   if not client.multiline:
     return
+  client.clearTextFieldHistory()
   client.multiline = false
   client.boundBuffer = nil
   client.bufferSnapshot = TextSnapshot()
@@ -631,6 +733,7 @@ proc leaveTextAreaMode(client: TextFieldClient) =
   client.areaLayouts.clear()
 
 proc initializeTextArea(client: TextFieldClient; buffer: TextBuffer) =
+  client.clearTextFieldHistory()
   client.multiline = true
   client.boundBuffer = buffer
   client.areaScroll = newScrollState()
@@ -671,10 +774,13 @@ proc textInputBase*(c: Context; value: var string): Element =
   client.leaveTextAreaMode()
 
   if client.boundBuffer != nil:
+    client.clearTextFieldHistory()
     client.boundBuffer = nil
     client.bufferSnapshot = TextSnapshot()
     client.setFieldText(value)
   elif value != client.lastBoundValue:
+    client.rebaseTextFieldHistory(value, platform.utf16Len(value),
+                                  platform.utf16Len(value))
     client.setFieldText(value)
   elif client.nativeChanged:
     value = client.text
@@ -684,6 +790,8 @@ proc textInputBase*(c: Context; value: var string): Element =
   if not result.deliverTextFieldCallbacks():
     return
   if value != client.text:
+    client.rebaseTextFieldHistory(value, platform.utf16Len(value),
+                                  platform.utf16Len(value))
     client.setFieldText(value)
 
   c.finishTextField(result, client)
@@ -700,6 +808,7 @@ proc textInputBufferBase*(c: Context; buffer: TextBuffer): Element =
   client.onPaste = nil
   client.leaveTextAreaMode()
   if client.boundBuffer != buffer:
+    client.clearTextFieldHistory()
     client.boundBuffer = buffer
     client.bufferSnapshot = buffer.snapshot()
     client.setFieldText($client.bufferSnapshot)
@@ -711,12 +820,18 @@ proc textInputBufferBase*(c: Context; buffer: TextBuffer): Element =
       client.lastBoundValue = client.text
       client.nativeChanged = false
     else:
+      let text = $snapshot
+      client.rebaseTextFieldHistory(text, platform.utf16Len(text),
+                                    platform.utf16Len(text))
       client.setFieldText($snapshot)
   elif not client.hasMark:
     let snapshot = buffer.snapshot()
     if snapshot.version != client.bufferSnapshot.version:
       client.bufferSnapshot = snapshot
-      client.setFieldText($snapshot)
+      let text = $snapshot
+      client.rebaseTextFieldHistory(text, platform.utf16Len(text),
+                                    platform.utf16Len(text))
+      client.setFieldText(text)
 
   if not result.deliverTextFieldCallbacks():
     return
@@ -899,6 +1014,7 @@ proc setTextSelection*(e: Element; start, `end`: int): Element =
   result = e
   let client = e.fieldClient()
   if client != nil:
+    client.textUndoGroupOpen = false
     let count = client.fieldRuneLen()
     let first = max(0, min(start, count))
     let pastLast = max(0, min(`end`, count))
@@ -920,6 +1036,7 @@ proc fieldPointerSelection(client: TextFieldClient; x, y: float64;
   let (index, ok) = client.indexForPoint(x, y)
   if not ok:
     return false
+  client.textUndoGroupOpen = false
   if not extend:
     client.anchor = index
   client.caret = index
@@ -930,6 +1047,7 @@ proc fieldPointerSelection(client: TextFieldClient; x, y: float64;
 proc fieldMove(client: TextFieldClient; key: platform.Key;
                extend: bool; byWord = false;
                documentEdge = false): bool =
+  client.textUndoGroupOpen = false
   if client.multiline:
     client.areaUndoGroupOpen = false
     discard client.syncTextAreaBuffer()
@@ -1070,6 +1188,7 @@ when defined(macosx):
     (0, client.text.runeLen)
 
   proc fieldMoveParagraphEdge(client: TextFieldClient; toEnd, extend: bool) =
+    client.textUndoGroupOpen = false
     let current = client.fieldRuneIndex(client.caret)
     let paragraph = client.fieldParagraphRange(current)
     let rune = if toEnd: paragraph.`end` else: paragraph.start
