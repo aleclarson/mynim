@@ -13,6 +13,11 @@ type
     root: textRope.Node
     version: uint64
 
+  TextBufferEditResult* = object ## Outcome of an optimistic UTF-16 range edit.
+    snapshot*: TextSnapshot ## The resulting snapshot, or current snapshot on conflict.
+    replacedRange*: platform.TextRange ## Actual whole-rune range before replacement.
+    committed*: bool ## False when the buffer no longer matched the source snapshot.
+
   TextWriter* = proc(chunk: string): int {.closure.} ## Number of bytes consumed.
 
 proc newTextBuffer*(text = ""): TextBuffer =
@@ -250,3 +255,31 @@ proc replaceUtf16*(buffer: TextBuffer; range: platform.TextRange;
       textRope.byteOfRune(buffer.root, first),
       textRope.byteOfRune(buffer.root, last), text)
     inc buffer.version
+
+proc replaceUtf16IfCurrent*(buffer: TextBuffer; before: TextSnapshot;
+                            range: platform.TextRange; text: string):
+    TextBufferEditResult =
+  ## Replaces a UTF-16 range only if `before` is still the current snapshot.
+  ## The edit runs directly on the rope and does not materialize the document.
+  ## On conflict, returns the current snapshot with `committed` false.
+  ## Raises `ValueError` when buffer is nil.
+  buffer.requireTextBuffer()
+  withLock buffer.mu:
+    if buffer.root != before.root or buffer.version != before.version:
+      result.snapshot = TextSnapshot(root: buffer.root, version: buffer.version)
+      return
+    let units = textRope.sum(buffer.root).units
+    let normalized = platform.normalizeTextRange(range)
+    let first = textRope.runeOfUnit(buffer.root,
+      max(0, min(normalized.start, units)))
+    let last = textRope.runeOfUnit(buffer.root,
+      max(0, min(normalized.`end`, units)))
+    let firstByte = textRope.byteOfRune(buffer.root, first)
+    let lastByte = textRope.byteOfRune(buffer.root, last)
+    result.replacedRange = platform.TextRange(
+      start: textRope.prefix(buffer.root, firstByte).units,
+      `end`: textRope.prefix(buffer.root, lastByte).units)
+    buffer.root = textRope.replaceBytes(buffer.root, firstByte, lastByte, text)
+    inc buffer.version
+    result.snapshot = TextSnapshot(root: buffer.root, version: buffer.version)
+    result.committed = true

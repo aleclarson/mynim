@@ -51,9 +51,25 @@ doAssert adjusted == platform.TextRange(start: 1, `end`: 1)
 doAssert $buffer == "Ax👍\nB"
 doAssert buffer.version() == 2
 
+let editSource = buffer.snapshot()
+let editResult = buffer.replaceUtf16IfCurrent(editSource,
+  platform.TextRange(start: 3, `end`: 4), "q")
+doAssert editResult.committed
+doAssert editResult.replacedRange == platform.TextRange(start: 2, `end`: 4)
+doAssert $editResult.snapshot == "Axq\nB"
+doAssert $buffer == "Axq\nB"
+
+let staleSource = buffer.snapshot()
+buffer.replace(0, 1, "Z")
+let staleResult = buffer.replaceUtf16IfCurrent(staleSource,
+  platform.TextRange(start: 0, `end`: 1), "Y")
+doAssert not staleResult.committed
+doAssert $staleResult.snapshot == "Zxq\nB"
+doAssert $buffer == "Zxq\nB"
+
 buffer.restore(before)
 doAssert $buffer == "A😀\nB"
-doAssert buffer.version() == 3
+doAssert buffer.version() == 5
 
 var output = ""
 let written = before.writeTo(proc(chunk: string): int =
