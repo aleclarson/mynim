@@ -8,6 +8,7 @@ type
     theme: Theme
     reduceMotion: bool
     treeState: TreeState
+    sidebarBuild: SidebarBuild
     accordion: AccordionBuild
     accordionHeaders: Table[uint64, seq[uint64]]
     checkboxGroup: CheckboxGroupBuild
@@ -59,6 +60,29 @@ type
     modifiers: platform.Modifiers
     key: platform.Key
     action: proc() {.closure.}
+
+  SidebarEntry = object
+    id, label: string
+    slot: int
+    handle: Handle
+
+  SidebarState* = ref object
+    ## Persistent selection, scrolling, type-ahead, and focus handles.
+    selected*: string
+    scrollState: ScrollState
+    itemHandles: Table[string, Handle]
+    entries: seq[SidebarEntry]
+    typedLabel: string
+    typedAt: MonoTime
+    pendingChanged: bool
+
+  SidebarSectionState* = ref object
+    ## Persistent expansion state for a collapsible Sidebar section.
+    open*: bool
+
+  SidebarBuild = ref object
+    state: SidebarState
+    depth: int
 
   ScalarAnimation = object
     value, velocity, fromValue, target: float64
@@ -345,6 +369,7 @@ type
     accessExtraStates: platform.AccessStates
     accessExtraActions: platform.AccessActions
     accessLevel: int
+    activeDescendantIdentity: uint64
     accessRoleSet: bool
     pointerCursor: platform.Cursor
     pointerCursorSet: bool

@@ -250,19 +250,22 @@ proc focusGroupEntry(rt: Runtime; layout: LayoutResult;
   if rt.focusGroupLast.hasKey(groupIdentity):
     let lastIdentity = rt.focusGroupLast[groupIdentity]
     let lastSlot = owner.idSlots.getOrDefault(lastIdentity, -1)
-    if layout.focusableSlot(lastSlot) and
+    if layout.tabStopSlot(lastSlot) and
         layout.focusGroupOf(lastSlot) == groupSlot:
       return lastSlot
   var first = -1
   for slot in 1..<owner.nodes.len:
-    if not layout.focusableSlot(slot) or layout.focusGroupOf(slot) != groupSlot:
+    if not layout.tabStopSlot(slot) or
+        layout.focusGroupOf(slot) != groupSlot:
       continue
     if first < 0:
       first = slot
     let node = owner.nodes[slot]
-    if node.accessRole in {platform.roleRadio, platform.roleTab} and
-        (node.accessExtraStates and platform.accessChecked) !=
-          platform.AccessStates(0):
+    let states = node.accessExtraStates
+    if (node.accessRole in {platform.roleRadio, platform.roleTab} and
+        (states and platform.accessChecked) != platform.AccessStates(0)) or
+        (node.accessRole == platform.roleTreeItem and
+         (states and platform.accessSelected) != platform.AccessStates(0)):
       return slot
   first
 
@@ -696,6 +699,18 @@ proc accessibilityTree(layout: LayoutResult;
       continue
     let itemSlot = owner.idSlots.getOrDefault(
       state.itemIdentities[state.highlight], -1)
+    if itemSlot > 0 and itemSlot < accessIndex.len and
+        accessIndex[itemSlot] >= 0:
+      result.focus = uint64(itemSlot + 1)
+      break
+
+  for slot in 1..<owner.nodes.len:
+    let node = owner.nodes[slot]
+    if node.activeDescendantIdentity == 0 or
+        not owner.isWithinNode(slot, focusSlot):
+      continue
+    let itemSlot = owner.idSlots.getOrDefault(
+      node.activeDescendantIdentity, -1)
     if itemSlot > 0 and itemSlot < accessIndex.len and
         accessIndex[itemSlot] >= 0:
       result.focus = uint64(itemSlot + 1)
