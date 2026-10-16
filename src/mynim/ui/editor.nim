@@ -13,6 +13,10 @@ type
     line*: int
     column*: int
 
+  Selection* = object ## Byte offsets with the caret at `head`.
+    anchor*: int
+    head*: int
+
   Snapshot* = object ## Immutable editor-buffer version.
     document: ui.TextSnapshot
     crlf: bool
@@ -29,6 +33,18 @@ type
 
 const
   maxUndoSteps = 10_000
+
+proc start*(selection: Selection): int =
+  ## Returns the lower byte offset, regardless of selection direction.
+  min(selection.anchor, selection.head)
+
+proc pastLast*(selection: Selection): int =
+  ## Returns the upper byte offset, regardless of selection direction.
+  max(selection.anchor, selection.head)
+
+proc empty*(selection: Selection): bool =
+  ## Reports whether the selection is a caret without a selected range.
+  selection.anchor == selection.head
 
 proc lf(text: string): string =
   text.replace("\r\n", "\n")

@@ -1,6 +1,15 @@
 import std/[assertions, strutils]
 import mynim/ui/editor as editor
 
+let forward = editor.Selection(anchor: 2, head: 7)
+doAssert forward.start() == 2 and forward.pastLast() == 7
+doAssert not forward.empty()
+let backward = editor.Selection(anchor: 7, head: 2)
+doAssert backward.start() == 2 and backward.pastLast() == 7
+doAssert not backward.empty()
+let caret = editor.Selection(anchor: 4, head: 4)
+doAssert caret.start() == 4 and caret.pastLast() == 4 and caret.empty()
+
 let buffer = editor.newBuffer("a😀\r\nsecond\n")
 doAssert $buffer == "a😀\nsecond\n"
 doAssert buffer.len() == "a😀\nsecond\n".len
