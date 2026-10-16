@@ -244,6 +244,7 @@ proc makeWindow(opts: WindowOptions; bg: ref Background; native: uint;
   w.hiddenTitleBar = not opts.frameless and
     (opts.titleBarStyle == titleBarHidden or
      opts.titleBarStyle == titleBarHiddenInset)
+  w.hasVibrancy = string(opts.vibrancy).len > 0
   w.resetPage()
   var popts = w.platformOptions(opts)
   popts.backgroundColor = w.backgroundColor()
@@ -718,6 +719,7 @@ proc setContentProtection*(w: Window; v: bool) =
 proc setVibrancy*(w: Window; v: Vibrancy) =
   ## Sets the material behind the page; vibrancyNone removes it.
   ## See WindowOptions.vibrancy.
+  w.hasVibrancy = string(v).len > 0
   w.withNative(proc(n: platform.Window) = n.setVibrancy(string(v)))
   ## Native UI looks again whether the material shows.
   w.invalidate()
@@ -2116,6 +2118,7 @@ proc attachContent*(w: Window) =
         platform.TitleBar()
       else:
         w.native.titleBar(),
+    vibrancy: proc(): bool = w.hasVibrancy,
     openURL: proc(url: string; done: proc(err: ref CatchableError)) =
       ## The system may take a while, as Windows' shell does: not in
       ## the frame.

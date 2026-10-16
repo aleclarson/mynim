@@ -493,6 +493,8 @@ type
     ## hiddenTitleBar is a titleBarStyle that hides the title bar: the
     ## pages hear the room the window controls take. Main thread only.
     hiddenTitleBar: bool
+    ## hasVibrancy reports whether native UI can draw over the material.
+    hasVibrancy: bool
     menu: Menu
     ## title is the title the app or the page set; representedFile and
     ## documentEdited are the document the window shows. Main thread

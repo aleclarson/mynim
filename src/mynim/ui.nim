@@ -16,7 +16,8 @@ from mynim/internal/ucd import lookupGeneralCategory, Ll, Lm, Lo, Lt, Lu, Nd
 import mynim/internal/svg as svgRenderer
 import mynim/image as sourceImage
 export platform.TextInputClient, platform.TextRange, platform.TextSelection,
-  platform.RectF
+  platform.RectF, platform.TitleBar, platform.Preferences, platform.Cursor,
+  platform.Key, platform.Modifiers, i18n.Region
 when defined(macosx):
   import mynim/internal/gpu/metal as metalGpu
 elif defined(windows):
@@ -77,3 +78,4 @@ include mynim/ui/drop
 include mynim/ui/drag
 include mynim/ui/router_view
 include mynim/ui/runtime
+include mynim/ui/tester

@@ -1885,6 +1885,9 @@ proc renderFrame(rt: Runtime; presentFrame = true) =
   rt.context.localeTag = if rt.conn.locale == nil: "" else: rt.conn.locale()
   rt.context.region = if rt.conn.region == nil: i18n.Region()
     else: rt.conn.region()
+  rt.context.titleBar = if rt.conn.titleBar == nil: platform.TitleBar()
+    else: rt.conn.titleBar()
+  rt.context.vibrancy = rt.conn.vibrancy != nil and rt.conn.vibrancy()
   rt.context.openURL = rt.conn.openURL
   rt.context.openMenu = proc(identity: uint64;
       build: proc(menu: Menu) {.closure.}) =

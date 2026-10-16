@@ -8,6 +8,8 @@ type
     routeRouter: Router
     theme: Theme
     reduceMotion: bool
+    titleBar: platform.TitleBar
+    vibrancy: bool
     treeState: TreeState
     sidebarBuild: SidebarBuild
     accordion: AccordionBuild
@@ -924,6 +926,22 @@ proc resolve*(c: Context; handle: Handle): Element =
 proc theme*(c: Context): Theme =
   ## Returns the theme used by the current frame.
   if c == nil: lightTheme() else: c.theme
+
+proc locale*(c: Context): string =
+  ## Returns the language tag the app shows in the current frame.
+  if c != nil: result = c.localeTag
+
+proc region*(c: Context): surface.Region =
+  ## Returns the user's regional formats for the current frame.
+  if c != nil: result = c.region
+
+proc titleBar*(c: Context): platform.TitleBar =
+  ## Returns the room reserved for the native window controls.
+  if c != nil: result = c.titleBar
+
+proc vibrancy*(c: Context): bool =
+  ## Reports whether the window shows its native material behind the UI.
+  c != nil and c.vibrancy
 
 proc setTheme*(c: Context; value: Theme) =
   ## Sets the theme for the rest of this frame and fills the root background.

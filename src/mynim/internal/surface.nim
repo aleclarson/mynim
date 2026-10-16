@@ -39,6 +39,8 @@ type
     ## tells changes of as well.
     isDark*: proc(): bool {.closure.}
     preferences*: proc(): platform.Preferences {.closure.}
+    ## vibrancy reports whether the window currently shows its material.
+    vibrancy*: proc(): bool {.closure.}
     ## locale returns the language the app shows (app.locale), and
     ## region the user's regional formats, which localeChanged tells
     ## changes of. They cost nothing: the content may read them every
