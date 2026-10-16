@@ -827,6 +827,97 @@ proc updateTextInput(rt: Runtime) =
   rt.lastTextInput = state
   rt.hasTextInputState = true
 
+proc editTextField(rt: Runtime; client: TextFieldClient;
+                   range: platform.TextRange; value: string) =
+  if client.readOnly:
+    return
+  let before = platform.clientTextContext(client).text
+  rt.inputComposition.reset()
+  let target = new platform.TextRange
+  target[] = range
+  client.replaceText(target, value)
+  rt.inputChanged(rt.focusSlot, before)
+  rt.keyboardFocusVisible = true
+  rt.updateTextInput()
+
+proc textFieldCommand(rt: Runtime; command: string): bool =
+  let owner = rt.frameLayout.owner
+  if owner == nil or rt.focusSlot <= 0 or rt.focusSlot >= owner.nodes.len:
+    return false
+  let rawClient = owner.nodes[rt.focusSlot].textClient
+  if not (rawClient of TextFieldClient):
+    return false
+  let client = TextFieldClient(rawClient)
+  if client.hasMark:
+    return command in ["copy", "cut", "paste", "pasteAndMatchStyle",
+                       "selectAll", "delete", "undo", "redo"]
+
+  let selected = client.fieldRange()
+  case command
+  of "copy":
+    let (text, actual) = client.textForRange(selected)
+    if actual.start < actual.`end` and rt.conn != nil and
+        rt.conn.clipboard != nil:
+      rt.conn.clipboard.writeText(text)
+    true
+  of "cut":
+    if client.readOnly:
+      return true
+    let (text, actual) = client.textForRange(selected)
+    if actual.start < actual.`end`:
+      if rt.conn != nil and rt.conn.clipboard != nil:
+        rt.conn.clipboard.writeText(text)
+      client.areaUndoGroupOpen = false
+      rt.editTextField(client, actual, "")
+    true
+  of "paste", "pasteAndMatchStyle":
+    if client.readOnly:
+      return true
+    let text = if rt.conn != nil and rt.conn.clipboard != nil:
+        rt.conn.clipboard.readText()
+      else:
+        ""
+    if client.onPaste != nil:
+      let taken = client.onPaste(text)
+      rt.requestFrame()
+      if taken:
+        return true
+    if text.len > 0:
+      let (_, actual) = client.textForRange(selected)
+      client.areaUndoGroupOpen = false
+      rt.editTextField(client, actual, text)
+      client.areaUndoGroupOpen = false
+    true
+  of "selectAll":
+    client.anchor = 0
+    client.caret = client.fieldUtf16Len()
+    client.areaHasDesiredX = false
+    rt.keyboardFocusVisible = true
+    rt.updateTextInput()
+    rt.requestFrame()
+    true
+  of "delete":
+    let (_, actual) = client.textForRange(selected)
+    if not client.readOnly and actual.start < actual.`end`:
+      client.areaUndoGroupOpen = false
+      rt.editTextField(client, actual, "")
+    true
+  of "undo", "redo":
+    if not client.multiline or client.readOnly:
+      return true
+    client.areaUndoGroupOpen = false
+    let changed = if command == "undo": client.undoTextArea()
+      else: client.redoTextArea()
+    if changed:
+      owner.deferTextInputChange(owner.nodes[rt.focusSlot].identity,
+                                 owner.generation)
+      rt.keyboardFocusVisible = true
+      rt.updateTextInput()
+      rt.requestFrame()
+    true
+  else:
+    false
+
 proc textFieldKey(rt: Runtime; key: platform.Key;
                   mods: platform.Modifiers): bool =
   let owner = rt.frameLayout.owner
@@ -856,6 +947,19 @@ proc textFieldKey(rt: Runtime; key: platform.Key;
       rt.updateTextInput()
       rt.requestFrame()
     return true
+
+  if mods == command:
+    case key
+    of platform.keyC:
+      return rt.textFieldCommand("copy")
+    of platform.keyX:
+      return rt.textFieldCommand("cut")
+    of platform.keyV:
+      return rt.textFieldCommand("paste")
+    else:
+      discard
+  elif mods == (command or platform.modShift) and key == platform.keyV:
+    return rt.textFieldCommand("pasteAndMatchStyle")
 
   if key == platform.keyA and
       mods in {platform.modCtrl, platform.modSuper}:
@@ -1456,6 +1560,8 @@ proc event(rt: Runtime; ev: platform.SurfaceEvent): bool =
       rt.requestFrame()
       return true
     false
+  of platform.surfaceCommand:
+    rt.textFieldCommand(ev.text)
   of platform.pointerScroll:
     rt.pointerX = scrollDelta(ev.x)
     rt.pointerY = scrollDelta(ev.y)

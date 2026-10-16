@@ -7,6 +7,7 @@ type
 
 type TextFieldClient = ref object of platform.TextInputClient
   text, lastBoundValue, placeholder: string
+  onPaste: proc(text: string): bool {.closure.}
   boundBuffer: TextBuffer
   bufferSnapshot: TextSnapshot
   anchor, caret: int
@@ -640,6 +641,7 @@ proc textInputBase*(c: Context; value: var string): Element =
   if node == nil:
     return
   let client = result.acquireTextField(value)
+  client.onPaste = nil
   client.leaveTextAreaMode()
 
   if client.boundBuffer != nil:
@@ -669,6 +671,7 @@ proc textInputBufferBase*(c: Context; buffer: TextBuffer): Element =
   if node == nil:
     return
   let client = result.acquireTextField("")
+  client.onPaste = nil
   client.leaveTextAreaMode()
   if client.boundBuffer != buffer:
     client.boundBuffer = buffer
@@ -700,6 +703,7 @@ proc textAreaCore(c: Context; buffer: TextBuffer;
   if node == nil:
     return
   let client = result.acquireTextField("")
+  client.onPaste = nil
   var buffer = buffer
   if boundValue == nil:
     buffer.requireTextBuffer()
@@ -847,6 +851,15 @@ proc readOnly*(e: Element; value = true): Element =
   let client = e.fieldClient()
   if client != nil:
     client.readOnly = value
+
+proc onPaste*(e: Element; action: proc(text: string): bool {.closure.}): Element =
+  ## Lets action handle clipboard text before the field inserts it. An empty
+  ## string is passed when the clipboard has no plain text. This setting lasts
+  ## for the current build of the field.
+  result = e
+  let client = e.fieldClient()
+  if client != nil:
+    client.onPaste = action
 
 proc textSelection*(e: Element): tuple[start, `end`: int] =
   ## Returns the selected rune range, or the caret when both indices match.
