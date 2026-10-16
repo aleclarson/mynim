@@ -60,6 +60,14 @@ type
     generation: uint32
     initialized, moving, curve, pending, jumped: bool
 
+  ScalarSequence = object
+    frames: seq[Keyframe]
+    options: KeyframeOptions
+    startAt: MonoTime
+    fromValue, value: float32
+    generation: uint32
+    initialized, done: bool
+
   ElementOwner = ref object
     nodes: seq[ElementNode]
     idSlots: Table[uint64, int]
@@ -74,6 +82,7 @@ type
     pendingTextSubmitCallbacks: Table[uint64, seq[proc() {.closure.}]]
     textInputClients: Table[uint64, platform.TextInputClient]
     animations: Table[uint64, Table[string, ScalarAnimation]]
+    keyframes: Table[uint64, Table[string, ScalarSequence]]
     frameNow: MonoTime
     committedRects: seq[Rect]
     focusIdentity: uint64
@@ -348,6 +357,8 @@ proc newContext*(): Context =
     initTable[uint64, platform.TextInputClient]()
   result.owner.animations =
     initTable[uint64, Table[string, ScalarAnimation]]()
+  result.owner.keyframes =
+    initTable[uint64, Table[string, ScalarSequence]]()
   result.theme = lightTheme()
 
 proc multiplyWrap(a, b: uint64): uint64 {.inline.} =
@@ -674,6 +685,7 @@ proc retire(owner: ElementOwner) =
   owner.pendingTextSubmitCallbacks.clear()
   owner.textInputClients.clear()
   owner.animations.clear()
+  owner.keyframes.clear()
   owner.committedRects = @[]
   owner.focusIdentity = 0
   owner.focusActive = false
@@ -973,6 +985,8 @@ proc build*(c: Context; view: proc(c: Context) {.closure.}) =
       initTable[uint64, platform.TextInputClient]()
     c.owner.animations =
       initTable[uint64, Table[string, ScalarAnimation]]()
+    c.owner.keyframes =
+      initTable[uint64, Table[string, ScalarSequence]]()
   inc c.owner.generation
   c.owner.frameNow = getMonoTime()
   c.owner.animating = false
@@ -1022,6 +1036,12 @@ proc build*(c: Context; view: proc(c: Context) {.closure.}) =
         staleAnimations.add(identity)
     for identity in staleAnimations:
       c.owner.animations.del(identity)
+    var staleKeyframes: seq[uint64]
+    for identity in c.owner.keyframes.keys:
+      if not c.owner.idSlots.hasKey(identity):
+        staleKeyframes.add(identity)
+    for identity in staleKeyframes:
+      c.owner.keyframes.del(identity)
     built = true
   finally:
     c.owner.inBuild = false

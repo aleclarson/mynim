@@ -24,6 +24,19 @@ var dragging = true
 var dragPosition = 0'f32
 var dragValue: float32
 var dragVelocity: float32
+var playFinite = false
+var finiteRun = 0'u64
+var finiteValue: float32
+var finiteSettled: bool
+var playLoop = false
+var loopValue: float32
+var loopSettled: bool
+var finiteFrames = @[
+  ui.Keyframe(value: 0),
+  ui.Keyframe(at: initDuration(milliseconds = 100), value: 10)]
+let loopFrames = [
+  ui.Keyframe(value: 0),
+  ui.Keyframe(at: initDuration(milliseconds = 100), value: 10)]
 let uiContent = ui.newContent(proc(ctx: ui.Context) =
   let box = ctx.box()
   animatedValue = box.animate("probe", target,
@@ -40,6 +53,16 @@ let uiContent = ui.newContent(proc(ctx: ui.Context) =
     dragValue = box.spring("drag", 1, ui.SpringOptions(
       stiffness: 120, damping: 16))
     dragVelocity = box.velocity("drag")
+  if playFinite:
+    finiteValue = box.keyframes("finite", finiteFrames,
+      ui.KeyframeOptions(run: finiteRun, repeat: 1, alternate: true,
+        delay: initDuration(milliseconds = 50),
+        repeatDelay: initDuration(milliseconds = 40)))
+    finiteSettled = box.settled("finite")
+  if playLoop:
+    loopValue = box.keyframes("loop", loopFrames,
+      ui.KeyframeOptions(repeat: ui.RepeatForever, alternate: true))
+    loopSettled = box.settled("loop")
   discard ctx.switch(on).label("Enabled")
 )
 let win = newWindow(WindowOptions(width: 200, height: 80, hidden: true,
@@ -100,6 +123,50 @@ doAssert native.frame()
 doAssert springValue == 1
 doAssert springSettled
 doAssert dragValue == 1
+
+playFinite = true
+discard native.send(platform.SurfaceEvent(kind: platform.surfaceResize))
+doAssert native.frame()
+doAssert finiteValue == 0
+doAssert not finiteSettled
+sleep(70)
+doAssert native.frame()
+doAssert finiteValue > 0 and finiteValue < 10, $finiteValue
+sleep(130)
+doAssert native.frame()
+doAssert finiteValue > 0 and finiteValue < 10, $finiteValue
+sleep(130)
+doAssert native.frame()
+doAssert finiteValue == 0
+doAssert finiteSettled
+
+finiteFrames[^1].value = 20
+inc finiteRun
+discard native.send(platform.SurfaceEvent(kind: platform.surfaceResize))
+doAssert native.frame()
+doAssert finiteValue == 0
+doAssert not finiteSettled
+sleep(50)
+doAssert native.frame()
+doAssert finiteValue > 0 and finiteValue < 20, $finiteValue
+
+playLoop = true
+doAssert native.frame()
+doAssert loopValue == 0
+doAssert not loopSettled
+sleep(80)
+doAssert native.frame()
+let forwardValue = loopValue
+doAssert forwardValue > 0 and forwardValue < 10, $forwardValue
+sleep(50)
+doAssert native.frame()
+doAssert loopValue < forwardValue, $loopValue
+doAssert not loopSettled
+fake.setPreferences(platform.Preferences(reduceMotion: true))
+discard native.send(platform.SurfaceEvent(kind: platform.surfaceResize))
+doAssert native.frame()
+doAssert loopValue == 0
+doAssert loopSettled
 
 win.destroy()
 loop.shutdown()

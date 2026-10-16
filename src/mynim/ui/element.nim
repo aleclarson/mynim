@@ -64,6 +64,17 @@ type
     spring*: SpringOptions ## Spring settings when duration is zero.
     delay*: Duration ## Holds the current motion before changing target.
 
+  Keyframe* = object ## A scalar value at a point in a keyed animation.
+    at*: Duration ## Time from the start; the first frame must be at zero.
+    value*: float32
+    ease*: Easing ## Easing into this frame; defaults to linear.
+
+  KeyframeOptions* = object ## Playback settings for `Element.keyframes`.
+    run*: uint64 ## Change this to restart a changed sequence.
+    repeat*: int ## Additional plays; `RepeatForever` loops without end.
+    alternate*: bool ## Runs every other play backward.
+    delay*, repeatDelay*: Duration ## Holds before playback and between plays.
+
   ScrollMotionChannel = object
     value, velocity, target: float64
     at: MonoTime
@@ -288,6 +299,8 @@ let Snappy* = Animation(spring: SpringOptions(
   duration: initDuration(milliseconds = 500), bounce: 0.15))
 let Bouncy* = Animation(spring: SpringOptions(
   duration: initDuration(milliseconds = 500), bounce: 0.3))
+
+const RepeatForever* = -1 ## Repeats a keyframe sequence indefinitely.
 
 proc finiteMotion(value: float64): bool =
   classify(value) notin {fcNan, fcInf, fcNegInf}

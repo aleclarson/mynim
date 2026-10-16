@@ -1618,6 +1618,123 @@ proc advance(channel: var ScalarAnimation; now: MonoTime) =
 proc goal(channel: ScalarAnimation): float64 =
   if channel.pending: channel.pendingTarget else: channel.target
 
+proc playhead(raw, duration: int64; repeatCount: int; alternate: bool;
+              repeatDelay: int64): tuple[at, iteration: int64, done: bool] =
+  if raw <= 0:
+    return (0'i64, 0'i64, false)
+  if duration <= 0:
+    return (raw, 0'i64, false)
+  let period = if repeatDelay > high(int64) - duration:
+      high(int64)
+    else:
+      duration + repeatDelay
+  let iteration = raw div period
+  let rest = raw mod period
+  if repeatCount != RepeatForever:
+    let plays = if repeatCount == high(int): high(int64)
+      else: int64(repeatCount) + 1
+    if iteration >= plays or (iteration == plays - 1 and rest >= duration):
+      let finalAt = if alternate and plays mod 2 == 0: 0'i64 else: duration
+      return (finalAt, iteration, true)
+  var at = min(rest, duration)
+  if alternate and iteration mod 2 == 1:
+    at = duration - at
+  (at, iteration, false)
+
+proc finalValue(sequence: ScalarSequence): float32 =
+  let plays = if sequence.options.repeat == high(int): high(int64)
+    else: int64(sequence.options.repeat) + 1
+  if sequence.options.alternate and plays mod 2 == 0:
+    sequence.frames[0].value
+  else:
+    sequence.frames[^1].value
+
+proc sample(sequence: ScalarSequence; now: MonoTime):
+    tuple[value: float32, done: bool] =
+  if sequence.done:
+    return (sequence.value, true)
+  let elapsed = (now - sequence.startAt).inNanoseconds
+  if elapsed < 0:
+    return (sequence.fromValue, false)
+  let duration = sequence.frames[^1].at.inNanoseconds
+  let position = playhead(elapsed, duration, sequence.options.repeat,
+    sequence.options.alternate, sequence.options.repeatDelay.inNanoseconds)
+  if position.done:
+    return (sequence.finalValue(), true)
+  for i in 1..<sequence.frames.len:
+    let next = sequence.frames[i]
+    if position.at > next.at.inNanoseconds:
+      continue
+    let previous = sequence.frames[i - 1]
+    let start = previous.at.inNanoseconds
+    let stop = next.at.inNanoseconds
+    let fromValue = if i == 1 and position.iteration == 0:
+        sequence.fromValue
+      else:
+        previous.value
+    let progress = float32(position.at - start) / float32(stop - start)
+    let easing = if next.ease == nil: linear else: next.ease
+    let eased = easing(progress)
+    if not finiteMotion(float64(eased)):
+      raise newException(ValueError, "ui: keyframe easing result must be finite")
+    let value = fromValue + (next.value - fromValue) * eased
+    if not finiteMotion(float64(value)):
+      raise newException(ValueError, "ui: keyframe values must be finite")
+    return (value, false)
+  (sequence.finalValue(), false)
+
+proc keyframes*(e: Element; key: string; frames: openArray[Keyframe];
+                options = KeyframeOptions()): float32 =
+  ## Plays keyed scalar values in order, with optional repeats and alternation.
+  ## Increment `options.run` to replace a running sequence from its current value.
+  if frames.len < 2 or frames[0].at != DurationZero:
+    raise newException(ValueError,
+      "ui: keyframes needs at least two frames starting at zero")
+  for i, frame in frames:
+    if not finiteMotion(float64(frame.value)):
+      raise newException(ValueError, "ui: keyframe values must be finite")
+    if i > 0 and frame.at <= frames[i - 1].at:
+      raise newException(ValueError, "ui: keyframe times must strictly increase")
+  if options.repeat < RepeatForever or options.delay < DurationZero or
+      options.repeatDelay < DurationZero:
+    raise newException(ValueError,
+      "ui: keyframe repeat and delays must be nonnegative")
+  let node = e.node
+  if node == nil:
+    return frames[0].value
+  let owner = e.owner
+  var sequences = owner.keyframes.mgetOrPut(node.identity,
+    initTable[string, ScalarSequence]())
+  var sequence = sequences.getOrDefault(key)
+  if not sequence.initialized or
+      (sequence.generation != owner.generation and
+       sequence.generation + 1 != owner.generation):
+    sequence = ScalarSequence(frames: @frames, options: options,
+      startAt: owner.frameNow + options.delay,
+      fromValue: frames[0].value, value: frames[0].value,
+      generation: owner.generation, initialized: true)
+  elif sequence.options.run != options.run:
+    let fromValue = sequence.sample(owner.frameNow).value
+    sequence = ScalarSequence(frames: @frames, options: options,
+      startAt: owner.frameNow + options.delay,
+      fromValue: fromValue, value: fromValue,
+      generation: owner.generation, initialized: true)
+
+  if sequence.done:
+    discard
+  elif owner.reduceMotion:
+    sequence.value = sequence.finalValue()
+    sequence.done = true
+  else:
+    let sampled = sequence.sample(owner.frameNow)
+    sequence.value = sampled.value
+    sequence.done = sampled.done
+    owner.animating = owner.animating or not sequence.done
+  sequence.generation = owner.generation
+  sequences[key] = sequence
+  owner.keyframes[node.identity] = sequences
+  sequence.value
+
 proc cubicEaseOut(progress: float32): float32 =
   let inverse = 1'f32 - progress
   1'f32 - inverse * inverse * inverse
@@ -1743,10 +1860,14 @@ proc velocity*(e: Element; key: string): float32 =
   float32(channels.getOrDefault(key).velocity)
 
 proc settled*(e: Element; key: string): bool =
-  ## Reports whether a keyed scalar animation is at rest or has not started.
+  ## Reports whether a keyed scalar animation or keyframe sequence is at rest.
   let node = e.node
   if node == nil:
     return true
+  let sequences = e.owner.keyframes.getOrDefault(node.identity)
+  let sequence = sequences.getOrDefault(key)
+  if sequence.initialized and not sequence.done:
+    return false
   let channels = e.owner.animations.getOrDefault(node.identity)
   let channel = channels.getOrDefault(key)
   not channel.initialized or (not channel.moving and not channel.pending)
