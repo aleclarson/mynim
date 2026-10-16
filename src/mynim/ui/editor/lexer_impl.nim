@@ -28,6 +28,8 @@ const
   lexOperators = "+-*/%=&|^!<>~?:@#"
 
 proc addToken(tokens: var seq[Token]; pastLast: int; kind: TokenKind) =
+  if pastLast <= 0:
+    return
   if tokens.len > 0:
     let last = tokens.len - 1
     if tokens[last].pastLast >= pastLast:
@@ -522,8 +524,9 @@ proc lexLine(config: LexConfig; line: string; state: uint64;
   result = uint64(mode and 0xff) or (uint64(depth and 0xff) shl 8)
 
 proc builtinTokenizer(name: string): Tokenizer =
-  if name in ["HTML", "XML", "Markdown", "Diff"]:
-    return nil
+  result = specialTokenizer(name)
+  if result != nil:
+    return
   let config = lexConfig(name)
   result = proc(line: string; state: uint64;
                 tokens: var seq[Token]): uint64 =

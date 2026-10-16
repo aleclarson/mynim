@@ -63,7 +63,12 @@ type
     hardTabs*: bool ## Whether this language usually indents with tab bytes.
     tokenizer*: Tokenizer ## Optional line tokenizer; nil leaves text unstyled.
 
+proc languageNamed*(name: string): Language
+proc languages*(): seq[Language]
+proc specialTokenizer(name: string): Tokenizer
+
 include "lexer_impl"
+include "special_lexer_impl"
 
 proc brackets(mode: BracketMode): seq[BracketPair] =
   if mode in {bracketCommon, bracketCommonAndAngles}:
