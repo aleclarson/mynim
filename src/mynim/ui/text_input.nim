@@ -12,6 +12,8 @@ type TextFieldClient = ref object of platform.TextInputClient
   style: textStack.Style
   shaped: textStack.Layout
   multiline, areaInitialized: bool
+  areaStringBound, areaStringChanged: bool
+  areaStringValue: string
   areaScroll: ScrollState
   areaHeights: ParagraphHeightIndex
   areaLineHeights: seq[float32]
@@ -275,6 +277,7 @@ proc replaceAreaText(client: TextFieldClient; range: platform.TextRange;
   client.anchor = client.caret
   client.hasMark = false
   client.nativeChanged = false
+  client.areaStringChanged = client.areaStringBound
   client.revealAreaCaret()
   result = true
 
@@ -494,8 +497,23 @@ proc leaveTextAreaMode(client: TextFieldClient) =
   client.areaInitialized = false
   client.areaHasLayout = false
   client.areaHasDesiredX = false
+  client.areaStringBound = false
+  client.areaStringChanged = false
+  client.areaStringValue.setLen(0)
   client.areaScroll = nil
   client.areaLayouts.clear()
+
+proc initializeTextArea(client: TextFieldClient; buffer: TextBuffer) =
+  client.multiline = true
+  client.boundBuffer = buffer
+  client.areaScroll = newScrollState()
+  client.areaHasLayout = false
+  client.areaLineHeight = 0
+  client.areaLayouts = initTable[int, textStack.Layout]()
+  client.areaInitialized = false
+  client.areaStringBound = false
+  client.areaStringChanged = false
+  client.areaStringValue.setLen(0)
 
 proc textInputBase*(c: Context; value: var string): Element =
   ## Creates an unstyled single-line text field. It copies native edits into
@@ -558,22 +576,37 @@ proc textInputBufferBase*(c: Context; buffer: TextBuffer): Element =
     return
   c.finishTextField(result, client)
 
-proc textAreaBufferBase*(c: Context; buffer: TextBuffer): Element =
-  ## Creates an unstyled multiline editor over an indexed text buffer.
-  buffer.requireTextBuffer()
+proc textAreaCore(c: Context; buffer: TextBuffer;
+                  boundValue: ptr string): Element =
   result = c.newTextFieldElement()
   let node = result.node
   if node == nil:
     return
   let client = result.acquireTextField("")
-  if not client.multiline or client.boundBuffer != buffer:
-    client.multiline = true
-    client.boundBuffer = buffer
-    client.areaScroll = newScrollState()
-    client.areaHasLayout = false
-    client.areaLineHeight = 0
-    client.areaLayouts = initTable[int, textStack.Layout]()
+  var buffer = buffer
+  if boundValue == nil:
+    buffer.requireTextBuffer()
+    if client.areaStringBound:
+      client.areaStringBound = false
+      client.areaStringChanged = false
+      client.areaStringValue.setLen(0)
+    if not client.multiline or client.boundBuffer != buffer:
+      client.initializeTextArea(buffer)
+  elif not client.multiline or not client.areaStringBound:
+    buffer = newTextBuffer(boundValue[])
+    client.initializeTextArea(buffer)
+    client.areaStringBound = true
+    client.areaStringValue = boundValue[]
+  elif boundValue[] != client.areaStringValue:
+    client.boundBuffer.set(boundValue[])
+    client.areaStringValue = boundValue[]
+    client.areaStringChanged = false
     client.areaInitialized = false
+    client.areaHasDesiredX = false
+  elif client.areaStringChanged and not client.hasMark:
+    boundValue[] = $client.boundBuffer
+    client.areaStringValue = boundValue[]
+    client.areaStringChanged = false
   discard client.syncTextAreaBuffer()
   node[].textColor = c.theme.text
   node[].textColorSet = true
@@ -625,6 +658,15 @@ proc textAreaBufferBase*(c: Context; buffer: TextBuffer): Element =
   if not result.deliverTextFieldCallbacks():
     return
 
+proc textAreaBase*(c: Context; value: var string): Element =
+  ## Creates an unstyled multiline editor bound to a string. Native edits are
+  ## copied into value on the next build before the field's change actions.
+  result = c.textAreaCore(nil, addr value)
+
+proc textAreaBufferBase*(c: Context; buffer: TextBuffer): Element =
+  ## Creates an unstyled multiline editor over an indexed text buffer.
+  result = c.textAreaCore(buffer, nil)
+
 proc themeTextInput(c: Context; e: Element): Element =
   let theme = c.theme
   result = e
@@ -646,6 +688,12 @@ proc textAreaBuffer*(c: Context; buffer: TextBuffer): Element =
   ## Creates a themed multiline editor backed by indexed text storage.
   let theme = c.theme
   result = c.themeTextInput(c.textAreaBufferBase(buffer))
+  discard result.minHeight(theme.space(20))
+
+proc textArea*(c: Context; value: var string): Element =
+  ## Creates a themed multiline editor bound to a string.
+  let theme = c.theme
+  result = c.themeTextInput(c.textAreaBase(value))
   discard result.minHeight(theme.space(20))
 
 proc textInput*(c: Context; value: var string): Element =
