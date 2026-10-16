@@ -92,6 +92,13 @@ type
     state: SidebarState
     depth: int
 
+  EditableTextState = ref object
+    editing, fresh: bool
+    requestInputFocus, requestFocus: bool
+    commitPending, cancelPending: bool
+    draft: string
+    renameDeadline: MonoTime
+
   ScalarAnimation = object
     value, velocity, fromValue, target: float64
     at, startAt, pendingAt: MonoTime
@@ -212,6 +219,7 @@ type
     colorPickerStates: Table[uint64, ColorPickerState]
     dateControlStates: Table[uint64, DateControlState]
     timeControlStates: Table[uint64, TimeControlState]
+    editableTextStates: Table[uint64, EditableTextState]
     toasts: seq[ToastEntry]
     toastState: ToastState
     announcements: seq[string]
@@ -243,6 +251,7 @@ type
     trackedBounds: HashSet[uint64]
     focusIdentity: uint64
     focusActive: bool
+    afterDeadline: MonoTime
     invalidate: proc() {.closure.}
     natural: seq[NaturalSize]
     rectScratch: seq[Rect]
@@ -251,7 +260,7 @@ type
     flexLines: seq[FlexLine]
     gridScratch: GridScratch
     flexSizes, flexBases, flexMin, flexMax, flexFactors: seq[float32]
-    hoveredSlots, pressedSlots, clickedSlots, focusedSlots,
+    hoveredSlots, pressedSlots, clickedSlots, doubleClickedSlots, focusedSlots,
       focusVisibleSlots: seq[int]
     generation: uint32
     parent: int32
@@ -323,7 +332,7 @@ type
     keyScope: string
     row, reverse, wrap, wrapReverse, grid, absolute, alignSet,
       justifySet, focusable, activateEnter, focused, focusVisible,
-      focusRingDisabled, scrollX, scrollY,
+      focusRingDisabled, doubleClicked, scrollX, scrollY,
       revealInScroll, rightToLeft, directionSet: bool
     focusGroupSet, groupSelects: bool
     toolbarCollapsed, toolbarMore: bool
@@ -461,6 +470,7 @@ const
   identityClicked = 1'u8 shl 2
   identityFocused = 1'u8 shl 3
   identityFocusVisible = 1'u8 shl 4
+  identityDoubleClicked = 1'u8 shl 5
   noticeChanged = 1'u8 shl 0
   noticeSubmitted = 1'u8 shl 1
   rootIdentity = 0x6A09E667F3BCC909'u64
@@ -568,6 +578,7 @@ proc newContext*(): Context =
   result.owner.colorPickerStates = initTable[uint64, ColorPickerState]()
   result.owner.dateControlStates = initTable[uint64, DateControlState]()
   result.owner.timeControlStates = initTable[uint64, TimeControlState]()
+  result.owner.editableTextStates = initTable[uint64, EditableTextState]()
   result.owner.toastState = ToastState()
   result.owner.rangeSliderDrags = initTable[uint64, int8]()
   result.owner.pendingTextCallbacks =
@@ -588,6 +599,22 @@ proc newContext*(): Context =
   result.owner.pendingFileDrops = initTable[uint64, seq[string]]()
   result.accordionHeaders = initTable[uint64, seq[uint64]]()
   result.theme = lightTheme()
+
+proc after(c: Context; d: Duration) =
+  ## Requests another frame after d, for something delayed by time.
+  if c == nil or c.owner == nil or c.owner.closed:
+    return
+  let owner = c.owner
+  let delay = if d.inMilliseconds < 0:
+      initDuration(milliseconds = 0)
+    else:
+      d
+  let now = if owner.inBuild: owner.frameNow else: getMonoTime()
+  let deadline = now + delay
+  if owner.afterDeadline == MonoTime() or deadline < owner.afterDeadline:
+    owner.afterDeadline = deadline
+  if not owner.inBuild and owner.invalidate != nil:
+    owner.invalidate()
 
 proc multiplyWrap(a, b: uint64): uint64 {.inline.} =
   cast[uint64](cast[int64](a) *% cast[int64](b))
@@ -630,6 +657,7 @@ proc applyPreviousInteraction(owner: ElementOwner; node: var ElementNode) =
   node.hovered = (state and identityHovered) != 0
   node.pressed = (state and identityPressed) != 0
   node.clicked = (state and identityClicked) != 0
+  node.doubleClicked = (state and identityDoubleClicked) != 0
   node.focused = (state and identityFocused) != 0
   node.focusVisible = (state and identityFocusVisible) != 0
   let notices = owner.pendingNotices.getOrDefault(node.identity)
@@ -927,6 +955,7 @@ proc retire(owner: ElementOwner) =
   owner.activeModalIdentity = 0
   owner.comboBoxStates.clear()
   owner.colorPickerStates.clear()
+  owner.editableTextStates.clear()
   owner.timeControlStates.clear()
   owner.toasts.setLen(0)
   owner.announcements.setLen(0)
@@ -958,6 +987,7 @@ proc retire(owner: ElementOwner) =
   owner.trackedBounds.clear()
   owner.focusIdentity = 0
   owner.focusActive = false
+  owner.afterDeadline = MonoTime()
   owner.invalidate = nil
   owner.natural = @[]
   owner.rectScratch = @[]
@@ -973,6 +1003,7 @@ proc retire(owner: ElementOwner) =
   owner.hoveredSlots = @[]
   owner.pressedSlots = @[]
   owner.clickedSlots = @[]
+  owner.doubleClickedSlots = @[]
   owner.focusedSlots = @[]
   owner.focusVisibleSlots = @[]
 
@@ -1113,6 +1144,7 @@ proc newElement(c: Context; row: bool;
                          hovered: index in c.owner.hoveredSlots,
                          pressed: index in c.owner.pressedSlots,
                          clicked: index in c.owner.clickedSlots,
+                         doubleClicked: index in c.owner.doubleClickedSlots,
                          focused: index in c.owner.focusedSlots,
                          activateEnter: true,
                          focusVisible: index in c.owner.focusVisibleSlots,
@@ -1292,6 +1324,7 @@ proc build*(c: Context; view: proc(c: Context) {.closure.}) =
     c.owner.colorPickerStates = initTable[uint64, ColorPickerState]()
     c.owner.dateControlStates = initTable[uint64, DateControlState]()
     c.owner.timeControlStates = initTable[uint64, TimeControlState]()
+    c.owner.editableTextStates = initTable[uint64, EditableTextState]()
     c.owner.toastState = ToastState()
     c.owner.toasts.setLen(0)
     c.owner.announcements.setLen(0)
@@ -1480,6 +1513,12 @@ proc build*(c: Context; view: proc(c: Context) {.closure.}) =
         staleTimeControls.add(identity)
     for identity in staleTimeControls:
       c.owner.timeControlStates.del(identity)
+    var staleEditableTexts: seq[uint64]
+    for identity in c.owner.editableTextStates.keys:
+      if not c.owner.idSlots.hasKey(identity):
+        staleEditableTexts.add(identity)
+    for identity in staleEditableTexts:
+      c.owner.editableTextStates.del(identity)
     built = true
   finally:
     c.owner.inBuild = false
@@ -1506,6 +1545,7 @@ proc build*(c: Context; view: proc(c: Context) {.closure.}) =
     c.owner.hoveredSlots.setLen(0)
     c.owner.pressedSlots.setLen(0)
     c.owner.clickedSlots.setLen(0)
+    c.owner.doubleClickedSlots.setLen(0)
     c.themeBackground = false
 
 proc close*(c: Context) =

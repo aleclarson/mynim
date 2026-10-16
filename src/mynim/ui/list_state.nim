@@ -527,6 +527,8 @@ proc newListState*(estimatedRowHeight = 28'f32; rowGap = 0'f32;
   result.multiSelectionEnabled = multiSelectable
   result.followEnd = followEnd
   result.selectedRow = -1
+  result.editRow = -1
+  result.lastClickRow = -1
   result.selectionPivot = -1
   result.last = -1
 
@@ -717,6 +719,22 @@ proc selectListKey(state: ListState; key: platform.Key;
                    mods: platform.Modifiers): bool =
   if state == nil or not state.selectionEnabled or state.rowCount <= 0:
     return false
+
+  when defined(macosx):
+    let editKeyPressed = key == platform.keyEnter
+  else:
+    let editKeyPressed = key == platform.keyF2
+  if state.editables and mods == 0 and editKeyPressed:
+    let selected = state.selectedRow
+    if selected >= 0 and selected < state.rowCount and
+        not state.isListHeader(selected):
+      state.editAsked = true
+      state.editRow = selected
+      state.editKeyValid = state.rowKey != nil
+      state.editKey = if state.editKeyValid: state.rowKey(selected) else: ""
+      state.request = listRequestIntoView
+      state.requestRow = selected
+      return true
 
   when defined(macosx):
     const commandMask = platform.modSuper

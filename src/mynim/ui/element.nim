@@ -231,6 +231,10 @@ type
     keepOffset: bool
     rowCount: int
     viewportHeight: float32
+    editRow, lastClickRow, lastClickCount: int
+    editKey: string
+    lastClickGeneration: uint32
+    editables, editablesNow, editAsked, editKeyValid: bool
     first, last: int
     selectedRow: int
     selectedKey: string

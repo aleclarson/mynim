@@ -2800,6 +2800,11 @@ proc clicked*(e: Element): bool =
   let n = e.node
   n != nil and n.clicked
 
+proc doubleClicked*(e: Element): bool =
+  ## Reports a double click on this element during the current build.
+  let n = e.node
+  n != nil and n.doubleClicked
+
 proc focusable*(e: Element): Element =
   ## Includes this element in sequential keyboard and accessibility focus.
   result = e

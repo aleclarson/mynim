@@ -62,6 +62,12 @@ proc list*(c: Context; state: ListState; count: Natural;
       state.generation == c.owner.generation:
     raise newException(ValueError, "ui: one ListState cannot build two lists in a frame")
 
+  state.editables = state.editablesNow
+  state.editablesNow = false
+  if state.lastClickGeneration != c.owner.generation:
+    state.lastClickRow = -1
+    state.lastClickCount = 0
+
   let plan = state.beginList(int(count))
   result = c.column().scrollY(state.scrollState)
   if state.selectionEnabled:
@@ -99,3 +105,5 @@ proc list*(c: Context; state: ListState; count: Natural;
         pinnedHeader = true)
       discard header.absolute().top(y).left(0).right(0)
   )
+  if state.editAsked:
+    state.editAsked = false

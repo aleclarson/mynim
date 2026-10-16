@@ -36,7 +36,8 @@ type
     localDrag: LocalDragState
     splitPointerOffset: float64
     hasPointer: bool
-    hoverSlots, pressHoverSlots, pressedSlots, clickedSlots: seq[int]
+    hoverSlots, pressHoverSlots, pressedSlots, clickedSlots,
+      doubleClickedSlots: seq[int]
     frameScene: scene.Scene
     hasScene: bool
     accessibilityOn: bool
@@ -1919,6 +1920,8 @@ proc renderFrame(rt: Runtime; presentFrame = true) =
     identityPressed)
   previousOwner.rememberInteraction(previousIdentities, rt.clickedSlots,
     identityClicked)
+  previousOwner.rememberInteraction(previousIdentities, rt.doubleClickedSlots,
+    identityDoubleClicked)
   if rt.focusSlot > 0 and rt.focusSlot < previousIdentities.len:
     let identity = previousIdentities[rt.focusSlot]
     previousOwner.previousInteraction[identity] =
@@ -1939,9 +1942,11 @@ proc renderFrame(rt: Runtime; presentFrame = true) =
   previousOwner.hoveredSlots.setLen(0)
   previousOwner.pressedSlots.setLen(0)
   previousOwner.clickedSlots.setLen(0)
+  previousOwner.doubleClickedSlots.setLen(0)
   previousOwner.focusedSlots.setLen(0)
   previousOwner.focusVisibleSlots.setLen(0)
   rt.clickedSlots.setLen(0)
+  rt.doubleClickedSlots.setLen(0)
   rt.context.reduceMotion = rt.systemPreferences.reduceMotion
   rt.context.build(rt.view)
   let currentOwner = rt.context.owner
@@ -2011,6 +2016,12 @@ proc renderFrame(rt: Runtime; presentFrame = true) =
 
   if presentFrame and layout.animating:
     rt.requestFrame()
+
+  if presentFrame and currentOwner.afterDeadline != MonoTime():
+    if getMonoTime() >= currentOwner.afterDeadline:
+      currentOwner.afterDeadline = MonoTime()
+    else:
+      rt.requestFrame()
 
   if presentFrame and not rt.ready and rt.conn.ready != nil and
       rt.conn.post != nil:
@@ -2872,6 +2883,7 @@ proc event(rt: Runtime; ev: platform.SurfaceEvent): bool =
   of platform.pointerUp:
     if ev.button != 0:
       return false
+    rt.doubleClickedSlots.setLen(0)
     if rt.localDrag != nil:
       let drag = rt.localDrag
       let owner = rt.frameLayout.owner
@@ -3012,6 +3024,33 @@ proc event(rt: Runtime; ev: platform.SurfaceEvent): bool =
     rt.clickedSlots.setLen(0)
     if clicked:
       rt.clickedSlots.add(clickedSlot)
+      if ev.clicks >= 2:
+        rt.doubleClickedSlots.add(clickedSlot)
+      if clickedSlot > 0 and clickedSlot < rt.frameLayout.owner.nodes.len:
+        var rowSlot = clickedSlot
+        while rowSlot > 0 and rowSlot < rt.frameLayout.owner.nodes.len:
+          let rowNode = rt.frameLayout.owner.nodes[rowSlot]
+          if rowNode.listState != nil and rowNode.listRowIndex >= 0:
+            let state = rowNode.listState
+            state.lastClickRow = rowNode.listRowIndex
+            state.lastClickCount = max(ev.clicks, 1)
+            state.lastClickGeneration = rt.frameLayout.owner.generation + 1
+            if ev.clicks >= 2:
+              var ancestor = rowSlot
+              var listIdentity = 0'u64
+              while ancestor > 0 and
+                  ancestor < rt.frameLayout.owner.nodes.len:
+                let listNode = rt.frameLayout.owner.nodes[ancestor]
+                if listNode.listState == state and listNode.listRowIndex == -1:
+                  listIdentity = listNode.identity
+                ancestor = int(listNode.parent)
+              if listIdentity != 0:
+                let notices = rt.frameLayout.owner.pendingNotices
+                  .getOrDefault(listIdentity)
+                rt.frameLayout.owner.pendingNotices[listIdentity] =
+                  notices or noticeSubmitted
+            break
+          rowSlot = int(rowNode.parent)
     rt.pressTarget = Element()
     rt.pressMods = 0
     rt.dragCandidateIdentity = 0
