@@ -219,6 +219,138 @@ proc sceneGradient(rect: scene.Rect; value: LinearGradient):
   result.paint = if value.oklab: scene.paintOklab else: scene.paintLinear
   result.points = [sx, sy, ex, ey]
 
+proc mixPathHash(key: var uint64; value: uint32) =
+  let mixed = cast[int64](key xor uint64(value)) *%
+    cast[int64](1099511628211'u64)
+  key = cast[uint64](mixed)
+
+proc pathHash(path: FlatPath; width: float32): uint64 =
+  result = 14695981039346656037'u64
+  result.mixPathHash(cast[uint32](width))
+  for i in 0 ..< path.flatPolys:
+    for point in path.poly(i):
+      result.mixPathHash(cast[uint32](point[0]))
+      result.mixPathHash(cast[uint32](point[1]))
+    result.mixPathHash(if path.closed[i]: 1'u32 else: 0'u32)
+
+proc paintPath(painter: var Painter; path: Path; strokeWidth: float32;
+               color: Color; gradient: LinearGradient; hasGradient: bool) =
+  if path == nil or painter.frame == nil or
+      (if hasGradient: gradient.fromColor.a == 0 and gradient.toColor.a == 0
+       else: color.a == 0):
+    return
+  let width = if classify(strokeWidth) in {fcNan, fcInf, fcNegInf}:
+      0'f32
+    else:
+      max(strokeWidth, 0'f32) * painter.scale
+  var flat = path.flatten(painter.scale)
+  if flat.flatPolys == 0:
+    return
+  let rootX = painter.root.x * painter.scale
+  let rootY = painter.root.y * painter.scale
+  for point in flat.points.mitems:
+    point[0] -= rootX
+    point[1] -= rootY
+
+  var minX = high(float32)
+  var minY = high(float32)
+  var maxX = low(float32)
+  var maxY = low(float32)
+  for point in flat.points:
+    if classify(point[0]) in {fcNan, fcInf, fcNegInf} or
+        classify(point[1]) in {fcNan, fcInf, fcNegInf}:
+      return
+    minX = min(minX, point[0])
+    minY = min(minY, point[1])
+    maxX = max(maxX, point[0])
+    maxY = max(maxY, point[1])
+
+  let halfWidth = width / 2
+  let x0 = floor(minX - halfWidth).float32
+  let y0 = floor(minY - halfWidth).float32
+  let widthValue = ceil(maxX + halfWidth - x0) + 1
+  let heightValue = ceil(maxY + halfWidth - y0) + 1
+  if classify(widthValue) in {fcNan, fcInf, fcNegInf} or
+      classify(heightValue) in {fcNan, fcInf, fcNegInf} or
+      widthValue <= 0 or heightValue <= 0 or widthValue > 4096 or
+      heightValue > 4096:
+    return
+  let maskWidth = int(widthValue)
+  let maskHeight = int(heightValue)
+  let maskKey = flat.pathHash(width)
+  let image = painter.textSystem.mask(maskKey,
+    proc(): tuple[w, h: int, pix: seq[byte]] =
+      result.w = maskWidth
+      result.h = maskHeight
+      result.pix = if halfWidth > 0:
+          flat.strokeMask(x0, y0, halfWidth, maskWidth, maskHeight)
+        else:
+          flat.fillMask(x0, y0, maskWidth, maskHeight))
+  if not image.ok:
+    return
+
+  var drawColor = color
+  if width > 0:
+    let fade = flat.capFade(width)
+    drawColor = drawColor.alpha(fade)
+  let gradientFrom = if hasGradient:
+      gradient.fromColor.alpha(flat.capFade(width))
+    else:
+      transparent
+  let gradientTo = if hasGradient:
+      gradient.toColor.alpha(flat.capFade(width))
+    else:
+      transparent
+  let wideColors = if hasGradient:
+      wideColors(gradientFrom, gradientTo, transparent)
+    else:
+      wideColors(drawColor, transparent, transparent)
+  let wideIndex = painter.frame.addWide(wideColors)
+  let start = int32(painter.frame.glyphs.len)
+  painter.frame.glyphs.add(scene.Glyph(x: x0, y: y0,
+    w: float32(image.w), h: float32(image.h), u: image.x, v: image.y,
+    uw: image.w, vh: image.h, color: sceneColor(drawColor), wide: wideIndex))
+  var op = scene.Op(kind: scene.opGlyphs, first: start, last: start + 1,
+    opacity: painter.opacity)
+  if hasGradient:
+    let rect = scene.Rect(x: x0, y: y0,
+      w: maxX - minX + width, h: maxY - minY + width)
+    let info = sceneGradient(rect, gradient)
+    op.rect = rect
+    op.paint = info.paint
+    op.color = sceneColor(gradientFrom)
+    op.color2 = sceneColor(gradientTo)
+    op.gradient = info.points
+    op.wide = wideIndex
+  painter.frame.ops.add(op)
+
+proc draw*(element: Element;
+           callback: proc(painter: var Painter; rect: Rect) {.closure.}): Element =
+  ## Adds custom vector drawing in the element's bounds.
+  result = element
+  let node = element.node
+  if node != nil:
+    node.drawFn = callback
+
+proc fillPath*(painter: var Painter; path: Path; color: Color) =
+  ## Fills a vector path with non-zero winding.
+  painter.paintPath(path, 0, color, LinearGradient(), false)
+
+proc fillPathGradient*(painter: var Painter; path: Path;
+                       gradient: LinearGradient) =
+  ## Fills a path with a gradient across its bounds.
+  painter.paintPath(path, 0, gradient.fromColor, gradient, true)
+
+proc strokePath*(painter: var Painter; path: Path; width: float32;
+                 color: Color) =
+  ## Draws a vector path with round joins and caps.
+  painter.paintPath(path, width, color, LinearGradient(), false)
+
+proc strokePathGradient*(painter: var Painter; path: Path; width: float32;
+                         gradient: LinearGradient) =
+  ## Draws a vector path with a gradient across its bounds.
+  painter.paintPath(path, width, gradient.fromColor, gradient, true)
+
 proc paintShadow(s: scene.Scene; node: ElementNode; box, root: Rect;
                  scale, opacity: float32; value: UiShadow) =
   if value.color.a == 0:
@@ -906,8 +1038,8 @@ proc paintScene*(layout: LayoutResult; scale = 1'f32;
         let borderVisible = not node.textInline and
           node.borderColor.a > 0 and scene.hasBorder(node.border)
         if not fillVisible and not borderVisible and node.shadows.len == 0 and
-            not node.hasText and
-            node.bitmap == nil and node.vector == nil:
+            not node.hasText and node.bitmap == nil and node.vector == nil and
+            node.drawFn == nil:
           continue
 
         let rect = layout.rects[slot].sceneRect(layout.root, scale)
@@ -971,6 +1103,10 @@ proc paintScene*(layout: LayoutResult; scale = 1'f32;
         result.paintBitmap(node, layout.rects[slot], layout.root, scale,
                            opacity)
         result.paintSvg(node, layout.rects[slot], layout.root, scale, opacity)
+        if node.drawFn != nil:
+          var painter = Painter(frame: result, textSystem: system,
+            root: layout.root, scale: scale, opacity: opacity)
+          node.drawFn(painter, layout.rects[slot])
         for _ in 0..<clipCount:
           result.ops.add(scene.Op(kind: scene.opPopClip))
 
