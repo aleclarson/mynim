@@ -1036,6 +1036,13 @@ proc textSelection*(e: Element): tuple[start, `end`: int] =
     result = (client.fieldRuneIndex(min(client.anchor, client.caret)),
               client.fieldRuneIndex(max(client.anchor, client.caret)))
 
+proc textAnchorCaret*(e: Element): tuple[anchor, caret: int] =
+  ## Returns the text selection endpoints in runes, preserving its direction.
+  let client = e.fieldClient()
+  if client != nil:
+    result = (client.fieldRuneIndex(client.anchor),
+              client.fieldRuneIndex(client.caret))
+
 proc setTextSelection*(e: Element; start, `end`: int): Element =
   ## Selects a rune range or places the caret at start when the indices match.
   result = e
