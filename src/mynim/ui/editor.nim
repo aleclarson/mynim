@@ -36,6 +36,9 @@ type
     syntaxLanguage: syntax.Language
     syntaxVersion: uint64
     syntaxStates: seq[uint64]
+    syntaxFrontier: int ## Number of current line-start states validated.
+    syntaxConfirmed: int ## Old states available to reuse after convergence.
+    syntaxDirty: int ## Last changed line before which state cannot converge.
 
   BufferUndoEntry = object
     before, after: ui.TextSnapshot
@@ -47,6 +50,8 @@ type
   SyntaxChange = object
     version: uint64
     firstChangedLine: int
+    lastChangedLine: int
+    lineDelta: int
 
   Buffer* = ref object ## Thread-safe document text, save state, and undo history.
     mu: Lock
@@ -181,10 +186,15 @@ proc clearSyntaxCache(state: State; language: syntax.Language;
   state.syntaxLanguage = language
   state.syntaxVersion = version
   state.syntaxStates = @[0'u64]
+  state.syntaxFrontier = 1
+  state.syntaxConfirmed = 1
+  state.syntaxDirty = -1
 
 proc syntaxChangesSince(buffer: Buffer; oldVersion, newVersion: uint64):
-    tuple[complete: bool, firstChangedLine: int] =
+    tuple[complete, lineStable: bool, firstChangedLine, lastChangedLine: int] =
+  result.lineStable = true
   result.firstChangedLine = high(int)
+  result.lastChangedLine = -1
   if buffer == nil:
     return
   withLock buffer.mu:
@@ -201,6 +211,10 @@ proc syntaxChangesSince(buffer: Buffer; oldVersion, newVersion: uint64):
         return
       result.firstChangedLine = min(result.firstChangedLine,
         change.firstChangedLine)
+      result.lastChangedLine = max(result.lastChangedLine,
+        change.lastChangedLine)
+      if change.lineDelta != 0:
+        result.lineStable = false
       inc expected
     result.complete = expected == newVersion + 1
 
@@ -215,24 +229,51 @@ proc cachedTokens(state: State; snapshot: Snapshot;
   elif state.syntaxVersion != snapshot.version():
     let changes = state.buffer.syntaxChangesSince(state.syntaxVersion,
       snapshot.version())
-    if changes.complete:
+    if changes.complete and changes.lineStable:
       if changes.firstChangedLine != high(int):
-        state.syntaxStates.setLen(min(state.syntaxStates.len,
-          changes.firstChangedLine + 1))
+        state.syntaxDirty = max(state.syntaxDirty, changes.lastChangedLine)
+        state.syntaxFrontier = min(state.syntaxFrontier,
+          min(state.syntaxStates.len, changes.firstChangedLine + 1))
     else:
       state.syntaxStates = @[0'u64]
+      state.syntaxFrontier = 1
+      state.syntaxConfirmed = 1
+      state.syntaxDirty = -1
     state.syntaxVersion = snapshot.version()
   var scratch: seq[syntax.Token]
-  while state.syntaxStates.len <= line:
-    let index = state.syntaxStates.len - 1
-    let next = language.tokenizer(snapshot.line(index),
-      state.syntaxStates[index], scratch)
-    state.syntaxStates.add(next)
-    scratch.setLen(0)
-  let next = language.tokenizer(snapshot.line(line),
-    state.syntaxStates[line], result)
-  if line == state.syntaxStates.len - 1:
-    state.syntaxStates.add(next)
+  var tokenizedTarget = false
+  while state.syntaxFrontier <= line + 1:
+    let index = state.syntaxFrontier - 1
+    let hasCachedEnd = index + 1 < state.syntaxStates.len
+    let cachedEnd = if hasCachedEnd: state.syntaxStates[index + 1] else: 0'u64
+    var next: uint64
+    if index == line:
+      next = language.tokenizer(snapshot.line(index),
+        state.syntaxStates[index], result)
+      tokenizedTarget = true
+    else:
+      scratch.setLen(0)
+      next = language.tokenizer(snapshot.line(index),
+        state.syntaxStates[index], scratch)
+    if state.syntaxDirty >= 0 and index >= state.syntaxDirty and
+        hasCachedEnd and state.syntaxConfirmed > index + 2 and
+        cachedEnd == next:
+      state.syntaxFrontier = state.syntaxConfirmed
+      state.syntaxDirty = -1
+      continue
+    if hasCachedEnd:
+      state.syntaxStates[index + 1] = next
+    else:
+      state.syntaxStates.add(next)
+    state.syntaxFrontier = index + 2
+    if state.syntaxDirty < 0:
+      state.syntaxConfirmed = state.syntaxFrontier
+    elif state.syntaxFrontier >= state.syntaxConfirmed:
+      state.syntaxConfirmed = state.syntaxFrontier
+      state.syntaxDirty = -1
+  if not tokenizedTarget:
+    discard language.tokenizer(snapshot.line(line),
+      state.syntaxStates[line], result)
 
 proc syntaxColor(theme: ui.Theme; kind: syntax.TokenKind): ui.Color =
   case kind
@@ -283,7 +324,8 @@ proc same*(a, b: Snapshot): bool =
   ## excluded.
   a.document.same(b.document)
 
-proc recordSyntaxChange(buffer: Buffer; firstChangedLine: int) =
+proc recordSyntaxChange(buffer: Buffer; firstChangedLine, lastChangedLine,
+                        lineDelta: int) =
   if firstChangedLine == high(int):
     return
   let version = buffer.document.version()
@@ -291,9 +333,14 @@ proc recordSyntaxChange(buffer: Buffer; firstChangedLine: int) =
       buffer.syntaxChanges[^1].version == version:
     buffer.syntaxChanges[^1].firstChangedLine = min(
       buffer.syntaxChanges[^1].firstChangedLine, firstChangedLine)
+    buffer.syntaxChanges[^1].lastChangedLine = max(
+      buffer.syntaxChanges[^1].lastChangedLine, lastChangedLine)
+    buffer.syntaxChanges[^1].lineDelta += lineDelta
   else:
     buffer.syntaxChanges.add(SyntaxChange(version: version,
-      firstChangedLine: max(firstChangedLine, 0)))
+      firstChangedLine: max(firstChangedLine, 0),
+      lastChangedLine: max(lastChangedLine, firstChangedLine),
+      lineDelta: lineDelta))
   if buffer.transactionDepth > 0:
     buffer.transactionFirstChangedLine = min(
       buffer.transactionFirstChangedLine, firstChangedLine)
@@ -338,12 +385,21 @@ proc recordTextAreaEdit(buffer: Buffer; owner: State; edit: ui.TextAreaEdit) =
   let afterSelection = Selection(
     anchor: edit.after.byteOffset(edit.after.runeOffset(edit.afterAnchor)),
     head: edit.after.byteOffset(edit.after.runeOffset(edit.afterCaret)))
-  let firstChangedLine = edit.before.lineAt(edit.before.runeOffset(
+  let oldStartLine = edit.before.lineAt(edit.before.runeOffset(
     min(edit.beforeAnchor, edit.beforeCaret)))
+  let oldEndLine = edit.before.lineAt(edit.before.runeOffset(
+    max(edit.beforeAnchor, edit.beforeCaret)))
+  let newStartLine = edit.after.lineAt(edit.after.runeOffset(
+    min(edit.afterAnchor, edit.afterCaret)))
+  let newEndLine = edit.after.lineAt(edit.after.runeOffset(
+    max(edit.afterAnchor, edit.afterCaret)))
+  let firstChangedLine = min(oldStartLine, newStartLine)
+  let lastChangedLine = max(oldEndLine, newEndLine)
   withLock buffer.mu:
     if not buffer.document.snapshot().same(edit.after):
       return
-    buffer.recordSyntaxChange(firstChangedLine)
+    buffer.recordSyntaxChange(firstChangedLine, lastChangedLine,
+      edit.after.lineCount() - edit.before.lineCount())
     buffer.recordHistory(edit.before, edit.after, owner, beforeSelection,
       afterSelection, firstChangedLine, edit.grouped)
 
@@ -405,10 +461,14 @@ proc edit*(buffer: Buffer; edits: varargs[Edit]) =
         continue
       if before.slice(edit.first, edit.pastLast) == edit.text:
         continue
+      let editBefore = buffer.document.snapshot()
       buffer.document.replace(edit.first, edit.pastLast, edit.text)
-      let changedLine = before.lineAt(edit.first)
+      let editAfter = buffer.document.snapshot()
+      let changedLine = editBefore.lineAt(edit.first)
+      let changedEndLine = editBefore.lineAt(edit.pastLast)
       firstChangedLine = min(firstChangedLine, changedLine)
-      buffer.recordSyntaxChange(changedLine)
+      buffer.recordSyntaxChange(changedLine, changedEndLine,
+        editAfter.lineCount() - editBefore.lineCount())
     buffer.recordEdit(before, firstChangedLine)
 
 proc set*(buffer: Buffer; text: string) =
@@ -420,10 +480,13 @@ proc reset*(buffer: Buffer; text: string) =
   ## Replaces the document and clears undo history, as when loading a file.
   buffer.requireBuffer()
   withLock buffer.mu:
+    let before = buffer.document.snapshot()
     buffer.crlf = "\r\n" in text
     buffer.document.set(lf(text))
+    let after = buffer.document.snapshot()
     buffer.saved = buffer.document.snapshot()
-    buffer.recordSyntaxChange(0)
+    buffer.recordSyntaxChange(0, max(before.lineCount(), after.lineCount()) - 1,
+      after.lineCount() - before.lineCount())
     buffer.undo.setLen(0)
     buffer.redo.setLen(0)
     if buffer.transactionDepth > 0:
@@ -456,8 +519,12 @@ proc undo*(buffer: Buffer): bool =
       return false
     let entry = buffer.undo.pop()
     buffer.redo.add(entry)
+    let before = buffer.document.snapshot()
     buffer.document.restore(entry.before)
-    buffer.recordSyntaxChange(entry.firstChangedLine)
+    let after = buffer.document.snapshot()
+    buffer.recordSyntaxChange(entry.firstChangedLine,
+      max(before.lineCount(), after.lineCount()) - 1,
+      after.lineCount() - before.lineCount())
     if entry.owner != nil and entry.owner.buffer == buffer and
         entry.hasSelection:
       entry.owner.caretSelection = entry.beforeSelection
@@ -471,8 +538,12 @@ proc redo*(buffer: Buffer): bool =
       return false
     let entry = buffer.redo.pop()
     buffer.undo.add(entry)
+    let before = buffer.document.snapshot()
     buffer.document.restore(entry.after)
-    buffer.recordSyntaxChange(entry.firstChangedLine)
+    let after = buffer.document.snapshot()
+    buffer.recordSyntaxChange(entry.firstChangedLine,
+      max(before.lineCount(), after.lineCount()) - 1,
+      after.lineCount() - before.lineCount())
     if entry.owner != nil and entry.owner.buffer == buffer and
         entry.hasSelection:
       entry.owner.caretSelection = entry.afterSelection
