@@ -5,14 +5,15 @@ author        = "mynim port"
 description   = "Develop desktop apps with native UI or web frontend in Nim (port of egoist/mygo)"
 license       = "MIT"
 srcDir        = "src"
+bin           = @["cmd/mygo"]
 
 # Dependencies
 
 requires "nim >= 2.2.0"
 
-task build, "Build the mynim library check and CLI":
-  exec "nim c --checks:on src/cmd/mygo.nim"
+task compilecli, "Build the MyGo CLI with checks enabled":
+  exec "nim c --checks:on -o:cmd/mygo src/cmd/mygo.nim"
 
-task check, "Typecheck everything":
+task verify, "Typecheck the library and CLI":
   exec "nim check src/mynim.nim"
   exec "nim check src/cmd/mygo.nim"
