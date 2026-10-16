@@ -403,6 +403,52 @@ proc splitRootSlot(owner: ElementOwner; slot: int): int =
     current = int(owner.nodes[current].parent)
   -1
 
+proc isWithinNode(owner: ElementOwner; ancestor, slot: int): bool =
+  if owner == nil or ancestor <= 0 or slot <= 0:
+    return false
+  var current = slot
+  while current > 0 and current < owner.nodes.len:
+    if current == ancestor:
+      return true
+    current = int(owner.nodes[current].parent)
+  false
+
+proc dismissPopover(rt: Runtime): bool =
+  let owner = rt.frameLayout.owner
+  if owner == nil:
+    return false
+  for slot in countdown(owner.nodes.high, 1):
+    let state = owner.nodes[slot].popoverState
+    if state != nil and state.open:
+      let anchorSlot = owner.idSlots.getOrDefault(state.anchorIdentity, -1)
+      if not owner.isWithinNode(slot, rt.focusSlot) and
+          not owner.isWithinNode(anchorSlot, rt.focusSlot):
+        continue
+      state.pendingDismiss = true
+      rt.requestFrame()
+      return true
+
+proc dismissPopoverOutside(rt: Runtime; x, y: float32): bool =
+  let layout = rt.frameLayout
+  let owner = layout.owner
+  if owner == nil:
+    return false
+  for slot in countdown(owner.nodes.high, 1):
+    let state = owner.nodes[slot].popoverState
+    if state == nil or not state.open:
+      continue
+    let anchorSlot = owner.idSlots.getOrDefault(state.anchorIdentity, -1)
+    let inPanel = slot < layout.rects.len and
+      layout.rects[slot].contains(x, y)
+    let inAnchor = anchorSlot > 0 and anchorSlot < layout.rects.len and
+      layout.rects[anchorSlot].contains(x, y) and
+      layout.insideClips(anchorSlot, x, y)
+    if inPanel or inAnchor:
+      return false
+    state.pendingDismiss = true
+    rt.requestFrame()
+    return true
+
 proc accessibilityTree(layout: LayoutResult;
                       focusSlot: int): platform.AccessTree =
   let owner = layout.owner
@@ -1841,6 +1887,8 @@ proc event(rt: Runtime; ev: platform.SurfaceEvent): bool =
         rt.requestFrame()
         return true
       return false
+    if ev.key == platform.keyEscape and ev.mods == 0 and rt.dismissPopover():
+      return true
     if rt.sliderKey(ev.key, ev.mods):
       return true
     if ev.mods == 0 and ev.key in {platform.keyUp, platform.keyDown}:
@@ -2052,6 +2100,7 @@ proc event(rt: Runtime; ev: platform.SurfaceEvent): bool =
     rt.pointerY = float32(ev.y)
     rt.splitPointerOffset = 0
     rt.hasPointer = true
+    discard rt.dismissPopoverOutside(rt.pointerX, rt.pointerY)
     if rt.frameLayout.scrollbarPress(rt.pointerX, rt.pointerY,
         rt.scrollbarDrag):
       rt.pressTarget = Element()

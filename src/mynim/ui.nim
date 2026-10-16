@@ -55,4 +55,5 @@ include mynim/ui/breadcrumb
 include mynim/ui/search_field
 include mynim/ui/tooltip
 include mynim/ui/overlay
+include mynim/ui/popover
 include mynim/ui/runtime
