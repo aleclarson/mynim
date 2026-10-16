@@ -737,7 +737,8 @@ proc insertNewline(state: State) =
   let language = state.buffer.language
   if language != nil and trimmedEnd > 0:
     for pair in language.brackets:
-      if pair.open.len == 0 or trimmedEnd < pair.open.len or
+      if pair.open.len == 0 or pair.open == "<" or
+          trimmedEnd < pair.open.len or
           before[trimmedEnd - pair.open.len ..< trimmedEnd] != pair.open:
         continue
       let openColumn = trimmedEnd - pair.open.len
@@ -761,7 +762,7 @@ proc insertNewline(state: State) =
   if selection.empty() and opensBlock:
     let afterStart = after.leadingSpaceEnd()
     for pair in language.brackets:
-      if pair.open.len == 0 or pair.close.len == 0 or
+      if pair.open.len == 0 or pair.open == "<" or pair.close.len == 0 or
           trimmedEnd < pair.open.len or afterStart + pair.close.len > after.len or
           before[trimmedEnd - pair.open.len ..< trimmedEnd] != pair.open or
           after[afterStart ..< afterStart + pair.close.len] != pair.close:

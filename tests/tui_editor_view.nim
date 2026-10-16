@@ -118,6 +118,7 @@ doAssert enter(comment, go, comment.len) == "\t// note\n\t// "
 let python = "def f():"
 doAssert enter(python, editor.languageNamed("python"), python.len) ==
   "def f():\n    "
+doAssert enter("<", editor.languageNamed("xml"), 1) == "<\n"
 doAssert enter("", nil, 0, platform.modShift) == "\n"
 
 win.destroy()
