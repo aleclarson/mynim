@@ -86,6 +86,12 @@ type
     direction: int8
     initialized: bool
 
+  NumberInputState = ref object
+    text: string
+    lastValue: float64
+    pendingValue: float64
+    hasPendingValue: bool
+
   TooltipState = object
     hover, focus, shown, dismissed: uint64
     hoverSince, focusSince, lastShown: MonoTime
@@ -102,6 +108,7 @@ type
     pendingNotices: Table[uint64, uint8]
     pendingSliderValues: Table[uint64, float64]
     stepperRepeats: Table[uint64, StepperRepeat]
+    numberInputStates: Table[uint64, NumberInputState]
     tooltips: TooltipState
     rangeSliderDrags: Table[uint64, int8]
     pendingTextCallbacks: Table[uint64, seq[proc() {.closure.}]]
@@ -212,13 +219,15 @@ type
       listRowFocusVisible, listRowHeader, listRowPinnedHeader: bool
     textMaxLines: int
     listRowAction: bool
-    slider, sliderVertical, rating, stepper, rangeSlider,
+    slider, sliderVertical, rating, stepper, numberInput, rangeSlider,
       rangeSliderThumb: bool
     rangeSliderHandle: int8
     sliderLow, sliderHigh, sliderValue, sliderStep: float64
     sliderClampLow, sliderClampHigh: float64
     hasAccessRange: bool
     accessMin, accessMax, accessNow: float64
+    accessStep: float64
+    accessStepHandler: proc(delta: float64) {.closure.}
     textAlign: Align
     hovered, pressed, clicked, changed, submitted,
       valueChangedInBuild: bool
@@ -396,6 +405,7 @@ proc newContext*(): Context =
   result.owner.pendingNotices = initTable[uint64, uint8]()
   result.owner.pendingSliderValues = initTable[uint64, float64]()
   result.owner.stepperRepeats = initTable[uint64, StepperRepeat]()
+  result.owner.numberInputStates = initTable[uint64, NumberInputState]()
   result.owner.rangeSliderDrags = initTable[uint64, int8]()
   result.owner.pendingTextCallbacks =
     initTable[uint64, seq[proc() {.closure.}]]()
@@ -733,6 +743,7 @@ proc retire(owner: ElementOwner) =
   owner.pendingNotices.clear()
   owner.pendingSliderValues.clear()
   owner.stepperRepeats.clear()
+  owner.numberInputStates.clear()
   owner.rangeSliderDrags.clear()
   owner.pendingTextCallbacks.clear()
   owner.pendingTextSubmitCallbacks.clear()
@@ -1047,6 +1058,7 @@ proc build*(c: Context; view: proc(c: Context) {.closure.}) =
     c.owner.pendingNotices = initTable[uint64, uint8]()
     c.owner.pendingSliderValues = initTable[uint64, float64]()
     c.owner.stepperRepeats = initTable[uint64, StepperRepeat]()
+    c.owner.numberInputStates = initTable[uint64, NumberInputState]()
     c.owner.rangeSliderDrags = initTable[uint64, int8]()
     c.owner.pendingTextCallbacks =
       initTable[uint64, seq[proc() {.closure.}]]()
@@ -1154,6 +1166,14 @@ proc build*(c: Context; view: proc(c: Context) {.closure.}) =
         staleRangeSliderDrags.add(identity)
     for identity in staleRangeSliderDrags:
       c.owner.rangeSliderDrags.del(identity)
+    var staleNumberInputs: seq[uint64]
+    for identity in c.owner.numberInputStates.keys:
+      let slot = c.owner.idSlots.getOrDefault(identity, -1)
+      if slot <= 0 or slot >= c.owner.nodes.len or
+          not c.owner.nodes[slot].numberInput:
+        staleNumberInputs.add(identity)
+    for identity in staleNumberInputs:
+      c.owner.numberInputStates.del(identity)
     built = true
   finally:
     c.owner.inBuild = false

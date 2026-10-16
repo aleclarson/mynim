@@ -3417,7 +3417,15 @@ proc onShortcut*(e: Element; mods: platform.Modifiers; key: platform.Key;
 proc label*(e: Element; value: string): Element =
   ## Gives an element an accessible name.
   result = e
-  let n = e.delegatedControl().node
+  var n = e.node
+  if n != nil:
+    let slot = int(n[].labelTargetSlot)
+    if slot > 0 and slot < e.owner.nodes.len:
+      n = addr e.owner.nodes[slot]
+    else:
+      n = e.delegatedControl().node
+  else:
+    n = e.delegatedControl().node
   if n != nil:
     n.label = value
 

@@ -471,6 +471,10 @@ proc accessibilityTree(layout: LayoutResult;
       accessible.min = node.accessMin
       accessible.max = node.accessMax
       accessible.now = node.accessNow
+      accessible.step = node.accessStep
+      if not isDisabled and node.accessStepHandler != nil:
+        accessible.actions = accessible.actions or
+          platform.actionIncrement or platform.actionDecrement
     if node.textClient != nil:
       let (value, _) = node.textClient.textForRange(platform.TextRange(
         start: 0, `end`: high(int)))
@@ -1746,6 +1750,18 @@ proc event(rt: Runtime; ev: platform.SurfaceEvent): bool =
       return false
     if rt.sliderKey(ev.key, ev.mods):
       return true
+    if ev.mods == 0 and ev.key in {platform.keyUp, platform.keyDown}:
+      let owner = rt.context.owner
+      if owner != nil and rt.focusSlot > 0 and
+          rt.focusSlot < owner.nodes.len and
+          not owner.effectivelyDisabled(rt.focusSlot):
+        let stepHandler = owner.nodes[rt.focusSlot].accessStepHandler
+        if stepHandler != nil:
+          let step = owner.nodes[rt.focusSlot].accessStep
+          stepHandler(if ev.key == platform.keyUp: step else: -step)
+          rt.keyboardFocusVisible = true
+          rt.requestFrame()
+          return true
     if rt.textFieldKey(ev.key, ev.mods):
       return true
     var nextFocusSlot = rt.focusSlot
@@ -2166,6 +2182,18 @@ proc event(rt: Runtime; ev: platform.SurfaceEvent): bool =
         discard rt.queueSliderValue(slot, current + delta)
         if focusChanged:
           rt.requestFrame()
+        result = true
+      elif owner != nil and slot > 0 and slot < owner.nodes.len and
+          owner.nodes[slot].accessStepHandler != nil and
+          not owner.effectivelyDisabled(slot):
+        let node = owner.nodes[slot]
+        let handler = node.accessStepHandler
+        rt.focusSlot = slot
+        rt.keyboardFocusVisible = false
+        rt.cancelKeyPress()
+        handler(if ev.action == platform.accessIncrement:
+          node.accessStep else: -node.accessStep)
+        rt.requestFrame()
         result = true
     elif ev.action in {platform.accessExpand, platform.accessCollapse}:
       result = rt.frameLayout.dispatchAccessTreeAction(ev.id, ev.action)
