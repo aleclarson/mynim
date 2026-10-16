@@ -1,5 +1,10 @@
 ## Bound single-line text fields backed by the platform text-input client.
 
+type
+  TextAreaUndoEntry = object
+    before, after: TextSnapshot
+    beforeAnchor, beforeCaret, afterAnchor, afterCaret: int
+
 type TextFieldClient = ref object of platform.TextInputClient
   text, lastBoundValue, placeholder: string
   boundBuffer: TextBuffer
@@ -18,6 +23,8 @@ type TextFieldClient = ref object of platform.TextInputClient
   areaHeights: ParagraphHeightIndex
   areaLineHeights: seq[float32]
   areaLayouts: Table[int, textStack.Layout]
+  areaUndo, areaRedo: seq[TextAreaUndoEntry]
+  areaUndoGroupOpen: bool
   areaFirst, areaPastLast: int
   areaWidth, areaHeight, areaLineHeight: float32
   areaHasLayout, areaHasDesiredX: bool
@@ -66,6 +73,87 @@ proc resetAreaCache(client: TextFieldClient; lineCount: int) =
     client.areaHeights.setEstimate(float64(client.areaLineHeight))
   client.areaLayouts.clear()
 
+proc rebaseAreaUndo(client: TextFieldClient; snapshot: TextSnapshot;
+                    anchor, caret: int) =
+  if client.areaUndoGroupOpen and client.areaUndo.len > 0:
+    var entry = client.areaUndo[^1]
+    entry.after = snapshot
+    entry.afterAnchor = anchor
+    entry.afterCaret = caret
+    client.areaUndo[^1] = entry
+  client.areaRedo.setLen(0)
+
+proc recordAreaEdit(client: TextFieldClient; before, after: TextSnapshot;
+                    range: platform.TextRange; inserted: string;
+                    beforeAnchor, beforeCaret: int;
+                    mergeComposition = false) =
+  if mergeComposition and client.areaUndo.len > 0:
+    var entry = client.areaUndo[^1]
+    entry.after = after
+    entry.afterAnchor = client.anchor
+    entry.afterCaret = client.caret
+    client.areaUndo[^1] = entry
+    client.areaRedo.setLen(0)
+    client.areaUndoGroupOpen = false
+    return
+  let groupable = inserted.len > 0 and client.anchor == client.caret
+  let join = groupable and client.areaUndoGroupOpen and
+    client.areaUndo.len > 0 and beforeAnchor == beforeCaret and
+    client.areaUndo[^1].afterAnchor == beforeAnchor and
+    client.areaUndo[^1].afterCaret == beforeCaret and
+    range.start == range.`end`
+  if join:
+    var entry = client.areaUndo[^1]
+    entry.after = after
+    entry.afterAnchor = client.anchor
+    entry.afterCaret = client.caret
+    client.areaUndo[^1] = entry
+  else:
+    client.areaUndo.add(TextAreaUndoEntry(before: before, after: after,
+      beforeAnchor: beforeAnchor, beforeCaret: beforeCaret,
+      afterAnchor: client.anchor, afterCaret: client.caret))
+  client.areaRedo.setLen(0)
+  client.areaUndoGroupOpen = groupable
+
+proc revealAreaCaret(client: TextFieldClient)
+
+proc restoreAreaHistory(client: TextFieldClient; snapshot: TextSnapshot;
+                        anchor, caret: int) =
+  client.boundBuffer.restore(snapshot)
+  client.bufferSnapshot = client.boundBuffer.snapshot()
+  client.areaInitialized = true
+  client.text.setLen(0)
+  client.lastBoundValue.setLen(0)
+  client.hasMark = false
+  client.nativeChanged = false
+  let limit = client.bufferSnapshot.utf16Len()
+  client.anchor = max(0, min(anchor, limit))
+  client.caret = max(0, min(caret, limit))
+  client.areaStringChanged = client.areaStringBound
+  client.areaHasDesiredX = false
+  client.areaUndoGroupOpen = false
+  client.resetAreaCache(client.bufferSnapshot.lineCount())
+  client.revealAreaCaret()
+
+proc undoTextArea(client: TextFieldClient): bool =
+  if client.areaUndo.len == 0:
+    return false
+  let entry = client.areaUndo[^1]
+  client.areaUndo.setLen(client.areaUndo.len - 1)
+  client.areaRedo.add(entry)
+  client.restoreAreaHistory(entry.before, entry.beforeAnchor,
+                            entry.beforeCaret)
+  result = true
+
+proc redoTextArea(client: TextFieldClient): bool =
+  if client.areaRedo.len == 0:
+    return false
+  let entry = client.areaRedo[^1]
+  client.areaRedo.setLen(client.areaRedo.len - 1)
+  client.areaUndo.add(entry)
+  client.restoreAreaHistory(entry.after, entry.afterAnchor, entry.afterCaret)
+  result = true
+
 proc syncTextAreaBuffer(client: TextFieldClient): bool =
   if not client.multiline or client.boundBuffer == nil:
     return false
@@ -85,6 +173,7 @@ proc syncTextAreaBuffer(client: TextFieldClient): bool =
   else:
     client.caret = min(client.caret, snapshot.utf16Len())
     client.anchor = min(client.anchor, snapshot.utf16Len())
+    client.rebaseAreaUndo(snapshot, client.anchor, client.caret)
   client.areaInitialized = true
   client.resetAreaCache(snapshot.lineCount())
   result = true
@@ -264,9 +353,11 @@ proc invalidateAreaEdit(client: TextFieldClient; before: TextSnapshot;
   client.areaHasDesiredX = false
 
 proc replaceAreaText(client: TextFieldClient; range: platform.TextRange;
-                     value: string): bool =
+                     value: string; mergeComposition = false): bool =
   discard client.syncTextAreaBuffer()
   let before = client.bufferSnapshot
+  let beforeAnchor = client.anchor
+  let beforeCaret = client.caret
   let edit = client.boundBuffer.replaceUtf16IfCurrent(before, range, value)
   if not edit.committed:
     discard client.syncTextAreaBuffer()
@@ -278,6 +369,8 @@ proc replaceAreaText(client: TextFieldClient; range: platform.TextRange;
   client.hasMark = false
   client.nativeChanged = false
   client.areaStringChanged = client.areaStringBound
+  client.recordAreaEdit(before, edit.snapshot, edit.replacedRange, value,
+    beforeAnchor, beforeCaret, mergeComposition)
   client.revealAreaCaret()
   result = true
 
@@ -332,10 +425,11 @@ method setMarkedText*(client: TextFieldClient; r: ref platform.TextRange;
     return
   if client.multiline:
     discard client.syncTextAreaBuffer()
+    let mergeComposition = client.hasMark
     let target = if client.hasMark: client.mark
       elif r == nil: client.fieldRange()
       else: platform.normalizeTextRange(r[])
-    if not client.replaceAreaText(target, value):
+    if not client.replaceAreaText(target, value, mergeComposition):
       return
     let start = client.caret - platform.utf16Len(value)
     client.mark = platform.TextRange(start: start,
@@ -369,6 +463,8 @@ method setMarkedText*(client: TextFieldClient; r: ref platform.TextRange;
 
 method unmarkText*(client: TextFieldClient) =
   client.hasMark = false
+  if client.multiline:
+    client.areaUndoGroupOpen = false
 
 method boundsForRange*(client: TextFieldClient; r: platform.TextRange):
     tuple[bounds: platform.RectF, actual: platform.TextRange, ok: bool] =
@@ -501,6 +597,9 @@ proc leaveTextAreaMode(client: TextFieldClient) =
   client.areaStringBound = false
   client.areaStringChanged = false
   client.areaStringValue.setLen(0)
+  client.areaUndo.setLen(0)
+  client.areaRedo.setLen(0)
+  client.areaUndoGroupOpen = false
   client.areaScroll = nil
   client.areaLayouts.clear()
 
@@ -515,6 +614,9 @@ proc initializeTextArea(client: TextFieldClient; buffer: TextBuffer) =
   client.areaStringBound = false
   client.areaStringChanged = false
   client.areaStringValue.setLen(0)
+  client.areaUndo.setLen(0)
+  client.areaRedo.setLen(0)
+  client.areaUndoGroupOpen = false
 
 proc updateTextAreaPlaceholder(client: TextFieldClient; e: Element) =
   let node = e.node
@@ -614,6 +716,9 @@ proc textAreaCore(c: Context; buffer: TextBuffer;
     client.areaStringValue = boundValue[]
   elif boundValue[] != client.areaStringValue:
     client.boundBuffer.set(boundValue[])
+    let snapshot = client.boundBuffer.snapshot()
+    client.rebaseAreaUndo(snapshot, snapshot.utf16Len(),
+                          snapshot.utf16Len())
     client.areaStringValue = boundValue[]
     client.areaStringChanged = false
     client.areaInitialized = false
@@ -786,6 +891,7 @@ proc fieldPointerSelection(client: TextFieldClient; x, y: float64;
 proc fieldMove(client: TextFieldClient; key: platform.Key;
                extend: bool): bool =
   if client.multiline:
+    client.areaUndoGroupOpen = false
     discard client.syncTextAreaBuffer()
     let snapshot = client.bufferSnapshot
     let selection = client.fieldRange()

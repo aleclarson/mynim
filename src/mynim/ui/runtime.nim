@@ -839,6 +839,24 @@ proc textFieldKey(rt: Runtime; key: platform.Key;
   if client.hasMark:
     return true
 
+  let command = when defined(macosx): platform.modSuper else: platform.modCtrl
+  if client.multiline and key == platform.keyZ and
+      (mods == command or mods == (command or platform.modShift)):
+    client.areaUndoGroupOpen = false
+    if client.readOnly:
+      return true
+    let changed = if (mods and platform.modShift) != 0:
+        client.redoTextArea()
+      else:
+        client.undoTextArea()
+    if changed:
+      let identity = owner.nodes[rt.focusSlot].identity
+      owner.deferTextInputChange(identity, owner.generation)
+      rt.keyboardFocusVisible = true
+      rt.updateTextInput()
+      rt.requestFrame()
+    return true
+
   if key == platform.keyA and
       mods in {platform.modCtrl, platform.modSuper}:
     client.anchor = 0

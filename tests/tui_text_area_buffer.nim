@@ -113,5 +113,35 @@ for node in tree.nodes:
   if node.id == fieldId:
     doAssert node.value == ""
 
+doAssert native.send(platform.SurfaceEvent(kind: platform.keyPressed,
+  key: platform.keyZ, mods: platform.modSuper))
+doAssert native.frame()
+doAssert $buffer == "abc\ndefQé\nxyz"
+doAssert changeActions == 6
+doAssert native.send(platform.SurfaceEvent(kind: platform.keyPressed,
+  key: platform.keyZ, mods: platform.modSuper or platform.modShift))
+doAssert native.frame()
+doAssert $buffer == ""
+doAssert changeActions == 7
+
+doAssert native.send(platform.SurfaceEvent(kind: platform.textComposition,
+  text: "é", caret: 1))
+doAssert native.frame()
+doAssert $buffer == "é"
+doAssert changeActions == 7
+doAssert native.send(platform.SurfaceEvent(kind: platform.textComposition))
+doAssert native.frame()
+doAssert changeActions == 8
+doAssert native.send(platform.SurfaceEvent(kind: platform.keyPressed,
+  key: platform.keyZ, mods: platform.modSuper))
+doAssert native.frame()
+doAssert $buffer == ""
+doAssert changeActions == 9
+doAssert native.send(platform.SurfaceEvent(kind: platform.keyPressed,
+  key: platform.keyZ, mods: platform.modSuper or platform.modShift))
+doAssert native.frame()
+doAssert $buffer == "é"
+doAssert changeActions == 10
+
 win.destroy()
 loop.shutdown()
