@@ -9,35 +9,46 @@ type
     before, after: string
     beforeAnchor, beforeCaret, afterAnchor, afterCaret: int
 
-type TextFieldClient = ref object of platform.TextInputClient
-  text, lastBoundValue, placeholder: string
-  onPaste: proc(text: string): bool {.closure.}
-  boundBuffer: TextBuffer
-  bufferSnapshot: TextSnapshot
-  anchor, caret: int
-  mark: platform.TextRange
-  hasMark, nativeChanged, readOnly, password, rightToLeft: bool
-  insetX, insetY: float32
-  placeholderColor: Color
-  style: textStack.Style
-  shaped: textStack.Layout
-  multiline, areaInitialized: bool
-  areaStringBound, areaStringChanged: bool
-  areaStringValue: string
-  areaScroll: ScrollState
-  areaHeights: ParagraphHeightIndex
-  areaLineHeights: seq[float32]
-  areaLayouts: Table[int, textStack.Layout]
-  areaUndo, areaRedo: seq[TextAreaUndoEntry]
-  areaUndoGroupOpen: bool
-  textUndo, textRedo: seq[TextFieldUndoEntry]
-  textUndoGroupOpen: bool
-  areaFirst, areaPastLast: int
-  areaWidth, areaHeight, areaLineHeight: float32
-  areaHasLayout, areaHasDesiredX: bool
-  areaDesiredX: float32
-  areaLastStyle: textStack.Style
-  areaLastRightToLeft: bool
+type
+  TextKey* = object ## Callback-scoped input key; text access expires on return.
+    key*: platform.Key ## The key pressed.
+    mods*: platform.Modifiers ## The modifiers held with the key.
+    client: TextFieldClient
+    sequence: uint64
+
+  TextFieldClient = ref object of platform.TextInputClient
+    text, lastBoundValue, placeholder: string
+    onPaste: proc(text: string): bool {.closure.}
+    onTextKey: proc(key: TextKey): bool {.closure.}
+    textKeySequence: uint64
+    textKeyActive, textKeyPending, textKeySet: bool
+    textKeyPendingValue: string
+    boundBuffer: TextBuffer
+    bufferSnapshot: TextSnapshot
+    anchor, caret: int
+    mark: platform.TextRange
+    hasMark, nativeChanged, readOnly, password, rightToLeft: bool
+    insetX, insetY: float32
+    placeholderColor: Color
+    style: textStack.Style
+    shaped: textStack.Layout
+    multiline, areaInitialized: bool
+    areaStringBound, areaStringChanged: bool
+    areaStringValue: string
+    areaScroll: ScrollState
+    areaHeights: ParagraphHeightIndex
+    areaLineHeights: seq[float32]
+    areaLayouts: Table[int, textStack.Layout]
+    areaUndo, areaRedo: seq[TextAreaUndoEntry]
+    areaUndoGroupOpen: bool
+    textUndo, textRedo: seq[TextFieldUndoEntry]
+    textUndoGroupOpen: bool
+    areaFirst, areaPastLast: int
+    areaWidth, areaHeight, areaLineHeight: float32
+    areaHasLayout, areaHasDesiredX: bool
+    areaDesiredX: float32
+    areaLastStyle: textStack.Style
+    areaLastRightToLeft: bool
 
 proc runeIndexAtUtf16(value: string; offset: int): int =
   let byteOffset = platform.utf16ByteOffset(value, max(offset, 0))
@@ -667,6 +678,140 @@ proc fieldClient(e: Element): TextFieldClient =
   if n != nil and n[].textClient of TextFieldClient:
     result = TextFieldClient(n[].textClient)
 
+proc fieldText(client: TextFieldClient): string =
+  if client.multiline:
+    discard client.syncTextAreaBuffer()
+    return client.bufferSnapshot.slice(0, client.bufferSnapshot.len())
+  if client.boundBuffer != nil:
+    let snapshot = client.boundBuffer.snapshot()
+    return snapshot.slice(0, snapshot.len())
+  client.text
+
+proc validTextKeyClient(key: TextKey): TextFieldClient =
+  if key.client == nil or not key.client.textKeyActive or
+      key.client.textKeySequence != key.sequence:
+    raise newException(ValueError,
+      "ui: TextKey is valid only while its onTextKey callback runs")
+  key.client
+
+proc text*(key: TextKey): string =
+  ## Returns the input's current text while the callback runs.
+  key.validTextKeyClient().fieldText()
+
+proc setText*(key: TextKey; value: string) =
+  ## Replaces this input's text while its `onTextKey` callback runs.
+  let client = key.validTextKeyClient()
+  client.textKeySet = true
+  client.textUndoGroupOpen = false
+  if client.multiline:
+    client.areaUndoGroupOpen = false
+    discard client.syncTextAreaBuffer()
+    let oldText = client.fieldText()
+    if oldText != value:
+      client.boundBuffer.set(value)
+      discard client.syncTextAreaBuffer()
+      client.areaStringChanged = client.areaStringBound
+      client.areaHasDesiredX = false
+      client.revealAreaCaret()
+    client.textKeyPending = client.areaStringBound
+    if client.areaStringBound:
+      client.textKeyPendingValue = value
+    return
+
+  if client.boundBuffer != nil:
+    let oldText = client.fieldText()
+    if oldText != value:
+      let anchor = client.anchor
+      let caret = client.caret
+      client.boundBuffer.set(value)
+      client.bufferSnapshot = client.boundBuffer.snapshot()
+      client.rebaseTextFieldHistory(value, anchor, caret)
+      client.setFieldText(value)
+      let limit = client.bufferSnapshot.utf16Len()
+      client.anchor = min(anchor, limit)
+      client.caret = min(caret, limit)
+      client.rebuildFieldLayout()
+    return
+
+  if client.text != value:
+    let anchor = client.anchor
+    let caret = client.caret
+    client.rebaseTextFieldHistory(value, anchor, caret)
+    client.text = value
+    let limit = platform.utf16Len(value)
+    client.anchor = min(anchor, limit)
+    client.caret = min(caret, limit)
+    client.hasMark = false
+    client.nativeChanged = true
+    client.rebuildFieldLayout()
+  client.textKeyPending = true
+  client.textKeyPendingValue = value
+
+proc fieldTypesText(key: platform.Key; mods: platform.Modifiers): bool =
+  if (mods and not (platform.modShift or platform.modAlt)) != 0:
+    return false
+  if key in {platform.keyUnknown, platform.keySpace, platform.keyMinus,
+      platform.keyEqual, platform.keyComma, platform.keyPeriod,
+      platform.keySlash, platform.keySemicolon, platform.keyQuote,
+      platform.keyBracketLeft, platform.keyBracketRight,
+      platform.keyBackslash, platform.keyBackquote}:
+    return true
+  (key >= platform.key0 and key <= platform.key9) or
+    (key >= platform.keyA and key <= platform.keyZ)
+
+proc fieldWantsKey(client: TextFieldClient; key: platform.Key;
+                   mods: platform.Modifiers): bool =
+  let baseMods = mods and not platform.modShift
+  let command = when defined(macosx): platform.modSuper else: platform.modCtrl
+  if client.readOnly:
+    if key in {platform.keyA, platform.keyC} and mods == command:
+      return true
+    return key in {platform.keyLeft, platform.keyRight, platform.keyUp,
+      platform.keyDown, platform.keyHome, platform.keyEnd} and
+      (mods and platform.modShift) != 0
+
+  case key
+  of platform.keyBackspace:
+    return true
+  of platform.keyLeft, platform.keyRight:
+    return baseMods != platform.modAlt or defined(macosx)
+  of platform.keyHome, platform.keyEnd, platform.keyDelete:
+    return true
+  of platform.keyUp, platform.keyDown, platform.keyPageUp,
+      platform.keyPageDown:
+    return client.multiline or baseMods != 0
+  of platform.keyEnter:
+    return baseMods == 0
+  of platform.keyTab, platform.keyEscape, platform.keyF1, platform.keyF2,
+      platform.keyF3, platform.keyF4, platform.keyF5, platform.keyF6,
+      platform.keyF7, platform.keyF8, platform.keyF9, platform.keyF10,
+      platform.keyF11, platform.keyF12, platform.keyBack, platform.keyForward:
+    return false
+  of platform.keyA, platform.keyC, platform.keyX, platform.keyV,
+      platform.keyZ, platform.keyY:
+    if baseMods == command:
+      return true
+  else:
+    discard
+
+  when defined(macosx):
+    if baseMods == platform.modCtrl and key in {platform.keyA, platform.keyB,
+        platform.keyD, platform.keyE, platform.keyF, platform.keyH,
+        platform.keyK, platform.keyN, platform.keyP}:
+      return true
+  baseMods == 0 or (defined(macosx) and baseMods == platform.modAlt)
+
+proc dispatchTextKey(client: TextFieldClient; key: platform.Key;
+                     mods: platform.Modifiers): bool =
+  inc client.textKeySequence
+  client.textKeyActive = true
+  client.textKeySet = false
+  try:
+    result = client.onTextKey(TextKey(key: key, mods: mods, client: client,
+      sequence: client.textKeySequence))
+  finally:
+    client.textKeyActive = false
+
 proc newTextFieldElement(c: Context): Element =
   c.newElement(false, identityKindTextInput)
 
@@ -747,6 +892,8 @@ proc leaveTextAreaMode(client: TextFieldClient) =
 
 proc initializeTextArea(client: TextFieldClient; buffer: TextBuffer) =
   client.clearTextFieldHistory()
+  client.textKeyPending = false
+  client.textKeyPendingValue.setLen(0)
   client.password = false
   client.multiline = true
   client.boundBuffer = buffer
@@ -785,10 +932,19 @@ proc textInputBase*(c: Context; value: var string): Element =
     return
   let client = result.acquireTextField(value)
   client.onPaste = nil
+  client.onTextKey = nil
   client.leaveTextAreaMode()
   client.password = false
 
-  if client.boundBuffer != nil:
+  if client.textKeyPending:
+    value = client.textKeyPendingValue
+    if client.text != value:
+      client.setFieldText(value)
+    client.lastBoundValue = value
+    client.nativeChanged = false
+    client.textKeyPending = false
+    client.textKeyPendingValue.setLen(0)
+  elif client.boundBuffer != nil:
     client.clearTextFieldHistory()
     client.boundBuffer = nil
     client.bufferSnapshot = TextSnapshot()
@@ -821,9 +977,12 @@ proc textInputBufferBase*(c: Context; buffer: TextBuffer): Element =
     return
   let client = result.acquireTextField("")
   client.onPaste = nil
+  client.onTextKey = nil
   client.leaveTextAreaMode()
   client.password = false
   if client.boundBuffer != buffer:
+    client.textKeyPending = false
+    client.textKeyPendingValue.setLen(0)
     client.clearTextFieldHistory()
     client.boundBuffer = buffer
     client.bufferSnapshot = buffer.snapshot()
@@ -861,6 +1020,7 @@ proc textAreaCore(c: Context; buffer: TextBuffer;
     return
   let client = result.acquireTextField("")
   client.onPaste = nil
+  client.onTextKey = nil
   var buffer = buffer
   if boundValue == nil:
     buffer.requireTextBuffer()
@@ -875,6 +1035,12 @@ proc textAreaCore(c: Context; buffer: TextBuffer;
     client.initializeTextArea(buffer)
     client.areaStringBound = true
     client.areaStringValue = boundValue[]
+  elif client.textKeyPending and client.areaStringBound:
+    boundValue[] = client.textKeyPendingValue
+    client.areaStringValue = boundValue[]
+    client.areaStringChanged = false
+    client.textKeyPending = false
+    client.textKeyPendingValue.setLen(0)
   elif boundValue[] != client.areaStringValue:
     client.boundBuffer.set(boundValue[])
     let snapshot = client.boundBuffer.snapshot()
@@ -1028,6 +1194,16 @@ proc onPaste*(e: Element; action: proc(text: string): bool {.closure.}): Element
   let client = e.fieldClient()
   if client != nil:
     client.onPaste = action
+
+proc onTextKey*(e: Element;
+                action: proc(key: TextKey): bool {.closure.}): Element =
+  ## Runs action for a non-printing key before the field handles it. Return
+  ## true to consume the key. TextKey.text and TextKey.setText are valid only
+  ## while action runs. This setting lasts for the current build of the field.
+  result = e
+  let client = e.fieldClient()
+  if client != nil:
+    client.onTextKey = action
 
 proc textSelection*(e: Element): tuple[start, `end`: int] =
   ## Returns the selected rune range, or the caret when both indices match.

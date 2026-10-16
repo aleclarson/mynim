@@ -870,6 +870,37 @@ proc applyModalFocus(rt: Runtime; layout: LayoutResult;
     rt.setRuntimeFocus(layout, target)
   rt.activeModalIdentity = modal
 
+proc shortcutActionRegistered(rt: Runtime; mods: platform.Modifiers;
+                              key: platform.Key): bool =
+  let owner = rt.context.owner
+  if owner == nil or owner.closed or not owner.focusActive:
+    return
+  let focusedIdentity = if rt.focusSlot > 0 and rt.focusSlot < owner.nodes.len:
+      owner.nodes[rt.focusSlot].identity
+    else:
+      0'u64
+  for shortcut in owner.actions:
+    if shortcut.kind != actionShortcut or shortcut.modifiers != mods or
+        shortcut.key != key or
+        shortcut.identity == 0 or shortcut.generation != owner.generation:
+      continue
+    if owner.idSlots.getOrDefault(shortcut.identity, -1) < 0:
+      continue
+    let shortcutSlot = owner.idSlots.getOrDefault(shortcut.identity, -1)
+    if not owner.inActiveModalScope(shortcutSlot):
+      continue
+    if focusedIdentity == 0:
+      if shortcut.identity == rootIdentity:
+        return true
+      continue
+    var identity = focusedIdentity
+    var remaining = owner.identityParents.len + 1
+    while identity != 0 and remaining > 0:
+      if identity == shortcut.identity:
+        return true
+      identity = owner.identityParents.getOrDefault(identity)
+      dec remaining
+
 proc runShortcutAction(rt: Runtime; mods: platform.Modifiers;
                       key: platform.Key): bool =
   let owner = rt.context.owner
@@ -917,6 +948,41 @@ proc runShortcutAction(rt: Runtime; mods: platform.Modifiers;
   rt.requestFrame()
   true
 
+proc updateTextInput(rt: Runtime)
+
+proc textFieldTextKey(rt: Runtime; client: TextFieldClient;
+                      key: platform.Key; mods: platform.Modifiers): bool =
+  if client == nil or client.onTextKey == nil or client.hasMark or
+      fieldTypesText(key, mods):
+    return false
+  if not client.fieldWantsKey(key, mods) and
+      rt.shortcutActionRegistered(mods, key):
+    return false
+
+  let owner = rt.frameLayout.owner
+  if owner == nil or owner.closed:
+    return false
+  let identity = if rt.focusSlot > 0 and rt.focusSlot < owner.nodes.len:
+      owner.nodes[rt.focusSlot].identity
+    else:
+      0'u64
+  let before = client.fieldText()
+  let taken = client.dispatchTextKey(key, mods)
+  let changed = before != client.fieldText()
+  let textWasSet = client.textKeySet
+  if changed:
+    owner.deferTextInputChange(identity, owner.generation)
+    rt.inputComposition.reset()
+    rt.updateTextInput()
+    rt.requestFrame()
+  elif textWasSet:
+    rt.requestFrame()
+  if taken:
+    rt.keyboardFocusVisible = true
+    rt.requestFrame()
+    return true
+  false
+
 proc submitFocusedText(rt: Runtime; mods: platform.Modifiers): bool =
   let owner = rt.context.owner
   if owner == nil or owner.closed or not owner.focusActive or mods != 0 or
@@ -940,7 +1006,6 @@ proc submitFocusedText(rt: Runtime; mods: platform.Modifiers): bool =
     return true
   false
 
-proc updateTextInput(rt: Runtime)
 proc inputChanged(rt: Runtime; slot: int; before: string)
 
 proc inputTarget(adapter: TextInputAdapter): platform.TextInputClient =
@@ -1299,6 +1364,8 @@ proc textFieldKey(rt: Runtime; key: platform.Key;
     return false
   let client = TextFieldClient(rawClient)
   if client.hasMark:
+    return true
+  if rt.textFieldTextKey(client, key, mods):
     return true
 
   let extend = (mods and platform.modShift) != 0
@@ -2518,6 +2585,17 @@ proc event(rt: Runtime; ev: platform.SurfaceEvent): bool =
     if ev.key == platform.keyTab and
         (ev.mods and (platform.modCtrl or platform.modAlt or
           platform.modSuper)) == 0:
+      if rt.runShortcutAction(ev.mods, ev.key):
+        return true
+      let owner = rt.frameLayout.owner
+      let client = if owner != nil and rt.focusSlot > 0 and
+          rt.focusSlot < owner.nodes.len and
+          owner.nodes[rt.focusSlot].textClient of TextFieldClient:
+            TextFieldClient(owner.nodes[rt.focusSlot].textClient)
+        else:
+            nil
+      if rt.textFieldTextKey(client, ev.key, ev.mods):
+        return true
       rt.rememberFocusGroup()
       let next = rt.nextFocusSlot(rt.frameLayout, rt.focusSlot,
         (ev.mods and platform.modShift) != 0)
