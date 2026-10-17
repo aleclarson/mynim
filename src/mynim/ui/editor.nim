@@ -1270,6 +1270,31 @@ proc graphemeMove(snapshot: Snapshot; runeOffset: int; direction: int): int =
       return current + 1
   current
 
+proc wordMove(snapshot: Snapshot; runeOffset: int; direction: int): int =
+  let document = snapshot.document
+  let current = max(0, min(runeOffset, document.len()))
+  let line = document.lineAt(current)
+  let range = document.lineRange(line)
+  var runes: seq[Rune]
+  for rune in document.line(line).runes:
+    runes.add(rune)
+  var boundaries: textStack.Boundaries
+  boundaries.reset(runes)
+  let local = current - range.start
+  if direction < 0:
+    let target = range.start + boundaries.prevWord(local)
+    if target != current:
+      return target
+    if current > 0:
+      return current - 1
+  elif direction > 0:
+    let target = range.start + boundaries.nextWord(local)
+    if target != current:
+      return target
+    if current < document.len():
+      return current + 1
+  current
+
 proc moveCaret(state: State; command: Command): bool =
   let snapshot = state.buffer.snapshot()
   let selection = state.caretSelection
@@ -1310,11 +1335,50 @@ proc moveCaret(state: State; command: Command): bool =
   state.select(anchor, targetByte)
   true
 
+proc deleteByCommand(state: State; command: Command): bool =
+  let snapshot = state.buffer.snapshot()
+  let selection = state.caretSelection
+  var firstRune: int
+  var pastRune: int
+  if selection.empty():
+    let current = snapshot.document.runeOffsetAtByte(selection.head)
+    firstRune = current
+    pastRune = current
+    case command
+    of Command.backspace:
+      firstRune = snapshot.graphemeMove(current, -1)
+    of Command.delete:
+      pastRune = snapshot.graphemeMove(current, 1)
+    of Command.deleteWordLeft:
+      firstRune = snapshot.wordMove(current, -1)
+    of Command.deleteWordRight:
+      pastRune = snapshot.wordMove(current, 1)
+    of Command.deleteToLineStart:
+      firstRune = snapshot.document.lineRange(
+        snapshot.document.lineAt(current)).start
+    of Command.deleteToLineEnd:
+      pastRune = snapshot.document.lineRange(
+        snapshot.document.lineAt(current)).`end`
+    else:
+      return false
+  else:
+    firstRune = snapshot.document.runeOffsetAtByte(selection.start())
+    pastRune = snapshot.document.runeOffsetAtByte(selection.pastLast())
+  if firstRune == pastRune:
+    return false
+  let firstByte = snapshot.document.byteOffset(firstRune)
+  let pastByte = snapshot.document.byteOffset(pastRune)
+  state.select(firstByte, pastByte)
+  state.insert("")
+  true
+
 proc run*(state: State; command: Command): bool =
   ## Runs a supported editor command; unsupported commands return false.
   state.ensureState()
   if state.readOnly and command in {
-      Command.undo, Command.redo, Command.delete, Command.deleteLine,
+      Command.undo, Command.redo, Command.backspace, Command.delete,
+      Command.deleteWordLeft, Command.deleteWordRight,
+      Command.deleteToLineStart, Command.deleteToLineEnd, Command.deleteLine,
       Command.newline, Command.newlineAbove, Command.newlineBelow,
       Command.moveLinesUp, Command.moveLinesDown,
       Command.duplicateLinesUp, Command.duplicateLinesDown,
@@ -1334,6 +1398,10 @@ proc run*(state: State; command: Command): bool =
       Command.selectLeft, Command.selectRight, Command.selectLineStart,
       Command.selectLineEnd, Command.selectDocStart, Command.selectDocEnd:
     return state.moveCaret(command)
+  of Command.backspace, Command.delete, Command.deleteWordLeft,
+      Command.deleteWordRight, Command.deleteToLineStart,
+      Command.deleteToLineEnd:
+    return state.deleteByCommand(command)
   else:
     discard
 

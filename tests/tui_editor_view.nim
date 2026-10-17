@@ -393,11 +393,37 @@ doAssert editorState.run(editor.Command.moveDocStart)
 doAssert editorState.cursor() == 0
 doAssert editorState.run(editor.Command.selectDocEnd)
 doAssert editorState.selectedText() == "first\nsecond"
+editorState.buffer.set("A👩‍💻e\u0301Z")
+editorState.select(editorState.buffer.len(), editorState.buffer.len())
+doAssert editorState.run(editor.Command.backspace)
+doAssert $editorState.buffer == "A👩‍💻e\u0301"
+doAssert editorState.cursor() == "A👩‍💻e\u0301".len
+doAssert editorState.undo()
+doAssert $editorState.buffer == "A👩‍💻e\u0301Z"
+editorState.buffer.set("one, two")
+editorState.select("one, two".len, "one, two".len)
+doAssert editorState.run(editor.Command.deleteWordLeft)
+doAssert $editorState.buffer == "one, "
+editorState.buffer.set("one, two")
+editorState.select(0, 0)
+doAssert editorState.run(editor.Command.deleteWordRight)
+doAssert $editorState.buffer == ", two"
+editorState.buffer.set("first\nsecond")
+editorState.select("first\nsec".len, "first\nsec".len)
+doAssert editorState.run(editor.Command.deleteToLineStart)
+doAssert $editorState.buffer == "first\nond"
+doAssert editorState.cursor() == "first\n".len
+doAssert editorState.undo()
+doAssert $editorState.buffer == "first\nsecond"
+editorState.select("first\nsec".len, "first\nsec".len)
+doAssert editorState.run(editor.Command.deleteToLineEnd)
+doAssert $editorState.buffer == "first\nsec"
 
 editorState.readOnly = true
 editorState.buffer.set("one\ntwo")
 editorState.select(0, 0)
 doAssert not editorState.run(editor.Command.deleteLine)
+doAssert not editorState.run(editor.Command.backspace)
 doAssert $editorState.buffer == "one\ntwo"
 editorState.readOnly = false
 
