@@ -332,6 +332,97 @@ proc draw*(element: Element;
   if node != nil:
     node.drawFn = callback
 
+proc painterBorderPixels(width, scale: float32): float32 =
+  if width <= 0:
+    return
+  result = max(round(width.scaled(scale)), 1'f32)
+
+proc painterFill(painter: var Painter; rect: Rect; radius: float32;
+                 fillColor, borderColor: Color; borderWidth: float32;
+                 dashed: bool) =
+  if painter.frame == nil:
+    return
+  let fillRect = sceneRect(rect, painter.root, painter.scale)
+  let radii = [radius, radius, radius, radius].scaledEdges(painter.scale)
+  let border = painterBorderPixels(borderWidth, painter.scale)
+  let visibleBorder = if border > 0: borderColor else: transparent
+  var op = scene.Op(kind: scene.opFill, rect: fillRect,
+    color: sceneColor(fillColor), radii: radii,
+    continuous: continuousCorners, border: [border, border, border, border],
+    borderColor: sceneColor(borderColor), dashed: dashed,
+    opacity: painter.opacity)
+  op.wide = painter.frame.addWide(
+    wideColors(fillColor, transparent, visibleBorder))
+  painter.frame.ops.add(op)
+
+proc fill*(painter: var Painter; rect: Rect; color: Color; radius: float32) =
+  ## Paints a rounded rectangle in DIPs.
+  painter.painterFill(rect, radius, color, transparent, 0, false)
+
+proc fillGradient*(painter: var Painter; rect: Rect;
+                   gradient: LinearGradient; radius: float32) =
+  ## Paints a rounded rectangle with a linear gradient.
+  if painter.frame == nil:
+    return
+  let fillRect = sceneRect(rect, painter.root, painter.scale)
+  let radii = [radius, radius, radius, radius].scaledEdges(painter.scale)
+  let info = sceneGradient(fillRect, gradient)
+  var op = scene.Op(kind: scene.opFill, rect: fillRect,
+    color: sceneColor(gradient.fromColor),
+    color2: sceneColor(gradient.toColor), paint: info.paint,
+    gradient: info.points, radii: radii, continuous: continuousCorners,
+    opacity: painter.opacity)
+  op.wide = painter.frame.addWide(
+    wideColors(gradient.fromColor, gradient.toColor, transparent))
+  painter.frame.ops.add(op)
+
+proc stroke*(painter: var Painter; rect: Rect; color: Color;
+             radius, width: float32) =
+  ## Paints the inside outline of a rounded rectangle.
+  painter.painterFill(rect, radius, transparent, color, width, false)
+
+proc strokeDashed*(painter: var Painter; rect: Rect; color: Color;
+                   radius, width: float32) =
+  ## Paints a dashed inside outline of a rounded rectangle.
+  painter.painterFill(rect, radius, transparent, color, width, true)
+
+proc shadow*(painter: var Painter; rect: Rect; radius, x, y, blur, spread: float32;
+             color: Color) =
+  ## Paints a blurred shadow outside a rounded rectangle.
+  if painter.frame == nil:
+    return
+  let
+    castRect = sceneRect(rect, painter.root, painter.scale)
+    castRadii = [radius, radius, radius, radius].scaledEdges(painter.scale)
+    shadowRect = Rect(x: rect.x + x - spread, y: rect.y + y - spread,
+      w: rect.w + 2 * spread, h: rect.h + 2 * spread)
+    shadowRadii = block:
+      var values = castRadii
+      for value in values.mitems:
+        if value > 0:
+          value = max(value + spread * painter.scale, 0'f32)
+      values
+  var op = scene.Op(kind: scene.opShadow,
+    rect: sceneRect(shadowRect, painter.root, painter.scale),
+    radii: shadowRadii, continuous: continuousCorners,
+    color: sceneColor(color), blur: blur.scaled(painter.scale),
+    `cast`: castRect, castRadii: castRadii, opacity: painter.opacity)
+  op.wide = painter.frame.addWide(wideColors(color, transparent, transparent))
+  painter.frame.ops.add(op)
+
+proc line*(painter: var Painter; x0, y0, x1, y1, width: float32;
+           color: Color) =
+  ## Paints a straight horizontal or vertical line between two points.
+  var rect = Rect(x: min(x0, x1), y: min(y0, y1),
+    w: abs(x1 - x0), h: abs(y1 - y0))
+  if rect.w < rect.h:
+    rect.x -= width / 2
+    rect.w = width
+  else:
+    rect.y -= width / 2
+    rect.h = width
+  painter.fill(rect, color, 0)
+
 proc fillPath*(painter: var Painter; path: Path; color: Color) =
   ## Fills a vector path with non-zero winding.
   painter.paintPath(path, 0, color, LinearGradient(), false)
