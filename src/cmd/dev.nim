@@ -7,6 +7,7 @@ when hostOS == "macosx":
   import ./codesign as macCodeSign
 import ./generate
 import ./resources as projectResources
+import ../mynim/i18n as localeI18n
 
 type DevSnapshot = Table[string, string]
 type DevSettings = tuple[name, identifier, version, devCommand, devUrl,
@@ -231,6 +232,15 @@ proc projectSettings(projectDir: string; config: JsonNode): DevSettings =
   result.devUrl = nativeBuild.configString(config, "devUrl", "")
   result.frontendDist = nativeBuild.configString(config, "frontendDist", "")
 
+proc devLocale(value: string): string =
+  if value.len == 0:
+    return ""
+  result = localeI18n.normalize(value)
+  if result.len == 0:
+    raise newException(ValueError, "-lang \"" & value &
+      "\" is not a language: use a BCP 47 tag, such as de, zh-Hant or " &
+      "pt-BR, or a pseudo locale, en-XA or ar-XB")
+
 proc stopProcess(process: var Process) =
   if process == nil:
     return
@@ -320,6 +330,11 @@ proc runDev*(args: seq[string]): int =
     stderr.writeLine("nim-xplat dev: expected at most one project directory")
     stderr.write(usageDev)
     return 2
+  try:
+    lang = devLocale(lang)
+  except ValueError as error:
+    stderr.writeLine("nim-xplat dev: " & error.msg)
+    return 1
   if web:
     stderr.writeLine("nim-xplat dev: browser development is not ported yet")
     return 1

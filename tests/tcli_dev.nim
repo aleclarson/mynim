@@ -59,13 +59,19 @@ if getEnv("NIM_XPLAT_GENERATE").len == 0:
     getCurrentDir() / "src" / "cmd" / "nim_xplat.nim"], getCurrentDir())
   doAssert builtCli.code == 0, builtCli.output
 
+  let invalidLocale = run(cli, @[
+    "dev", "-lang", "C", project], project)
+  doAssert invalidLocale.code == 1, invalidLocale.output
+  doAssert "-lang \"C\" is not a language" in invalidLocale.output,
+    invalidLocale.output
+
   var env = newStringTable(modeCaseSensitive)
   for key, value in envPairs():
     env[key] = value
   env["MYNIM_DEV_TEST_MARKER"] = marker
   env.del("NIM_XPLAT_GENERATE")
   var devArgs = @[
-    "dev", "-lang", "en-XA", project]
+    "dev", "-lang", "en-xa", project]
   when hostOS == "macosx":
     let fakeBin = temporary / "fake-bin"
     createDir(fakeBin)
