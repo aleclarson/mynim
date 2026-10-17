@@ -8,6 +8,7 @@ import ./generate
 import ./init
 import ./i18n_check
 import ./keygen
+import ./migrate_ui
 import ./skills
 import ./vet
 
@@ -29,11 +30,11 @@ Commands:
   vet             typecheck a native Nim project
   i18n            check message catalogs
   keygen          create the key pair that signs updates
+  migrate-ui      preview or apply the checked UI API migration
   doctor          check that the development environment is ready
   version         print the MyGo version
   help            print this help
 
-Other MyGo commands are not ported yet.
 """
 
 proc run(args: seq[string]): int =
@@ -83,8 +84,9 @@ proc run(args: seq[string]): int =
       return runKeygen(args[1 .. ^1])
     return runKeygen(@[])
   of "migrate-ui":
-    stderr.writeLine("mygo: command \"" & args[0] & "\" is not ported yet")
-    return 1
+    if args.len > 1:
+      return runMigrateUI(args[1 .. ^1])
+    return runMigrateUI(@[])
   else:
     stderr.writeLine("mygo: unknown command \"" & args[0] & "\"")
     stderr.write("\n")
