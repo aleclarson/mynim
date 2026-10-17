@@ -60,31 +60,29 @@ proc defaultPrevented*(e: TitleEvent): bool = e.preventable.prevented
 const fileDropEvent* = "mygo:file-drop"
 
 type
+  ListenerCancellation = ref object
+    cancelled: Atomic[bool]
+
   Listener[T] = object
-    id: uint64
+    cancellation: ListenerCancellation
     fn: T
     once: bool
 
   Listeners[T] = object
     ## A thread-safe list of event listeners of type T (a proc type).
     mu: Lock
-    next: uint64
     list: seq[Listener[T]]
 
 proc add[T](l: var Listeners[T]; fn: T; once: bool): proc() {.closure.} =
   ## Registers fn and returns a function that removes it again.
+  let cancellation = ListenerCancellation()
   l.mu.acquire()
-  inc l.next
-  let id = l.next
-  l.list.add Listener[T](id: id, fn: fn, once: once)
+  l.list.keepItIf(not it.cancellation.cancelled.load())
+  l.list.add Listener[T](cancellation: cancellation, fn: fn, once: once)
   l.mu.release()
+  # A cancellation may outlive the list that registered it.
   proc() =
-    l.mu.acquire()
-    for i, e in l.list:
-      if e.id == id:
-        l.list.delete(i)
-        break
-    l.mu.release()
+    cancellation.cancelled.store(true)
 
 proc snapshot[T](l: var Listeners[T]): seq[T] =
   ## The current listeners, dropping once-listeners from the list, so
@@ -92,15 +90,18 @@ proc snapshot[T](l: var Listeners[T]): seq[T] =
   l.mu.acquire()
   var kept: seq[Listener[T]]
   for e in l.list:
-    result.add e.fn
-    if not e.once:
-      kept.add e
+    if not e.cancellation.cancelled.load():
+      result.add e.fn
+      if not e.once:
+        kept.add e
   l.list = kept
   l.mu.release()
 
 proc len[T](l: var Listeners[T]): int =
   l.mu.acquire()
-  result = l.list.len
+  for listener in l.list:
+    if not listener.cancellation.cancelled.load():
+      inc result
   l.mu.release()
 
 proc clear[T](l: var Listeners[T]) =
