@@ -11,13 +11,14 @@ type
 
   ParsedMessage = object
     args: seq[Argument]
+    tree: messageFormat.Message
 
   Message = object
     parsed: ParsedMessage
     valid: bool
 
   Catalog = object
-    path: string
+    path, tag: string
     order: seq[string]
     messages: Table[string, Message]
     lines: Table[string, int]
@@ -34,9 +35,11 @@ Check the catalogs configured by i18n in mygo.json.
 Errors exit with status 1; missing translations are warnings.
 """
 
+const frameworkCatalogSource = staticRead("../mynim/internal/l10n/en.json")
+
 proc parseMessage(source: string): ParsedMessage =
-  let message = messageFormat.parseMessage(source)
-  for arg in message.args:
+  result.tree = messageFormat.parseMessage(source)
+  for arg in result.tree.args:
     result.args.add Argument(name: arg.name, kind: arg.kind)
 
 proc topLevelKeys(source: string): seq[tuple[key: string, line: int]] =
@@ -86,26 +89,26 @@ proc printDiagnostics(diagnostics: seq[Diagnostic]): int =
     if not diagnostic.warning:
       inc result
 
-proc loadCatalog(dir, tag: string; diagnostics: var seq[Diagnostic]): Catalog =
-  result = Catalog(path: dir,
+proc loadCatalogText(source, path, tag: string;
+    diagnostics: var seq[Diagnostic]): Catalog =
+  result = Catalog(path: path, tag: tag,
     messages: initTable[string, Message](),
     lines: initTable[string, int](),
     metadata: initTable[string, JsonNode](),
     paramTypes: initTable[string, Table[string, string]]())
-  let source = readFile(dir)
   var data: JsonNode
   try:
     data = parseJson(source)
   except JsonParsingError as error:
-    diagnostics.addDiagnostic(dir, error.msg)
+    diagnostics.addDiagnostic(path, error.msg)
     return
   if data.kind != JObject:
-    diagnostics.addDiagnostic(dir, "not a JSON object of messages")
+    diagnostics.addDiagnostic(path, "not a JSON object of messages")
     return
 
   for item in topLevelKeys(source):
     if result.lines.hasKey(item.key):
-      diagnostics.addDiagnostic(dir & ":" & $item.line,
+      diagnostics.addDiagnostic(path & ":" & $item.line,
         "key " & item.key & " comes twice")
     else:
       result.lines[item.key] = item.line
@@ -133,6 +136,9 @@ proc loadCatalog(dir, tag: string; diagnostics: var seq[Diagnostic]): Catalog =
         diagnostics.addDiagnostic(result.location(key),
           "message " & key & " does not parse: " & error.msg)
 
+proc loadCatalog(path, tag: string; diagnostics: var seq[Diagnostic]): Catalog =
+  loadCatalogText(readFile(path), path, tag, diagnostics)
+
 proc validMessageKey(key: string): bool =
   if key.len == 0 or key[0] notin {'A'..'Z', 'a'..'z'}:
     return false
@@ -140,6 +146,13 @@ proc validMessageKey(key: string): bool =
     if ch notin {'A'..'Z', 'a'..'z', '0'..'9', '_'}:
       return false
   true
+
+proc libraryKey(key: string): tuple[namespace, name: string] =
+  let separator = key.find('.')
+  if separator > 0 and validMessageKey(key[0 ..< separator]):
+    result.namespace = key[0 ..< separator]
+    result.name = if separator + 1 < key.len:
+      key[separator + 1 .. ^1] else: ""
 
 proc accessorName(key: string): string =
   for word in key.split('_'):
@@ -153,6 +166,8 @@ proc checkSourceKeys(source: Catalog; diagnostics: var seq[Diagnostic]) =
   for reserved in ["In", "Messages", "Catalog"]:
     taken[reserved] = ""
   for key in source.order:
+    if libraryKey(key).namespace.len > 0:
+      continue
     if not validMessageKey(key):
       diagnostics.addDiagnostic(source.location(key),
         "message key " & key & " is not a valid catalog key")
@@ -185,6 +200,49 @@ proc compatibleType(sourceType, translatedKind: string): bool =
   of "select": sourceType in ["String", "Object"]
   else: true
 
+proc pluralWord(count: int; one, other: string): string =
+  if count == 1: one else: other
+
+proc pluralNames(categories: openArray[localeI18n.Plural]): string =
+  var names: seq[string]
+  for category in categories:
+    names.add localeI18n.pluralName(category)
+  names.join(", ")
+
+proc checkPlurals(catalog: Catalog; key: string; message: ParsedMessage;
+    diagnostics: var seq[Diagnostic]) =
+  for arg in message.args:
+    if arg.kind notin ["plural", "selectordinal"]:
+      continue
+    let ordinal = arg.kind == "selectordinal"
+    let kind = if ordinal: "ordinal" else: "plural"
+    let available = if ordinal:
+      localeI18n.ordinalCategories(catalog.tag)
+    else:
+      localeI18n.pluralCategories(catalog.tag)
+    let cases = message.tree.cases(arg.name)
+    var extra, lacking: seq[string]
+    for caseName in cases:
+      let category = localeI18n.parsePlural(caseName)
+      if category.ok and category.value notin available:
+        extra.add caseName
+    for category in available:
+      let name = localeI18n.pluralName(category)
+      if name notin cases:
+        lacking.add name
+    if extra.len > 0:
+      diagnostics.addDiagnostic(catalog.location(key),
+        "message " & key & ": " & catalog.tag & " has no " & kind & " " &
+        pluralWord(extra.len, "category", "categories") & " of " &
+        extra.join(", ") & " (its " & kind & " categories are " &
+        pluralNames(available) & ")", warning = true)
+    if lacking.len > 0:
+      diagnostics.addDiagnostic(catalog.location(key),
+        "message " & key & ": the " & arg.kind & " argument " & arg.name &
+        " lacks " & lacking.join(", ") & ", a " & kind &
+        " category of " & catalog.tag & ", which says other in its place",
+        warning = true)
+
 proc checkSourceMetadata(source: var Catalog;
     diagnostics: var seq[Diagnostic]) =
   var metadataNames = toSeq(source.metadata.keys)
@@ -195,6 +253,8 @@ proc checkSourceMetadata(source: var Catalog;
         "@" & name & " describes no message", warning = true)
 
   for key in source.order:
+    if libraryKey(key).namespace.len > 0:
+      continue
     var declared = initTable[string, string]()
     let metadataKey = "@" & key
     if source.metadata.hasKey(key):
@@ -261,17 +321,70 @@ proc checkSourceMetadata(source: var Catalog;
         if not paramTypes.hasKey(arg.name):
           paramTypes[arg.name] = inferredType(arg.kind)
     source.paramTypes[key] = paramTypes
+    if message.valid:
+      checkPlurals(source, key, message.parsed, diagnostics)
 
-proc checkTranslation(source: Catalog; translation: Catalog;
+proc checkOverride(framework, catalog: Catalog; key: string;
+    diagnostics: var seq[Diagnostic]) =
+  let library = libraryKey(key)
+  if library.namespace != "mygo":
+    diagnostics.addDiagnostic(catalog.location(key),
+      "message " & key & ": no library has the namespace " &
+      library.namespace)
+    return
+
+  var sourceArgs: seq[Argument]
+  var paramTypes = initTable[string, string]()
+  if library.name notin ["appName", "appDescription"]:
+    if not framework.messages.hasKey(library.name):
+      diagnostics.addDiagnostic(catalog.location(key),
+        "message " & key & ": mygo has no message " & library.name)
+      return
+    let source = framework.messages[library.name]
+    if not source.valid:
+      return
+    sourceArgs = source.parsed.args
+    paramTypes = framework.paramTypes.getOrDefault(library.name,
+      initTable[string, string]())
+
+  if not catalog.messages[key].valid:
+    return
+  let translated = catalog.messages[key].parsed
+  for arg in translated.args:
+    var found = false
+    for sourceArg in sourceArgs:
+      if sourceArg.name == arg.name:
+        found = true
+        let paramType = paramTypes.getOrDefault(arg.name,
+          inferredType(sourceArg.kind))
+        if not compatibleType(paramType, arg.kind):
+          diagnostics.addDiagnostic(catalog.location(key),
+            "message " & key & " uses " & arg.name &
+            " as an incompatible argument")
+        break
+    if not found:
+      diagnostics.addDiagnostic(catalog.location(key),
+        "message " & key & " uses argument " & arg.name &
+        ", which the MyGo message does not have")
+  for sourceArg in sourceArgs:
+    var found = false
+    for arg in translated.args:
+      if sourceArg.name == arg.name:
+        found = true
+        break
+    if not found:
+      diagnostics.addDiagnostic(catalog.location(key),
+        "message " & key & " does not use argument " & sourceArg.name,
+        warning = true)
+  checkPlurals(catalog, key, translated, diagnostics)
+
+proc checkTranslation(source, translation, framework: Catalog;
     diagnostics: var seq[Diagnostic]) =
   for key in translation.order:
+    if libraryKey(key).namespace.len > 0:
+      checkOverride(framework, translation, key, diagnostics)
+      continue
     if key.contains('.'):
-      let separator = key.find('.')
-      if separator > 0 and key[0 ..< separator] == "mygo" and
-          separator + 1 < key.len and
-          validMessageKey(key[separator + 1 .. ^1]):
-        # The embedded MyGo catalog is not bundled with this CLI slice yet.
-        continue
       diagnostics.addDiagnostic(translation.location(key),
         "message " & key & " has no library namespace")
       continue
@@ -310,9 +423,12 @@ proc checkTranslation(source: Catalog; translation: Catalog;
         diagnostics.addDiagnostic(translation.location(key),
           "message " & key & " does not use argument " & sourceArg.name,
           warning = true)
+    checkPlurals(translation, key, translated, diagnostics)
 
   var missing: seq[string]
   for key in source.order:
+    if libraryKey(key).namespace.len > 0:
+      continue
     if not translation.messages.hasKey(key):
       missing.add key
   if missing.len > 0:
@@ -427,10 +543,22 @@ proc checkProject(projectDir: string): int =
       catalogs.add loadCatalog(files[tag], tag, diagnostics)
 
     var source = catalogs[0]
+    var frameworkDiagnostics: seq[Diagnostic]
+    var framework = loadCatalogText(frameworkCatalogSource,
+      "MyGo's English catalog", "en", frameworkDiagnostics)
+    checkSourceMetadata(framework, frameworkDiagnostics)
+    for diagnostic in frameworkDiagnostics:
+      if not diagnostic.warning:
+        diagnostics.addDiagnostic(diagnostic.path,
+          "MyGo's embedded catalog: " & diagnostic.message)
+
     checkSourceKeys(source, diagnostics)
     checkSourceMetadata(source, diagnostics)
+    for key in source.order:
+      if libraryKey(key).namespace.len > 0:
+        checkOverride(framework, source, key, diagnostics)
     for i in 1 ..< catalogs.len:
-      checkTranslation(source, catalogs[i], diagnostics)
+      checkTranslation(source, catalogs[i], framework, diagnostics)
 
     let errors = printDiagnostics(diagnostics)
     if errors > 0:

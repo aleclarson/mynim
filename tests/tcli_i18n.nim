@@ -97,6 +97,55 @@ proc testCatalogErrorsAndWarnings() =
 }""")
   doAssert runI18n(@["check", project]) == 1
 
+proc testPluralCategoriesAndFrameworkOverrides() =
+  let temporary = createTempDir("mynim-i18n-framework-", "")
+  defer: removeDir(temporary)
+  let project = temporary / "project"
+  let source = """{
+  "files": "{n, plural, other {# files}}",
+  "rank": "{n, selectordinal, other {#th}}",
+  "mygo.clipboardRead": "Clipboard access",
+  "mygo.removeToken": "Remove {token}",
+  "mygo.appName": "App name",
+  "mygo.appDescription": "App description"
+}"""
+  let translation = """{
+  "files": "{n, plural, few {# files} other {# files}}",
+  "rank": "{n, selectordinal, one {#st} two {#nd} few {#rd} other {#th}}",
+  "mygo.clipboardRead": "Zwischenablage",
+  "mygo.removeToken": "Entferne {token}",
+  "mygo.appName": "Anwendungsname",
+  "mygo.appDescription": "Anwendungsbeschreibung"
+}"""
+  writeProject(project, source, translation)
+  doAssert runI18n(@["check", project]) == 0
+
+  writeFile(project / "locales" / "en.json", """{
+  "mygo.notInTheFramework": "Unknown message",
+  "hello": "Hello"
+}""")
+  writeFile(project / "locales" / "de.json", """{
+  "mygo.notInTheFramework": "Unknown message",
+  "hello": "Hallo"
+}""")
+  doAssert runI18n(@["check", project]) == 1
+
+  writeFile(project / "locales" / "en.json", source)
+  writeFile(project / "locales" / "de.json", """{
+  "mygo.notInTheFramework": "Unknown message"
+}""")
+  doAssert runI18n(@["check", project]) == 1
+
+  writeFile(project / "locales" / "de.json", """{
+  "mygo.removeToken": "Entferne {token, number}"
+}""")
+  doAssert runI18n(@["check", project]) == 1
+
+  writeFile(project / "locales" / "de.json", """{
+  "mygo.removeToken": "Entferne {person}"
+}""")
+  doAssert runI18n(@["check", project]) == 1
+
 proc testLocaleRules() =
   let temporary = createTempDir("mynim-i18n-locales-", "")
   defer: removeDir(temporary)
@@ -121,5 +170,6 @@ proc testCliErrors() =
 
 testCatalogCheck()
 testCatalogErrorsAndWarnings()
+testPluralCategoriesAndFrameworkOverrides()
 testLocaleRules()
 testCliErrors()
