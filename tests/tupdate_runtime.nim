@@ -32,6 +32,10 @@ block manifestValidation:
   doAssertRaises ValueError:
     discard updateRuntime.parseManifest(
       """{"version":"1.2.3","url":"https://example.test/a"}""")
+  doAssertRaises ValueError:
+    discard updateRuntime.parseManifest("""{
+      "version":"", "url":"https://example.test/a", "signature":"c2ln"
+    }""")
 
 block resolveTaggedFeedAndCheck:
   const feed = updateRuntime.taggedFeedPrefix &

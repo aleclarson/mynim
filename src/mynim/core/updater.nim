@@ -69,6 +69,8 @@ when not defined(emscripten):
       manifest: updateRuntime.Manifest
       key, current: string
 
+    UpdateProgress* = proc(downloaded, total: int64) {.closure.}
+
   let Updater* = UpdaterModule()
 
   proc installTarget(): string =
@@ -121,3 +123,23 @@ when not defined(emscripten):
     except CatchableError as error:
       result.err = newException(IOError,
         "mynim: checking for updates: " & error.msg)
+
+  proc install*(up: Update;
+      progress: UpdateProgress = nil): ref CatchableError =
+    ## Downloads, verifies, and installs this update beside the app.
+    ## Requires `curl`, `openssl`, and `tar` on PATH.
+    try:
+      let target = installTarget()
+      if target.len == 0:
+        return newException(ValueError,
+          "mynim: this installation cannot update itself")
+      let userAgent = "Mynim/" & Version & " " & app.name() & "/" &
+        up.current
+      let download: updateRuntime.FileDownloader = proc(url, path: string;
+          size: int64; onProgress: updateRuntime.UpdateProgress) =
+        updateRuntime.httpDownload(url, userAgent, path, size, onProgress)
+      result = updateRuntime.installUpdate(up.manifest, up.key, target,
+        progress, download)
+    except CatchableError as error:
+      result = newException(IOError,
+        "mynim: installing the update: " & error.msg)
