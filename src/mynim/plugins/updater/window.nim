@@ -25,7 +25,6 @@ type
     onClose: proc() {.closure.}
     icon: ui.Bitmap
     notesState: notes.NotesState
-    notesScroll: ui.ScrollState
     window: MainWindow
 
 proc newUpdaterWindow*(texts: frontend.Texts; initial: frontend.View;
@@ -41,8 +40,7 @@ proc newUpdaterWindow*(texts: frontend.Texts; initial: frontend.View;
   result = UpdaterWindow(texts: texts, current: initial, user: user,
     checked: initial.checked, checkedPrompt: initial.prompt,
     answeredPrompt: -1, onRespond: onRespond, onClose: onClose,
-    icon: icon, notesState: notes.newNotesState(),
-    notesScroll: ui.newScrollState())
+    icon: icon, notesState: notes.newNotesState())
   initLock(result.guard)
 
 proc currentView(state: UpdaterWindow): frontend.View =
@@ -152,11 +150,11 @@ proc buildBody(state: UpdaterWindow; c: ui.Context; theme: ui.Theme;
     discard c.column().grow().margin(6, 0, 0, 0).children(proc() =
       discard c.text(state.texts.releaseNotes).textSize(small)
         .textWeight(700).margin(0, 0, 4, 0)
-      discard c.scroll(state.notesScroll).grow()
+      discard notes.render(state.notesState, c, theme, view.notes,
+        state.texts.releaseNotes)
+        .grow().minHeight(160)
         .background(if theme.dark: ui.parseColor("#141414") else: ui.rgb(255, 255, 255))
-        .border(1, theme.border).padding(8, 12).children(proc() =
-          discard notes.render(state.notesState, c, theme, view.notes)
-        )
+        .border(1, theme.border).padding(8, 12)
     )
   if view.checkbox:
     let checkRow = row(c, state.texts.rtl).margin(10, 0, 0, 0)

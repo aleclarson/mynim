@@ -1,23 +1,36 @@
-## Builds release-note blocks for the native updater window.
+## Builds selectable release notes for the native updater window.
 
-import std/unicode
+import std/[strutils, unicode]
 
 import mynim/plugins/updater/markdown as markdown
 import mynim/ui as ui
 
 type
   NotesState* = ref object
-    codeScrolls: seq[ui.ScrollState]
+    buffer: ui.TextBuffer
+    body: string
+    lineStyles: seq[seq[ui.Span]]
+    links: seq[LinkRange]
 
-  NotesBuilder = ref object
-    state: NotesState
+  LinkRange = object
+    start, pastLast: int
+    url: string
+
+  RunStyle = object
+    font: string
+    size: float32
+    weight: int
+    italic, underline: bool
+    color, background: ui.Color
+
+  NotesBuilder = object
     theme: ui.Theme
-    rtl: bool
-    nextCodeScroll: int
-
-proc newNotesState*(): NotesState =
-  ## Creates persistent horizontal-scroll state for rendered code blocks.
-  NotesState()
+    body: string
+    lines: seq[seq[ui.Span]]
+    currentLine: seq[ui.Span]
+    links: seq[LinkRange]
+    runeOffset: int
+    lineStarted: bool
 
 proc rtlRune(rune: Rune): bool =
   let c = int32(rune)
@@ -31,178 +44,199 @@ proc rtlRune(rune: Rune): bool =
     (c >= 0x0800 and c <= 0x083F) or (c >= 0x0840 and c <= 0x085F) or
     (c >= 0x1E900 and c <= 0x1E95F)
 
-proc scanDirection(text: string; rtl, found: var bool) =
+proc scanDirection(text: string; direction: var ui.Direction; found: var bool) =
   var i = 0
   while i < text.len and not found:
     let rune = text.runeAt(i)
     if rune.rtlRune:
-      rtl = true
+      direction = ui.Direction.RightToLeft
       found = true
     elif rune.isAlpha:
-      rtl = false
+      direction = ui.Direction.LeftToRight
       found = true
     i += max(text.runeLenAt(i), 1)
 
-proc scanInlines(values: openArray[markdown.Inline]; rtl, found: var bool) =
+proc scanInlines(values: openArray[markdown.Inline]; direction: var ui.Direction;
+                 found: var bool) =
   for value in values:
-    if found:
-      return
-    scanDirection(value.text, rtl, found)
-    scanInlines(value.children, rtl, found)
+    if not found:
+      scanDirection(value.text, direction, found)
+      scanInlines(value.children, direction, found)
 
-proc scanBlocks(values: openArray[markdown.Block]; rtl, found: var bool) =
+proc scanBlocks(values: openArray[markdown.Block]; direction: var ui.Direction;
+                found: var bool) =
   for value in values:
-    if found:
-      return
-    scanInlines(value.inlines, rtl, found)
-    scanDirection(value.text, rtl, found)
-    for item in value.items:
-      scanBlocks(item, rtl, found)
-    scanBlocks(value.blocks, rtl, found)
+    if not found:
+      scanInlines(value.inlines, direction, found)
+      scanDirection(value.text, direction, found)
+      for item in value.items:
+        scanBlocks(item, direction, found)
+      scanBlocks(value.blocks, direction, found)
 
-proc rightToLeft(values: openArray[markdown.Block]): bool =
+proc notesDirection(values: openArray[markdown.Block]): ui.Direction =
+  result = ui.Direction.LeftToRight
   var found = false
   scanBlocks(values, result, found)
 
-proc track(theme: ui.Theme): ui.Color
-
-proc paragraph(builder: NotesBuilder; context: ui.Context;
-                values: openArray[markdown.Inline]): ui.Element
-
-proc inlines(builder: NotesBuilder; context: ui.Context;
-             values: openArray[markdown.Inline]) =
-  for value in values:
-    case value.kind
-    of markdown.Text:
-      discard ui.text(context, value.text)
-    of markdown.CodeSpan:
-      discard ui.text(context, value.text)
-        .textFamily("monospace")
-        .textSize(builder.theme.fontSize * (12'f32 / 13))
-        .background(track(builder.theme))
-        .radius(3)
-    of markdown.Emphasis, markdown.Strong:
-      let styled = ui.richText(context)
-      let children = value.children
-      if value.kind == markdown.Emphasis:
-        discard styled.textItalic()
-      else:
-        discard styled.textWeight(700)
-      discard styled.children(proc() = builder.inlines(context, children))
-    of markdown.Link:
-      let link = ui.link(context, "", value.url)
-      let children = value.children
-      discard link.children(proc() = builder.inlines(context, children))
-
-proc paragraph(builder: NotesBuilder; context: ui.Context;
-               values: openArray[markdown.Inline]): ui.Element =
-  result = ui.richText(context)
-  let current = result
-  let content = @values
-  discard current.children(proc() = builder.inlines(context, content))
-
-proc codeScroll(builder: NotesBuilder): ui.ScrollState =
-  if builder.nextCodeScroll == builder.state.codeScrolls.len:
-    builder.state.codeScrolls.add(ui.newScrollState())
-  result = builder.state.codeScrolls[builder.nextCodeScroll]
-  inc builder.nextCodeScroll
-
-proc blocks(builder: NotesBuilder; context: ui.Context;
-            values: openArray[markdown.Block]; tight: bool; depth: int)
-proc bullet(depth: int): string
-
-proc blockView(builder: NotesBuilder; context: ui.Context;
-              value: markdown.Block; depth: int): ui.Element =
-  case value.kind
-  of markdown.Heading:
-    const headingSizes = [16'f32 / 13, 14'f32 / 13, 1'f32]
-    let size = headingSizes[min(value.level, headingSizes.len) - 1]
-    result = builder.paragraph(context, value.inlines)
-      .textSize(builder.theme.fontSize * size)
-      .textWeight(700)
-  of markdown.List:
-    result = ui.column(context)
-    let current = result
-    discard current.children(proc() =
-      for index, item in value.items:
-        var row = ui.row(context).alignItems(ui.Align.Start)
-        if builder.rtl:
-          row = row.reverse()
-        let itemBlocks = item
-        discard row.children(proc() =
-          var marker = ui.text(context,
-            if value.ordered: $(index + 1) & "." else: bullet(depth))
-          marker = marker.width(20).shrink(0)
-          if builder.rtl:
-            marker = marker.padding(0, 0, 0, 6)
-          else:
-            marker = marker.textAlign(ui.Align.End).padding(0, 6, 0, 0)
-          discard marker
-          let body = ui.column(context).grow()
-          discard body.children(proc() = builder.blocks(context, itemBlocks,
-            tight = true, depth = depth + 1))
-        )
-    )
-  of markdown.Quote:
-    var quote = ui.column(context)
-      .borderColor(builder.theme.border)
-      .textColor(builder.theme.textMuted)
-    if builder.rtl:
-      quote = quote.borderWidth(0, 3, 0, 0).padding(0, 10, 0, 0)
-    else:
-      quote = quote.borderWidth(0, 0, 0, 3).padding(0, 0, 0, 10)
-    let nested = value.blocks
-    discard quote.children(proc() = builder.blocks(context, nested,
-      tight = false, depth = depth))
-    result = quote
-  of markdown.Code:
-    let scroll = ui.scrollHorizontal(context, builder.codeScroll())
-      .background(track(builder.theme))
-      .radius(3)
-    let code = value.text
-    discard scroll.children(proc() =
-      discard ui.text(context, code).textFamily("monospace")
-        .textSize(builder.theme.fontSize * (12'f32 / 13))
-        .noWrap().padding(6, 8)
-    )
-    result = scroll
-  of markdown.Rule:
-    result = ui.divider(context)
-  of markdown.Paragraph:
-    result = builder.paragraph(context, value.inlines)
-
-proc bullet(depth: int): string =
-  case depth
-  of 0: "•"
-  of 1: "◦"
-  else: "▪"
+proc newNotesState*(): NotesState =
+  ## Creates persistent text storage for the selectable release notes.
+  NotesState(buffer: ui.newTextBuffer())
 
 proc track(theme: ui.Theme): ui.Color =
   if theme.dark: ui.rgba(255, 255, 255, 0.12'f32)
   else: ui.rgba(0, 0, 0, 0.1'f32)
 
-proc blocks(builder: NotesBuilder; context: ui.Context;
-            values: openArray[markdown.Block]; tight: bool; depth: int) =
+proc startLine(builder: var NotesBuilder) =
+  if not builder.lineStarted:
+    if builder.lines.len > 0:
+      builder.body.add('\n')
+      inc builder.runeOffset
+    builder.lineStarted = true
+
+proc finishLine(builder: var NotesBuilder) =
+  builder.startLine()
+  builder.lines.add(move(builder.currentLine))
+  builder.currentLine = @[]
+  builder.lineStarted = false
+
+proc append(builder: var NotesBuilder; text: string; style: RunStyle) =
+  if text.len == 0:
+    return
+  builder.startLine()
+  var span = ui.Span(text: text, font: style.font, size: style.size,
+    weight: style.weight, italic: style.italic, underline: style.underline,
+    color: style.color, background: style.background)
+  builder.currentLine.add(span)
+  builder.body.add(text)
+  builder.runeOffset += text.runeLen
+
+proc appendInlines(builder: var NotesBuilder;
+                   values: openArray[markdown.Inline]; style: RunStyle) =
+  for value in values:
+    case value.kind
+    of markdown.Text:
+      builder.append(value.text, style)
+    of markdown.CodeSpan:
+      var code = style
+      code.font = "monospace"
+      code.size = builder.theme.fontSize * (12'f32 / 13)
+      code.background = builder.theme.track()
+      builder.append(value.text, code)
+    of markdown.Emphasis, markdown.Strong:
+      var nested = style
+      if value.kind == markdown.Emphasis:
+        nested.italic = true
+      else:
+        nested.weight = max(nested.weight, 700)
+      builder.appendInlines(value.children, nested)
+    of markdown.Link:
+      var linked = style
+      linked.color = builder.theme.accent
+      linked.underline = true
+      let first = builder.runeOffset
+      builder.appendInlines(value.children, linked)
+      if builder.runeOffset > first:
+        builder.links.add(LinkRange(start: first,
+          pastLast: builder.runeOffset, url: value.url))
+
+proc prefixed(builder: var NotesBuilder; prefix: string; style: RunStyle) =
+  builder.append(prefix, style)
+
+proc appendBlock(builder: var NotesBuilder; value: markdown.Block;
+                 depth: int; prefix, continuation: string;
+                 style: RunStyle)
+
+proc appendBlocks(builder: var NotesBuilder;
+                  values: openArray[markdown.Block]; depth: int;
+                  prefix, continuation: string; style: RunStyle;
+                  tight: bool) =
   for index, value in values:
-    var gap: float32
-    if index == 0 or tight:
-      gap = 0
-    elif value.kind == markdown.Heading:
-      gap = 12
-    elif values[index - 1].kind == markdown.Heading:
-      gap = 4
-    else:
-      gap = 8
-    discard builder.blockView(context, value, depth).margin(gap, 0, 0, 0)
+    if index > 0 and not tight:
+      builder.finishLine()
+    let linePrefix = if tight and index > 0: continuation else: prefix
+    builder.appendBlock(value, depth, linePrefix, continuation, style)
+
+proc appendBlock(builder: var NotesBuilder; value: markdown.Block;
+                 depth: int; prefix, continuation: string;
+                 style: RunStyle) =
+  case value.kind
+  of markdown.Paragraph, markdown.Heading:
+    var inlineStyle = style
+    if value.kind == markdown.Heading:
+      const headingSizes = [16'f32 / 13, 14'f32 / 13, 1'f32]
+      inlineStyle.size = builder.theme.fontSize *
+        headingSizes[min(value.level, headingSizes.len) - 1]
+      inlineStyle.weight = max(inlineStyle.weight, 700)
+    builder.prefixed(prefix, inlineStyle)
+    builder.appendInlines(value.inlines, inlineStyle)
+    builder.finishLine()
+  of markdown.Code:
+    var codeStyle = style
+    codeStyle.font = "monospace"
+    codeStyle.size = builder.theme.fontSize * (12'f32 / 13)
+    codeStyle.background = builder.theme.track()
+    let lines = value.text.split('\n')
+    for index in 0..<lines.len:
+      builder.prefixed(if index == 0: prefix else: continuation, codeStyle)
+      builder.append(lines[index], codeStyle)
+      builder.finishLine()
+  of markdown.Quote:
+    var quoteStyle = style
+    quoteStyle.color = builder.theme.textMuted
+    builder.appendBlocks(value.blocks, depth, prefix & "│ ",
+      continuation & "│ ", quoteStyle, tight = false)
+  of markdown.List:
+    for index, item in value.items:
+      let marker = if value.ordered: $(index + 1) & ". "
+        else: (if depth == 0: "• " elif depth == 1: "◦ " else: "▪ ")
+      let indent = prefix & repeat(" ", marker.runeLen)
+      builder.appendBlocks(item, depth + 1, prefix & marker, indent, style,
+        tight = true)
+  of markdown.Rule:
+    builder.prefixed(prefix, style)
+    builder.append("────────────────────────",
+      style)
+    builder.finishLine()
+
+proc buildNotes(values: openArray[markdown.Block]; theme: ui.Theme):
+    tuple[body: string, lines: seq[seq[ui.Span]], links: seq[LinkRange],
+          direction: ui.Direction] =
+  var builder = NotesBuilder(theme: theme)
+  builder.appendBlocks(values, 0, "", "", RunStyle(), tight = false)
+  if builder.lineStarted:
+    builder.lines.add(move(builder.currentLine))
+  elif builder.lines.len == 0:
+    builder.lines.add(@[])
+  result = (builder.body, builder.lines, builder.links,
+    notesDirection(values))
 
 proc render*(state: NotesState; context: ui.Context; theme: ui.Theme;
-             values: openArray[markdown.Block]): ui.Element =
-  ## Adds parsed release notes to the native UI and retains code-block scroll.
+             values: openArray[markdown.Block];
+             label = "Release notes"): ui.Element =
+  ## Adds styled, read-only release notes with native text selection and copy.
   let persistent = if state == nil: newNotesState() else: state
-  let builder = NotesBuilder(state: persistent, theme: theme,
-    rtl: rightToLeft(values))
-  result = ui.column(context)
+  let notes = buildNotes(values, theme)
+  if persistent.body != notes.body:
+    persistent.buffer.set(notes.body)
+    persistent.body = notes.body
+  persistent.lineStyles = notes.lines
+  persistent.links = notes.links
+  let styleLine: ui.TextAreaStyler = proc(line: int;
+      text: string): seq[ui.Span] =
+    if line >= 0 and line < persistent.lineStyles.len:
+      result = persistent.lineStyles[line]
+  result = context.column().direction(notes.direction).grow()
   let root = result
-  let content = @values
-  discard root.children(proc() = builder.blocks(context, content,
-    tight = false, depth = 0))
+  discard root.children(proc() =
+    let field = context.textAreaBufferStyledBase(persistent.buffer, styleLine)
+      .label(label).readOnly().grow()
+    let openLink = context
+    discard field.onClick(proc() =
+      let selection = field.textSelection()
+      if selection.start == selection.`end`:
+        for link in persistent.links:
+          if selection.start >= link.start and selection.start < link.pastLast:
+            openLink.openUrl(link.url)
+            break
+    )
+  )
