@@ -26,6 +26,8 @@ type
     ## A drawing surface supplied to an element's draw callback.
     frame: scene.Scene
     textSystem: textStack.System
+    theme: Theme
+    localeTag: string
     root: Rect
     scale, opacity: float32
 

@@ -567,6 +567,63 @@ proc paintText(s: scene.Scene; node: ElementNode; textColor: Color;
   s.paintRichDecorations(node, textColor, scale, opacity, originX, originY,
     system)
 
+proc painterRichTextParams(painter: Painter; width: float32;
+                           spans: openArray[Span]): tuple[
+    params: textStack.Params, spans: seq[Span], ends: seq[int]] =
+  var value = ""
+  var ending = 0
+  result.spans = newSeqOfCap[Span](spans.len)
+  result.ends = newSeqOfCap[int](spans.len)
+  for source in spans:
+    let span = normalizeRichTextSpan(source)
+    result.spans.add(span)
+    value.add(span.text)
+    ending += span.text.runeLen
+    result.ends.add(ending)
+  result.params = textStack.Params(text: value,
+    style: textStack.Style(family: painter.theme.font,
+      size: painter.theme.fontSize, lang: painter.localeTag),
+    width: if width.finiteRichText: max(width, 0'f32) else: 0'f32,
+    spans: encodeRichTextSpans(result.spans))
+
+proc measureText*(painter: Painter; width: float32;
+                  spans: varargs[Span]): tuple[width, height: float32] =
+  ## Measures styled text in DIPs, wrapping at width; zero only breaks at newlines.
+  if painter.textSystem == nil:
+    return
+  let params = painter.painterRichTextParams(width, spans)
+  let layout = painter.textSystem.layout(params.params)
+  result = (layout.width, layout.height)
+
+proc richText*(painter: var Painter; x, y, width: float32;
+               spans: varargs[Span]): tuple[width, height: float32] =
+  ## Draws styled text from its top-left in DIPs and returns its size.
+  if painter.textSystem == nil:
+    return
+  let params = painter.painterRichTextParams(width, spans)
+  let layout = painter.textSystem.layout(params.params)
+  result = (layout.width, layout.height)
+  if painter.frame == nil:
+    return
+  let node = ElementNode(hasText: true, textSpans: params.spans,
+    textSpanEnds: params.ends, textColor: painter.theme.text,
+    shapedText: layout)
+  painter.frame.paintText(node, painter.theme.text,
+    Rect(x: x, y: y, w: layout.width, h: layout.height), painter.root,
+    painter.scale, painter.opacity, painter.textSystem)
+
+proc text*(painter: var Painter; x, y: float32; value: string;
+           size: float32; color: Color) =
+  ## Draws a line of text from its top-left corner in DIPs.
+  if painter.textSystem == nil or painter.frame == nil:
+    return
+  let layout = painter.textSystem.layout(textStack.Params(text: value,
+    style: textStack.Style(size: size)))
+  let node = ElementNode(hasText: true, shapedText: layout)
+  painter.frame.paintText(node, color,
+    Rect(x: x, y: y, w: layout.width, h: layout.height), painter.root,
+    painter.scale, painter.opacity, painter.textSystem)
+
 proc paintTextSelection(s: scene.Scene; owner: ElementOwner;
                         node: ElementNode; rect, root: Rect;
                         scale, opacity: float32) =
@@ -1105,7 +1162,9 @@ proc paintScene*(layout: LayoutResult; scale = 1'f32;
         result.paintSvg(node, layout.rects[slot], layout.root, scale, opacity)
         if node.drawFn != nil:
           var painter = Painter(frame: result, textSystem: system,
-            root: layout.root, scale: scale, opacity: opacity)
+            theme: layout.owner.themeSnapshot,
+            localeTag: layout.owner.localeSnapshot, root: layout.root,
+            scale: scale, opacity: opacity)
           node.drawFn(painter, layout.rects[slot])
         for _ in 0..<clipCount:
           result.ops.add(scene.Op(kind: scene.opPopClip))

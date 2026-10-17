@@ -215,6 +215,8 @@ type
 
   ElementOwner = ref object
     activeContext: Context
+    themeSnapshot: Theme
+    localeSnapshot: string
     nodes: seq[ElementNode]
     idSlots: Table[uint64, int]
     identityParents: Table[uint64, uint64]
@@ -1672,6 +1674,8 @@ proc build*(c: Context; view: proc(c: Context) {.closure.}) =
       c.owner.localStates.del(identity)
     built = true
   finally:
+    c.owner.themeSnapshot = c.theme
+    c.owner.localeSnapshot = c.localeTag
     c.owner.inBuild = false
     c.owner.activeContext = nil
     c.owner.parent = -1
