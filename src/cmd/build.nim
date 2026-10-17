@@ -3,6 +3,8 @@
 import std/[algorithm, json, os, osproc, streams, strutils, tempfiles]
 import ./resources as projectResources
 import ./generate
+when hostOS == "macosx":
+  import ./dmg as dmgPackager
 
 const usageBuild = """Usage: mygo build [flags] [dir]
 
@@ -12,6 +14,7 @@ Flags:
   -o path          output directory (default: out from mygo.json, or dist)
   -platform target  host GOOS/GOARCH (default: this machine)
   -skip-build-command  do not run buildCommand from mygo.json
+  -skip-dmg        do not create a disk image on macOS
   -debug           compile with checks and debug information
   -h, --help       show this help
 """
@@ -229,6 +232,7 @@ proc runBuild*(args: seq[string]): int =
   var outputOption, platformOption = ""
   var debug = false
   var skipBuildCommand = false
+  var skipDmg = false
   var paths: seq[string]
   var index = 0
   while index < args.len:
@@ -244,6 +248,8 @@ proc runBuild*(args: seq[string]): int =
       debug = true
     elif arg == "-skip-build-command" or arg == "--skip-build-command":
       skipBuildCommand = true
+    elif arg == "-skip-dmg" or arg == "--skip-dmg":
+      skipDmg = true
     elif arg.startsWith("-"):
       let equalAt = arg.find('=')
       let flag = if equalAt < 0: arg else: arg[0 ..< equalAt]
@@ -362,6 +368,14 @@ proc runBuild*(args: seq[string]): int =
         targetArch, config)
       writeInfoPlist(contents / "Info.plist", name, identifier, version,
         executable)
+      if not skipDmg:
+        var dmgTitle = name
+        if config.hasKey("macos") and config["macos"].kind != JNull:
+          if config["macos"].kind != JObject:
+            raise newException(ValueError, "mygo.json: macos must be an object")
+          dmgTitle = configString(config["macos"], "dmgTitle", name)
+        discard dmgPackager.buildDmg(bundle, stage, name, version,
+          targetArch, dmgTitle)
     else:
       let binary = stage / executable
       let compiled = compileApp(projectDir, compileSource, binary, cache,

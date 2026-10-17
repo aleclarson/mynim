@@ -1,6 +1,9 @@
 import std/[assertions, json, os, osproc, streams, strtabs, strutils, tempfiles]
 import ../src/cmd/build
 import ../src/cmd/init
+when hostOS == "macosx":
+  import ../src/cmd/dmg as dmgPackage
+  import std/posix
 
 proc runFrontendCheck(binary, workingDir: string): int =
   var env = newStringTable(modeCaseSensitive)
@@ -14,6 +17,54 @@ proc runFrontendCheck(binary, workingDir: string): int =
   finally:
     process.close()
 
+when hostOS == "macosx":
+  proc verifyDmg(dmg, appName, mountPoint: string) =
+    createDir(mountPoint)
+    var disk = ""
+    try:
+      let attach = startProcess("/usr/bin/hdiutil", args = @[
+        "attach", "-readonly", "-noverify", "-noautoopen", "-nobrowse",
+        "-mountpoint", mountPoint, dmg],
+        options = {poUsePath, poStdErrToStdOut})
+      let attachLog = attach.outputStream.readAll()
+      let attachCode = attach.waitForExit()
+      attach.close()
+      doAssert attachCode == 0, attachLog
+      for line in attachLog.splitLines:
+        let fields = line.splitWhitespace
+        if fields.len > 0 and fields[0].startsWith("/dev/disk"):
+          disk = fields[0]
+          break
+      doAssert disk.len > 0, attachLog
+      doAssert fileExists(mountPoint / ".DS_Store")
+      doAssert dirExists(mountPoint / appName)
+      doAssert readFile(mountPoint / ".VolumeIcon.icns") ==
+        "MYNIM-ICON-FIXTURE"
+      var linkTarget = newString(4096)
+      let linkLength = posix.readlink((mountPoint / "Applications").cstring,
+        linkTarget.cstring, linkTarget.len)
+      doAssert linkLength > 0
+      linkTarget.setLen(linkLength)
+      doAssert linkTarget == "/Applications"
+      let flags = startProcess("/usr/bin/xattr", args = @[
+        "-px", "com.apple.FinderInfo", mountPoint],
+        options = {poUsePath, poStdErrToStdOut})
+      let flagsOutput = flags.outputStream.readAll()
+      let flagsCode = flags.waitForExit()
+      flags.close()
+      doAssert flagsCode == 0, flagsOutput
+      doAssert flagsOutput.splitWhitespace.join("") ==
+        "0000000000000000040000000000000000000000000000000000000000000000"
+    finally:
+      if disk.len > 0:
+        let detach = startProcess("/usr/bin/hdiutil",
+          args = @["detach", disk], options = {poUsePath, poStdErrToStdOut})
+        let detachLog = detach.outputStream.readAll()
+        let detachCode = detach.waitForExit()
+        detach.close()
+        doAssert detachCode == 0, detachLog
+      if dirExists(mountPoint): removeDir(mountPoint)
+
 proc testBuild() =
   let temporary = createTempDir("mynim-build-", "")
   defer: removeDir(temporary)
@@ -23,6 +74,9 @@ proc testBuild() =
     "--name", "Ada & Counter",
     "--mygo", getCurrentDir(),
     project]) == 0
+
+  createDir(project / "resources")
+  writeFile(project / "resources" / "AppIcon.icns", "MYNIM-ICON-FIXTURE")
 
   let buildStep = project / "build_step.nim"
   let buildMarker = project / "build-step-ran.txt"
@@ -85,6 +139,10 @@ app.run()
       doAssert process.waitForExit() == 0, log
     finally:
       process.close()
+    let dmg = target / dmgPackage.dmgFileName("Ada & Counter",
+      config["version"].getStr(), hostCPU)
+    doAssert fileExists(dmg)
+    verifyDmg(dmg, "ada-counter.app", temporary / "dmg mount")
   else:
     doAssert fileExists(target / executable)
     doAssert fileExists(target / "icon.png")
@@ -98,10 +156,11 @@ app.run()
       doAssert not path.lastPathPart().startsWith(".mygo-frontend-")
 
   removeFile(buildMarker)
-  doAssert runBuild(@["-skip-build-command", "-o", output, project]) == 0
+  doAssert runBuild(@["-skip-build-command", "-skip-dmg", "-o", output,
+    project]) == 0
   doAssert not fileExists(buildMarker)
 
-  doAssert runBuild(@["-o", output, project]) == 0
+  doAssert runBuild(@["-skip-dmg", "-o", output, project]) == 0
   doAssert fileExists(buildMarker)
   when hostOS == "macosx":
     doAssert fileExists(target / "ada-counter.app" / "Contents" / "MacOS" /
@@ -126,7 +185,7 @@ import catalog_gen
 doAssert catalog_gen.inLocale("de").hello() == "Hallo"
 app.run()
 """)
-  doAssert runBuild(@["-o", output, project]) == 0
+  doAssert runBuild(@["-skip-dmg", "-o", output, project]) == 0
   doAssert fileExists(project / "src" / "catalog_gen.nim")
   doAssert runBuild(@["-platform", "other/target", project]) == 1
   doAssert runBuild(@["-unknown", project]) == 2
