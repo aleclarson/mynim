@@ -23,6 +23,10 @@ type
   Point* = object ## An offset in device independent pixels.
     x*, y*: float32
 
+  Transform* = object ## A visual 2D transform for Painter drawing.
+                       ## The zero value is identity.
+    value: scene.Affine
+
   DragAxis* {.pure.} = enum ## An axis along which a Draggable element moves.
     Horizontal
     Vertical
@@ -358,6 +362,46 @@ const
 proc contains*(r: Rect; x, y: float32): bool =
   ## Reports whether the point is inside r, including its top and left edges.
   x >= r.x and y >= r.y and x < r.x + r.w and y < r.y + r.h
+
+proc finiteTransformValue(value: float32): bool =
+  classify(value) notin {fcNan, fcInf, fcNegInf}
+
+proc validateTransformValues(values: varargs[float32]) =
+  for value in values:
+    if not finiteTransformValue(value):
+      raise newException(ValueError, "ui: transform values must be finite")
+
+proc validateTransform(value: scene.Affine) =
+  validateTransformValues(value.a, value.b, value.c, value.d, value.x,
+    value.y, value.g, value.h)
+
+proc translation*(x, y: float32): Transform =
+  ## Moves drawing by x and y DIPs.
+  validateTransformValues(x, y)
+  Transform(value: scene.translation(x, y))
+
+proc scaling*(x, y: float32): Transform =
+  ## Scales each axis; zero collapses it and negative values reflect it.
+  validateTransformValues(x, y)
+  Transform(value: scene.scaling(x, y))
+
+proc rotation*(degrees: float32): Transform =
+  ## Rotates clockwise by degrees in the window's coordinate system.
+  validateTransformValues(degrees)
+  Transform(value: scene.rotation(degrees))
+
+proc skewing*(x, y: float32): Transform =
+  ## Slants content by x degrees horizontally and y degrees vertically.
+  validateTransformValues(x, y)
+  let horizontal = tan(x.float64 * PI / 180).float32
+  let vertical = tan(y.float64 * PI / 180).float32
+  validateTransformValues(horizontal, vertical)
+  Transform(value: scene.matrix(1, vertical, horizontal, 1, 0, 0))
+
+proc then*(transform, next: Transform): Transform =
+  ## Applies transform first, then next.
+  result.value = scene.mul(next.value, transform.value)
+  validateTransform(result.value)
 
 proc newScrollState*(): ScrollState =
   ## Creates persistent state for a scroll container.

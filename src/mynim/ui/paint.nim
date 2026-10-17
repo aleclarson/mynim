@@ -332,6 +332,48 @@ proc draw*(element: Element;
   if node != nil:
     node.drawFn = callback
 
+proc painterTransform(painter: Painter; value: Transform;
+                      originX, originY: float32): scene.Affine =
+  validateTransformValues(originX, originY, painter.root.x, painter.root.y,
+    painter.scale)
+  if painter.scale <= 0:
+    raise newException(ValueError, "ui: painter scale must be positive")
+  var pixelTransform = value.value
+  pixelTransform.x *= painter.scale
+  pixelTransform.y *= painter.scale
+  validateTransform(pixelTransform)
+  let pixelOriginX = (originX - painter.root.x) * painter.scale
+  let pixelOriginY = (originY - painter.root.y) * painter.scale
+  validateTransformValues(pixelOriginX, pixelOriginY)
+  result = scene.translation(pixelOriginX, pixelOriginY)
+    .mul(pixelTransform)
+    .mul(scene.translation(-pixelOriginX, -pixelOriginY))
+  validateTransform(result)
+
+proc applyPainterTransform(frame: scene.Scene; first: int;
+                           transform: scene.Affine) =
+  for i in first ..< frame.ops.len:
+    let composed = scene.mul(transform, frame.ops[i].transform)
+    validateTransform(composed)
+    frame.ops[i].transform = composed
+
+proc transform*(painter: var Painter; value: Transform;
+                originX, originY: float32;
+                callback: proc(painter: var Painter) {.closure.}) =
+  ## Applies a visual transform around an origin; callback receives the painter.
+  if callback == nil:
+    raise newException(ValueError, "ui: painter transform callback is nil")
+  if painter.frame == nil or not value.value.`set`:
+    callback(painter)
+    return
+  let frame = painter.frame
+  let first = frame.ops.len
+  let transformMatrix = painter.painterTransform(value, originX, originY)
+  try:
+    callback(painter)
+  finally:
+    frame.applyPainterTransform(first, transformMatrix)
+
 proc painterBorderPixels(width, scale: float32): float32 =
   if width <= 0:
     return
