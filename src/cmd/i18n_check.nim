@@ -1,19 +1,15 @@
 ## Check the ARB-style message catalogs configured by a MyGo project.
 
-import std/[algorithm, json, os, parsejson, sequtils, sets, streams, strutils,
+import std/[algorithm, json, os, parsejson, sequtils, streams, strutils,
   tables]
 import ../mynim/i18n as localeI18n
+import ../mynim/i18n/message as messageFormat
 
 type
   Argument = object
     name, kind: string
 
   ParsedMessage = object
-    args: seq[Argument]
-
-  MessageParser = object
-    source: string
-    position: int
     args: seq[Argument]
 
   Message = object
@@ -38,235 +34,10 @@ Check the catalogs configured by i18n in mygo.json.
 Errors exit with status 1; missing translations are warnings.
 """
 
-proc patternSpace(ch: char): bool =
-  ch in {' ', '\t', '\n', '\v', '\f', '\r'}
-
-proc patternSyntax(ch: char): bool =
-  ch in {'!'..'/', ':'..'@', '['..'^', '`', '{'..'~'}
-
-proc parserError(parser: MessageParser; message: string): ref ValueError =
-  newException(ValueError, message & " at offset " & $parser.position)
-
-proc skipSpace(parser: var MessageParser) =
-  while parser.position < parser.source.len and
-      patternSpace(parser.source[parser.position]):
-    inc parser.position
-
-proc readWord(parser: var MessageParser): string =
-  let start = parser.position
-  while parser.position < parser.source.len:
-    let ch = parser.source[parser.position]
-    if ch < ' ' or patternSpace(ch) or patternSyntax(ch):
-      break
-    inc parser.position
-  parser.source[start ..< parser.position]
-
-proc addArgument(parser: var MessageParser; name, kind: string) =
-  for arg in parser.args.mitems:
-    if arg.name == name:
-      if arg.kind.len == 0:
-        arg.kind = kind
-      return
-  parser.args.add Argument(name: name, kind: kind)
-
-proc validArgumentName(name: string): bool =
-  if name.len == 0:
-    return false
-  if name[0] in {'0'..'9'}:
-    if name.len > 1 and name[0] == '0':
-      return false
-    for ch in name:
-      if ch notin {'0'..'9'}:
-        return false
-    return true
-  if name[0] < 'A' or name[0] > 'z' or
-      name[0] in {'['..'`'}:
-    if name[0] < char(0x80) and name[0] != '_':
-      return false
-  for ch in name:
-    if ch >= char(0x80) or ch in {'A'..'Z', 'a'..'z', '0'..'9', '_'}:
-      continue
-    return false
-  true
-
-proc parseMessage(parser: var MessageParser; depth: int; nested,
-    inPlural: bool): bool
-
-proc parseStyle(parser: var MessageParser): string =
-  var nesting = 0
-  var quoted = false
-  let start = parser.position
-  while parser.position < parser.source.len:
-    let ch = parser.source[parser.position]
-    if ch == '\'':
-      if parser.position + 1 < parser.source.len and
-          parser.source[parser.position + 1] == '\'':
-        parser.position += 2
-        continue
-      quoted = not quoted
-    elif not quoted:
-      if ch == '{':
-        inc nesting
-      elif ch == '}':
-        if nesting == 0:
-          break
-        dec nesting
-    inc parser.position
-  if parser.position >= parser.source.len:
-    raise parser.parserError("unclosed argument style")
-  result = parser.source[start ..< parser.position].strip()
-  if result.len == 0:
-    raise parser.parserError("an argument style is empty")
-  inc parser.position
-
-proc validExactNumber(value: string): bool =
-  if value.len == 0 or value[0] == '.' or value[^1] == '.' or
-      value.count('.') > 1:
-    return false
-  for ch in value:
-    if ch notin {'0'..'9', '.'}:
-      return false
-  true
-
-proc parseArgument(parser: var MessageParser; depth: int) =
-  inc parser.position # {
-  parser.skipSpace()
-  let name = parser.readWord()
-  if name.len == 0:
-    raise parser.parserError("an argument has no name")
-  if not validArgumentName(name):
-    raise parser.parserError("\"" & name & "\" is not an argument name")
-  parser.skipSpace()
-  if parser.position >= parser.source.len:
-    raise parser.parserError("unclosed argument " & name)
-  if parser.source[parser.position] == '}':
-    parser.addArgument(name, "")
-    inc parser.position
-    return
-  if parser.source[parser.position] != ',':
-    raise parser.parserError("expected , or } after argument " & name)
-
-  inc parser.position
-  parser.skipSpace()
-  let kind = parser.readWord()
-  parser.skipSpace()
-  if kind notin ["number", "date", "time", "plural", "selectordinal", "select"]:
-    raise parser.parserError("unknown argument type " & kind)
-  parser.addArgument(name, kind)
-
-  if kind in ["number", "date", "time"]:
-    if parser.position < parser.source.len and
-        parser.source[parser.position] == ',':
-      inc parser.position
-      discard parser.parseStyle()
-    elif parser.position >= parser.source.len or
-        parser.source[parser.position] != '}':
-      raise parser.parserError("unclosed " & kind & " argument " & name)
-    else:
-      inc parser.position
-    return
-
-  if parser.position >= parser.source.len or
-      parser.source[parser.position] != ',':
-    raise parser.parserError("expected , after " & kind)
-  inc parser.position
-  parser.skipSpace()
-  if kind in ["plural", "selectordinal"] and
-      parser.position + "offset:".len <= parser.source.len and
-      parser.source[parser.position ..< parser.position + "offset:".len] ==
-        "offset:":
-    parser.position += "offset:".len
-    parser.skipSpace()
-    let offsetStart = parser.position
-    while parser.position < parser.source.len and
-        parser.source[parser.position] in {'0'..'9'}:
-      inc parser.position
-    if offsetStart == parser.position:
-      raise parser.parserError("offset: needs a number")
-
-  var cases = initHashSet[string]()
-  var hasOther = false
-  while true:
-    parser.skipSpace()
-    if parser.position >= parser.source.len:
-      raise parser.parserError("unclosed " & kind & " argument " & name)
-    if parser.source[parser.position] == '}':
-      inc parser.position
-      break
-
-    var key: string
-    if kind in ["plural", "selectordinal"] and
-        parser.source[parser.position] == '=':
-      let start = parser.position
-      inc parser.position
-      while parser.position < parser.source.len and
-          parser.source[parser.position] in {'0'..'9', '.'}:
-        inc parser.position
-      key = parser.source[start ..< parser.position]
-      if key.len <= 1 or not validExactNumber(key[1 .. ^1]):
-        raise parser.parserError(key & " is not a number")
-    else:
-      key = parser.readWord()
-      if key.len == 0:
-        raise parser.parserError("expected a case of " & kind)
-      if kind in ["plural", "selectordinal"] and
-          key notin ["zero", "one", "two", "few", "many", "other"]:
-        raise parser.parserError(key & " is not a plural category")
-    if key in cases:
-      raise parser.parserError("case " & key & " comes twice")
-    cases.incl key
-    if key == "other":
-      hasOther = true
-    parser.skipSpace()
-    if parser.position >= parser.source.len or
-        parser.source[parser.position] != '{':
-      raise parser.parserError("expected { after case " & key)
-    inc parser.position
-    if not parser.parseMessage(depth + 1, true,
-        kind in ["plural", "selectordinal"]):
-      raise parser.parserError("unclosed case " & key)
-    inc parser.position # }
-  if not hasOther:
-    raise parser.parserError("the " & kind & " argument has no other case")
-
-proc parseMessage(parser: var MessageParser; depth: int; nested,
-    inPlural: bool): bool =
-  if depth > 32:
-    raise parser.parserError("arguments nest too deeply")
-  while parser.position < parser.source.len:
-    case parser.source[parser.position]
-    of '\'':
-      inc parser.position
-      if parser.position < parser.source.len and
-          parser.source[parser.position] == '\'':
-        inc parser.position
-      elif parser.position < parser.source.len and
-          (parser.source[parser.position] in ['{', '}'] or
-           (inPlural and parser.source[parser.position] == '#')):
-        while parser.position < parser.source.len:
-          if parser.source[parser.position] == '\'':
-            if parser.position + 1 < parser.source.len and
-                parser.source[parser.position + 1] == '\'':
-              parser.position += 2
-            else:
-              inc parser.position
-              break
-          else:
-            inc parser.position
-    of '{':
-      parser.parseArgument(depth)
-    of '}':
-      if not nested:
-        raise parser.parserError("unmatched }")
-      return true
-    else:
-      inc parser.position
-  not nested
-
 proc parseMessage(source: string): ParsedMessage =
-  var parser = MessageParser(source: source)
-  discard parser.parseMessage(0, false, false)
-  result.args = parser.args
+  let message = messageFormat.parseMessage(source)
+  for arg in message.args:
+    result.args.add Argument(name: arg.name, kind: arg.kind)
 
 proc topLevelKeys(source: string): seq[tuple[key: string, line: int]] =
   var parser: JsonParser

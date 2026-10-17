@@ -9,6 +9,8 @@
 import std/[strutils, tables, times, atomics, unicode]
 import ./i18n/cldr_regions as cldr
 import ./i18n/cldr_format_data as formatData
+import ./i18n/message as messageFormat
+export messageFormat
 
 type
   NameWidth* = enum
