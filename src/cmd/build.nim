@@ -1,6 +1,6 @@
 ## Compile a native MyNim project for the host and package its resources.
 
-import std/[json, os, osproc, streams, strutils, tempfiles]
+import std/[algorithm, json, os, osproc, streams, strutils, tempfiles]
 import ./resources as projectResources
 
 const usageBuild = """Usage: mygo build [flags] [dir]
@@ -72,6 +72,72 @@ proc runBuildCommand(command, projectDir: string): int =
     result = process.waitForExit()
   finally:
     process.close()
+
+proc nimStringLiteral(value: string): string =
+  result = "\""
+  for ch in value:
+    case ch
+    of '\\': result.add "\\\\"
+    of '"': result.add "\\\""
+    of '\n': result.add "\\n"
+    of '\r': result.add "\\r"
+    of '\t': result.add "\\t"
+    else:
+      if ord(ch) < 32:
+        result.add "\\x" & toHex(ord(ch), 2)
+      else:
+        result.add ch
+  result.add '"'
+
+proc collectFrontendFiles(dir: string; files: var seq[string]) =
+  for kind, path in walkDir(dir):
+    case kind
+    of pcDir:
+      collectFrontendFiles(path, files)
+    of pcFile:
+      files.add path
+    else:
+      discard
+
+proc writeEmbeddedMain(path, source, frontendDir: string) =
+  if not dirExists(frontendDir):
+    raise newException(IOError,
+      "mygo build: frontendDist is not a directory: " & frontendDir)
+  var files: seq[string]
+  collectFrontendFiles(frontendDir, files)
+  files.sort()
+  if files.len == 0:
+    raise newException(IOError,
+      "mygo build: frontendDist contains no files: " & frontendDir)
+
+  var code = """import std/tables
+import mynim
+import mynim/internal/vfs as mynimVfs
+
+var mynimFrontendFiles = initTable[string, seq[byte]]()
+
+proc mynimFrontendBytes(value: string): seq[byte] =
+  result = newSeq[byte](value.len)
+  for index, ch in value:
+    result[index] = byte(ord(ch))
+
+proc embeddedFrontend*(): mynimVfs.Fs =
+  mynimVfs.mapFs(mynimFrontendFiles)
+
+proc installFrontend*() =
+  setFrontend(embeddedFrontend())
+"""
+  for index, file in files:
+    let name = relativePath(file, frontendDir).replace('\\', '/')
+    let contentName = "mynimFrontendContent" & $index
+    code.add("const " & contentName & " = staticRead(" &
+      nimStringLiteral(file) & ")\n")
+    code.add("mynimFrontendFiles[" & nimStringLiteral(name) &
+      "] = mynimFrontendBytes(" & contentName & ")\n")
+  writeFile(path.parentDir() / "mynim_frontend.nim", code)
+  writeFile(path, "import mynim_frontend\n" &
+    "mynim_frontend.installFrontend()\ninclude " &
+    nimStringLiteral(source) & "\n")
 
 proc xmlEscape(value: string): string =
   for ch in value:
@@ -220,6 +286,7 @@ proc runBuild*(args: seq[string]): int =
       "com.mygo." & slug(name).replace("-", ""))
     let version = configString(config, "version", "0.1.0")
     let buildCommand = configString(config, "buildCommand", "")
+    let configuredFrontend = configString(config, "frontendDist", "")
     let configuredOut = if outputOption.len > 0: outputOption
       else: configString(config, "out", "dist")
     let outputRoot = absolutePath(if isAbsolute(configuredOut): configuredOut
@@ -236,9 +303,21 @@ proc runBuild*(args: seq[string]): int =
         stderr.writeLine("mygo build: buildCommand exited with status " & $code)
         return 1
 
+    createDir(outputRoot)
+    var compileSource = source
+    var overlay = ""
+    defer:
+      if overlay.len > 0 and dirExists(overlay):
+        removeDir(overlay)
+    if configuredFrontend.len > 0:
+      let frontendDir = absolutePath(if isAbsolute(configuredFrontend):
+        configuredFrontend else: projectDir / configuredFrontend)
+      overlay = createTempDir(".mygo-frontend-", "", projectDir)
+      compileSource = overlay / "generated_main.nim"
+      writeEmbeddedMain(compileSource, source, frontendDir)
+
     let executable = slug(name) & (when hostOS == "windows": ".exe" else: "")
     let targetName = targetOs & "-" & targetArch
-    createDir(outputRoot)
     let stage = createTempDir(".mygo-stage-", "", outputRoot)
     defer:
       if dirExists(stage):
@@ -257,7 +336,7 @@ proc runBuild*(args: seq[string]): int =
       createDir(macOSDir)
       createDir(resourcesDir)
       let binary = macOSDir / executable
-      let compiled = compileApp(projectDir, source, binary, cache, debug)
+      let compiled = compileApp(projectDir, compileSource, binary, cache, debug)
       if compiled.code != 0:
         stderr.write(compiled.log)
         return 1
@@ -267,7 +346,7 @@ proc runBuild*(args: seq[string]): int =
         executable)
     else:
       let binary = stage / executable
-      let compiled = compileApp(projectDir, source, binary, cache, debug)
+      let compiled = compileApp(projectDir, compileSource, binary, cache, debug)
       if compiled.code != 0:
         stderr.write(compiled.log)
         return 1
