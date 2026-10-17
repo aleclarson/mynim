@@ -2,17 +2,21 @@
 ## app is written in, the one that suits them best, and says an app's
 ## messages in it.
 ##
-## PORT STATUS: regional preferences, CLDR names, and common date skeletons
-## use CLDR data. Message/number formatting and full date pattern matching
-## are still being ported.
+## PORT STATUS: regional preferences, localized number formatting, plural
+## rules, CLDR names, and common date skeletons use CLDR data. ICU message
+## evaluation and full date pattern matching are still being ported.
 
 import std/[strutils, tables, times, atomics, unicode, math]
 import ./i18n/cldr_regions as cldr
 import ./i18n/cldr_format_data as formatData
 import ./i18n/message as messageFormat
+import ./i18n/plural as pluralRuntime
 export messageFormat
 
 type
+  Plural* = pluralRuntime.Plural
+  PluralOperands* = pluralRuntime.PluralOperands
+
   NameWidth* = enum
     ## The width of a localized month, weekday, or day-period name.
     nameWide, nameAbbreviated, nameShort, nameNarrow
@@ -51,6 +55,13 @@ type
     hourCycle*: int
 
 const
+  pluralZero* = pluralRuntime.pluralZero
+  pluralOne* = pluralRuntime.pluralOne
+  pluralTwo* = pluralRuntime.pluralTwo
+  pluralFew* = pluralRuntime.pluralFew
+  pluralMany* = pluralRuntime.pluralMany
+  pluralOther* = pluralRuntime.pluralOther
+
   ## The pseudo locales, which the generated catalog tests translate
   ## to.
   pseudoAccented* = "en-XA"
@@ -118,6 +129,36 @@ proc normalize*(locale: string): string =
   if script != "": res.add "-" & script
   if region != "": res.add "-" & region
   res
+
+proc pluralName*(plural: Plural): string = pluralRuntime.pluralName(plural)
+
+proc parsePlural*(name: string): tuple[value: Plural, ok: bool] =
+  pluralRuntime.parsePlural(name)
+
+proc parsePluralOperands*(value: string):
+    tuple[operands: PluralOperands, ok: bool] =
+  pluralRuntime.parsePluralOperands(value)
+
+proc newPluralOperands*(value: string): PluralOperands =
+  pluralRuntime.newPluralOperands(value)
+
+proc newPluralOperands*[T: SomeInteger](value: T): PluralOperands =
+  pluralRuntime.newPluralOperands(value)
+
+proc newPluralOperands*[T: SomeFloat](value: T): PluralOperands =
+  pluralRuntime.newPluralOperands(value)
+
+proc pluralCategory*(locale: string; operands: PluralOperands): Plural =
+  pluralRuntime.cardinalCategory(normalize(locale), operands)
+
+proc ordinalCategory*(locale: string; operands: PluralOperands): Plural =
+  pluralRuntime.ordinalCategory(normalize(locale), operands)
+
+proc pluralCategories*(locale: string): seq[Plural] =
+  pluralRuntime.pluralCategories(normalize(locale))
+
+proc ordinalCategories*(locale: string): seq[Plural] =
+  pluralRuntime.ordinalCategories(normalize(locale))
 
 var localeState {.global.}: Atomic[pointer]
   ## the language the app shows, kept as a shared cstring
