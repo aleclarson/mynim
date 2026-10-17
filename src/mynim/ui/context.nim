@@ -883,6 +883,11 @@ proc after*(c: Context; d: Duration) =
   if not owner.inBuild and owner.invalidate != nil:
     owner.invalidate()
 
+proc animationFrame*(c: Context) =
+  ## Requests another build at the next display frame while something moves.
+  if c != nil and c.owner != nil and c.owner.inBuild and not c.owner.closed:
+    c.owner.animating = true
+
 proc multiplyWrap(a, b: uint64): uint64 {.inline.} =
   cast[uint64](cast[int64](a) *% cast[int64](b))
 
