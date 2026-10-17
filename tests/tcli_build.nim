@@ -1,9 +1,15 @@
-import std/[assertions, json, os, osproc, streams, strtabs, strutils, tempfiles]
+import std/[assertions, base64, json, os, osproc, streams, strtabs, strutils,
+  tempfiles]
 import ../src/cmd/build
 import ../src/cmd/init
 when hostOS == "macosx":
   import ../src/cmd/dmg as dmgPackage
   import std/posix
+
+proc hexBytes(value: string): string =
+  doAssert value.len mod 2 == 0
+  for index in countup(0, value.len - 1, 2):
+    result.add char(parseHexInt(value[index .. index + 1]))
 
 proc runFrontendCheck(binary, workingDir: string): int =
   var env = newStringTable(modeCaseSensitive)
@@ -229,6 +235,41 @@ exit 0
     doAssert ghCalls[0].contains("<release><view><v0.1.0>")
     doAssert ghCalls[1].contains("<release><create><v0.1.0>")
     doAssert ghCalls[2].contains("<release><upload><v0.1.0>")
+
+    let publicKey = hexBytes(
+      "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a")
+    let privateKey = hexBytes(
+      "9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60") &
+      publicKey
+    let privateKeyPath = temporary / "mygo-update.key"
+    writeFile(privateKeyPath, encode(privateKey) & "\n")
+    config["updates"]["publicKey"] = %encode(publicKey)
+    config["updates"]["privateKey"] = %privateKeyPath
+    writeFile(configPath, config.pretty & "\n")
+    writeFile(ghLog, "")
+    putEnv("PATH", fakeBin & ":" & oldPath)
+    putEnv("MYNIM_TEST_GH_LOG", ghLog)
+    let oldUpdateKey = getEnv("MYGO_UPDATER_PRIVATE_KEY")
+    putEnv("MYGO_UPDATER_PRIVATE_KEY", "")
+    try:
+      doAssert runBuild(@["-upload", "-skip-build-command", "-o", output,
+        project]) == 0
+    finally:
+      putEnv("PATH", oldPath)
+      putEnv("MYNIM_TEST_GH_LOG", oldGhLog)
+      putEnv("MYGO_UPDATER_PRIVATE_KEY", oldUpdateKey)
+    let archive = target / ("ada-counter-0.1.0-" & targetOs & "-" & hostCPU &
+      ".tar.gz")
+    let manifest = target / ("update-" & targetOs & "-" & hostCPU & ".json")
+    doAssert fileExists(archive)
+    doAssert parseFile(manifest)["version"].getStr() == "0.1.0"
+    ghCalls = readFile(ghLog).splitLines()
+    if ghCalls.len > 0 and ghCalls[^1].len == 0:
+      ghCalls.setLen(ghCalls.len - 1)
+    doAssert ghCalls.len == 4
+    doAssert ghCalls[2].contains(".tar.gz")
+    doAssert ghCalls[3].contains("update-" & targetOs & "-" & hostCPU &
+      ".json")
 
   doAssert runBuild(@["-platform", "other/target", project]) == 1
   doAssert runBuild(@["-unknown", project]) == 2

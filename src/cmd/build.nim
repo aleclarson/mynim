@@ -4,6 +4,7 @@ import std/[algorithm, json, os, osproc, streams, strutils, tempfiles]
 import ./resources as projectResources
 import ./generate
 import ./publish as releasePublisher
+import ./update_artifacts as updateArtifacts
 when hostOS == "macosx":
   import ./dmg as dmgPackager
   import ./codesign as macCodeSign
@@ -446,6 +447,8 @@ proc runBuild*(args: seq[string]): int =
       projectResources.copyResources(projectDir, stage, targetOs, targetArch,
         config)
 
+    discard updateArtifacts.writeUpdateArtifacts(config, projectDir, stage,
+      name, version, targetName)
     let targetDir = outputRoot / targetName
     replaceBuildDir(stage, targetDir, outputRoot)
     stdout.writeLine("Built " & name & " for " & hostPlatform & " at " &
