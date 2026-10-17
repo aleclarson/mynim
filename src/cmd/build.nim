@@ -8,10 +8,13 @@ import ./update_artifacts as updateArtifacts
 when hostOS == "macosx":
   import ./dmg as dmgPackager
   import ./codesign as macCodeSign
+when hostOS == "linux":
+  import ./linux_package as linuxPackage
 
 const usageBuild = """Usage: nim-xplat build [flags] [dir]
 
-Build a native project for this machine.
+Build a native project for this machine. Linux builds also include a tar.gz
+archive and a Debian package.
 
 Flags:
   -o path             output directory (default: out from mygo.json, or dist)
@@ -336,6 +339,10 @@ proc runBuild*(args: seq[string]): int =
     let config = parseFile(configPath)
     if config.kind != JObject:
       raise newException(ValueError, "mygo.json must contain a JSON object")
+    when hostOS == "linux":
+      if findExe("tar").len == 0:
+        raise newException(IOError,
+          "Linux release packaging needs tar on PATH")
     let name = configString(config, "name", projectDir.lastPathPart())
     let identifier = configString(config, "identifier",
       "com.mygo." & slug(name).replace("-", ""))
@@ -424,6 +431,8 @@ proc runBuild*(args: seq[string]): int =
     defer:
       if dirExists(cache):
         removeDir(cache)
+    when hostOS == "linux":
+      var linuxEntries: seq[string]
 
     when hostOS == "macosx":
       let bundleName = slug(name) & ".app"
@@ -464,9 +473,28 @@ proc runBuild*(args: seq[string]): int =
         return 1
       projectResources.copyResources(projectDir, stage, targetOs, targetArch,
         config)
+      when hostOS == "linux":
+        discard linuxPackage.writeLinuxDesktop(projectDir, stage, name,
+          executable, config)
+        linuxEntries = linuxPackage.stageEntries(stage)
+        linuxPackage.validateLinuxArtifactNames(name, version, targetArch,
+          linuxEntries)
 
-    discard updateArtifacts.writeUpdateArtifacts(config, projectDir, stage,
-      name, version, targetName)
+    when hostOS == "linux":
+      let updateFiles = updateArtifacts.writeUpdateArtifacts(config,
+        projectDir, stage, name, version, targetName)
+      let releaseArchiveName = slug(name) & "-" & version & "-linux-" &
+        targetArch & ".tar.gz"
+      var reuseSignedArchive = false
+      for path in updateFiles:
+        if path.lastPathPart() == releaseArchiveName:
+          reuseSignedArchive = true
+      discard linuxPackage.writeLinuxArtifacts(projectDir, stage, name,
+        executable, version, targetArch, config, linuxEntries,
+        reuseSignedArchive)
+    else:
+      discard updateArtifacts.writeUpdateArtifacts(config, projectDir, stage,
+        name, version, targetName)
     let targetDir = outputRoot / targetName
     replaceBuildDir(stage, targetDir, outputRoot)
     stdout.writeLine("Built " & name & " for " & hostPlatform & " at " &
