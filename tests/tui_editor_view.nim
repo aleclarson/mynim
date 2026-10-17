@@ -303,6 +303,15 @@ let pythonBlock = "def f():"
 editorState.buffer.setLanguage(editor.languageNamed("python"))
 doAssert lineKey(pythonBlock, pythonBlock.len, pythonBlock.len,
   platform.keyEnter, deleteModifier) == "def f():\n    "
+editorState.buffer.setLanguage(javascript)
+doAssert lineKey("  x", 1, 1, platform.keyBracketRight,
+  deleteModifier) == "    x"
+doAssert editorState.cursor() == 3
+doAssert editorState.undo()
+doAssert $editorState.buffer == "  x"
+doAssert lineKey("    x", 3, 3, platform.keyBracketLeft,
+  deleteModifier) == "  x"
+doAssert editorState.cursor() == 1
 
 win.destroy()
 loop.shutdown()

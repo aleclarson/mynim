@@ -987,7 +987,7 @@ proc insertLineAround(state: State; above: bool) =
   let afterSelection = Selection(anchor: caret, head: caret)
   state.applyEditorEdits(snapshot, selection, afterSelection, @[edit])
 
-proc indentSelection(state: State; outdent: bool) =
+proc indentSelection(state: State; outdent: bool; wholeLine = false) =
   state.ensureState()
   if state.readOnly:
     return
@@ -995,7 +995,7 @@ proc indentSelection(state: State; outdent: bool) =
   let selection = state.caretSelection
   let firstPos = snapshot.pos(selection.start())
   let lastPos = snapshot.pos(selection.pastLast())
-  if selection.empty() and not outdent:
+  if selection.empty() and not outdent and not wholeLine:
     let line = snapshot.line(firstPos.line)
     let prefix = line[0 ..< min(firstPos.column, line.len)]
     state.insert(prefix.tabIndentation(state.buffer.language))
@@ -1273,6 +1273,10 @@ proc view*(c: ui.Context; state: State): ui.Element =
         (key.mods == commandModifier or
         key.mods == (commandModifier or platform.modShift)):
       state.insertLineAround((key.mods and platform.modShift) != 0)
+      return true
+    if key.mods == commandModifier and
+        key.key in {platform.keyBracketLeft, platform.keyBracketRight}:
+      state.indentSelection(key.key == platform.keyBracketLeft, wholeLine = true)
       return true
     if key.key in {platform.keyUp, platform.keyDown}:
       if key.mods == platform.modAlt:
