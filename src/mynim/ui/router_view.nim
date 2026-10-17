@@ -1,12 +1,35 @@
 ## Page building and navigation controls for the native UI Router.
 
+proc identityWithin(owner: ElementOwner; identity, ancestor: uint64): bool =
+  if owner == nil or identity == 0 or ancestor == 0:
+    return false
+  var current = identity
+  var remaining = owner.identityParents.len + 1
+  while current != 0 and remaining > 0:
+    if current == ancestor:
+      return true
+    current = owner.identityParents.getOrDefault(current)
+    dec remaining
+
+proc queuePageFocus(owner: ElementOwner; identity: uint64) =
+  if owner != nil and identity != 0:
+    owner.focusRequests.add(HandleFocusRequest(identity: identity))
+
 proc routePage(c: Context; router: Router; entry: RouteEntry; level,
               offset: int; baseParams: seq[RouteParam];
               build: proc(route: Route) {.closure.}): Element =
   let pageId = router.pageIdentity(entry, level)
   result = c.key("router-page:" & $pageId).column().grow(1)
-    .minWidth(0).minHeight(0)
+    .minWidth(0).minHeight(0).focusable()
   let page = result
+  let isCurrentRoot = level == 0 and entry == router.current()
+  var fallbackFocusRequest = -1
+  if isCurrentRoot and router.pendingPageFocus:
+    let pageNode = page.node
+    if pageNode != nil:
+      router.pendingPageFocus = false
+      fallbackFocusRequest = c.owner.focusRequests.len
+      c.owner.queuePageFocus(pageNode[].identity)
   discard page.children(proc() =
     let previousRouter = c.routeRouter
     c.routeRouter = router
@@ -21,11 +44,24 @@ proc routePage(c: Context; router: Router; entry: RouteEntry; level,
     finally:
       c.routeRouter = previousRouter
   )
+  let pageNode = page.node
+  if pageNode != nil:
+    entry.viewIdentity = pageNode[].identity
+  if fallbackFocusRequest >= 0 and
+      c.owner.focusRequests.len == fallbackFocusRequest + 1 and
+      entry.focusIdentity != 0:
+    for node in c.owner.nodes:
+      if node.identity == entry.focusIdentity and
+          (node.focusable or node.clickHandler != nil):
+        c.owner.queuePageFocus(entry.focusIdentity)
+        break
   discard page.label(entry.title)
 
 proc view*(router: Router; c: Context;
            build: proc(route: Route) {.closure.}): Element =
   ## Builds the current page and retains each history entry's element state.
+  ## Navigation from within the page restores its focus when possible; when
+  ## focus is outside the Router, it stays there and the new title is announced.
   if router == nil:
     raise newException(ValueError, "ui: cannot view a nil Router")
   if c == nil or c.owner == nil or c.owner.closed or not c.owner.inBuild:
@@ -39,7 +75,20 @@ proc view*(router: Router; c: Context;
       break
   if not attached:
     owner.routers.add(router)
+  let shownEntry = router.current()
   router.onChanged = proc() =
+    let currentEntry = router.current()
+    if currentEntry != shownEntry:
+      if pathOf(currentEntry.location) != pathOf(shownEntry.location):
+        let withinPage = owner.identityWithin(owner.focusIdentity,
+          shownEntry.viewIdentity)
+        if withinPage:
+          shownEntry.focusIdentity = owner.focusIdentity
+        router.pendingPageFocus = withinPage
+        router.pendingAnnouncement = not withinPage
+      else:
+        router.pendingPageFocus = false
+        router.pendingAnnouncement = false
     if owner != nil and not owner.closed and owner.invalidate != nil:
       owner.invalidate()
 
@@ -76,6 +125,9 @@ proc view*(router: Router; c: Context;
   discard root.children(proc() =
     discard routePage(c, router, router.current(), 0, 0, @[], build)
   )
+  if router.pendingAnnouncement:
+    router.pendingAnnouncement = false
+    c.announce(router.title())
 
 proc view*(route: Route; c: Context;
            build: proc(route: Route) {.closure.}): Element =

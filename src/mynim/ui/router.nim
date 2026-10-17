@@ -5,11 +5,13 @@ type
     location, title: string
     pages: seq[uint64]
     layouts: seq[int]
+    viewIdentity, focusIdentity: uint64
 
   Router* = ref object
     entries: seq[RouteEntry]
     at: int
     identity, nextPageIdentity: uint64
+    pendingPageFocus, pendingAnnouncement: bool
     onChanged: proc() {.closure.}
 
   RouteParam = tuple[name, value: string]
