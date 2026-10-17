@@ -416,6 +416,26 @@ proc cubicBezier*(x1, y1, x2, y2: float32): Easing =
       t = (lo + hi) / 2
     float32(((ay * t + by) * t + cy) * t)
 
+proc rubberband*(value, lo, hi, dimension: float32): float32 =
+  ## Keeps a dragged value within `lo` and `hi`, easing overshoot toward a
+  ## limit set by the dragged content's `dimension`.
+  proc band(over: float32): float32 =
+    if dimension <= 0:
+      return 0
+    (1'f32 - 1'f32 / (over * 0.55'f32 / dimension + 1'f32)) * dimension
+
+  if value < lo:
+    lo - band(lo - value)
+  elif value > hi:
+    hi + band(value - hi)
+  else:
+    value
+
+proc project*(value, velocity: float32): float32 =
+  ## Projects a fling using the normal deceleration rate used by scroll views.
+  const rate = 0.998'f32
+  value + velocity / 1000'f32 * rate / (1'f32 - rate)
+
 proc springPhysics(options: SpringOptions):
     tuple[mass, stiffness, damping, precision: float64] =
   for value in [options.bounce, options.mass, options.stiffness,
