@@ -121,6 +121,17 @@ proc testS3Settings() =
     "https://s3.example.test/examplebucket/my-app/sample%20file.delta"
   doAssert location.host == "s3.example.test"
 
+  let noCurlPath = createTempDir("mynim-no-curl-", "")
+  let oldPath = getEnv("PATH")
+  try:
+    putEnv("PATH", noCurlPath)
+    doAssert findExe("curl").len == 0
+    doAssertRaises IOError:
+      discard preparePublisher(config, ".", "1.0.0")
+  finally:
+    putEnv("PATH", oldPath)
+    removeDir(noCurlPath)
+
   var noUrl = s3Config()
   noUrl["updates"].delete("url")
   doAssertRaises ValueError:

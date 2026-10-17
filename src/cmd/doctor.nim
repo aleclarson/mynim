@@ -153,7 +153,7 @@ proc runDoctor*(args: seq[string]): int =
     stdout.writeLine("\x1b[32m✓\x1b[0m " & "gh".alignLeft(10) & " " & gh)
   else:
     stdout.writeLine("- " & "gh".alignLeft(10) &
-      " not found (optional: nim-xplat build -upload to GitHub releases or updates.s3)")
+      " not found (optional: nim-xplat build -upload to GitHub releases, https://cli.github.com)")
 
   when defined(macosx):
     let (identities, _) = commandOutput("security", @[

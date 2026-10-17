@@ -153,6 +153,9 @@ proc preparePublisher*(config: JsonNode; projectDir, version: string):
     if decodedKey.len != 32:
       raise newException(ValueError,
         "updates.publicKey: invalid update public key")
+    if findExe("curl").len == 0:
+      raise newException(IOError,
+        "-upload to updates.s3 needs curl on PATH")
     discard s3Upload.newS3Client(result.s3)
     result.kind = pkS3
   else:
