@@ -321,5 +321,55 @@ doAssert native.frame()
 doAssert editorState.selection() == editor.Selection(anchor: 4, head: 13)
 doAssert editorState.selectedText() == "two\nthree"
 
+let namedCommand = editor.commandNamed("toggleComment")
+doAssert namedCommand.found and namedCommand.command == editor.Command.toggleComment
+doAssert editor.commandName(editor.Command.noCommand) == "none"
+doAssert editor.commandNamed("none").found
+doAssert editor.commandNamed("notACommand").found == false
+doAssert editor.defaultBindings().len > 0
+
+editorState.buffer.set("one\ntwo")
+editorState.select(5, 5)
+doAssert editorState.run(editor.Command.selectLine)
+doAssert editorState.selectedText() == "two"
+editorState.select(5, 5)
+editorState.bindings = @[
+  editor.Binding(mods: deleteModifier, key: platform.keyL,
+    command: editor.Command.noCommand),
+  editor.Binding(key: platform.keyF1, command: editor.Command.selectLine),
+  editor.Binding(key: platform.keyF2, thenKey: platform.keyF3,
+    command: editor.Command.selectLine)
+]
+discard native.send(platform.SurfaceEvent(kind: platform.surfaceResize))
+doAssert native.frame()
+doAssert native.send(platform.SurfaceEvent(kind: platform.keyPressed,
+  key: platform.keyL, mods: deleteModifier))
+doAssert native.frame()
+doAssert editorState.selection() == editor.Selection(anchor: 5, head: 5),
+  "NoCommand should let an app reserve a default shortcut"
+doAssert native.send(platform.SurfaceEvent(kind: platform.keyPressed,
+  key: platform.keyF1))
+doAssert native.frame()
+doAssert editorState.selectedText() == "two",
+  "app bindings should run commands before platform defaults"
+editorState.select(5, 5)
+discard native.send(platform.SurfaceEvent(kind: platform.keyPressed,
+  key: platform.keyF2))
+doAssert native.frame()
+doAssert editorState.selection() == editor.Selection(anchor: 5, head: 5),
+  "the first key of a chord should wait for its second key"
+doAssert native.send(platform.SurfaceEvent(kind: platform.keyPressed,
+  key: platform.keyF3))
+doAssert native.frame()
+doAssert editorState.selectedText() == "two",
+  "the second key should run the chord command"
+
+editorState.readOnly = true
+editorState.select(0, 0)
+doAssert not editorState.run(editor.Command.deleteLine)
+doAssert $editorState.buffer == "one\ntwo"
+editorState.readOnly = false
+editorState.bindings.setLen(0)
+
 win.destroy()
 loop.shutdown()

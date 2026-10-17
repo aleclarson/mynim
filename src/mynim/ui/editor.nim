@@ -1,13 +1,17 @@
 ## Persistent text buffers and byte-based positions for native code editors.
 
-import std/[algorithm, locks, strutils, unicode]
+import std/[algorithm, locks, monotimes, strutils, times, unicode]
 import mynim/internal/platform as platform
 import mynim/ui as ui
+import mynim/ui/editor/commands as editorCommands
 import mynim/ui/editor/syntax as syntax
 
 export syntax
 
 type
+  Command* = editorCommands.Command ## A command that can be run by a binding.
+  Binding* = editorCommands.Binding ## A key binding, optionally a chord.
+
   Edit* = object ## A UTF-8 byte range to replace.
     start*: int ## Inclusive byte offset in the source document.
     pastLast*: int ## Exclusive byte offset in the source document.
@@ -31,8 +35,12 @@ type
     label*: string ## Accessible name; defaults to "Code editor".
     fontFamily*: string ## Text family; defaults to the system monospace family.
     fontSize*: float32 ## Text size in DIPs; defaults to 13.
+    bindings*: seq[Binding] ## App bindings; matched before platform defaults.
     caretSelection: Selection
     selectionPending: bool
+    pendingBinding: Binding
+    chordPending, pendingBindingFromApp: bool
+    chordStartedAt: MonoTime
     syntaxBuffer: Buffer
     syntaxLanguage: syntax.Language
     syntaxVersion: uint64
@@ -66,9 +74,22 @@ type
     transactionFirstChangedLine: int
     syntaxChanges: seq[SyntaxChange]
 
+proc commandName*(command: Command): string =
+  ## Returns the stable keymap name for a command.
+  editorCommands.commandName(command)
+
+proc commandNamed*(name: string): tuple[command: Command, found: bool] =
+  ## Finds a command by its stable keymap name.
+  editorCommands.commandNamed(name)
+
+proc defaultBindings*(): seq[Binding] =
+  ## Returns platform shortcuts for the commands implemented by the editor.
+  editorCommands.defaultBindings()
+
 const
   maxUndoSteps = 10_000
   maxSyntaxChanges = 20_000
+  editorChordTimeout = initDuration(milliseconds = 1500)
 
 proc start*(selection: Selection): int =
   ## Returns the lower byte offset, regardless of selection direction.
@@ -1221,12 +1242,127 @@ proc insertNewline(state: State) =
   state.selectionPending = true
   state.buffer.setSelectionAfter(state, state.caretSelection)
 
+proc run*(state: State; command: Command): bool =
+  ## Runs a supported editor command; unsupported commands return false.
+  state.ensureState()
+  if state.readOnly and command in {
+      Command.undo, Command.redo, Command.delete, Command.deleteLine,
+      Command.newline, Command.newlineAbove, Command.newlineBelow,
+      Command.moveLinesUp, Command.moveLinesDown,
+      Command.duplicateLinesUp, Command.duplicateLinesDown,
+      Command.duplicateSelection, Command.joinLines, Command.transpose,
+      Command.indent, Command.outdent, Command.tab, Command.backtab,
+      Command.toggleComment, Command.toggleBlockComment}:
+    return false
+  case command
+  of Command.noCommand:
+    return false
+  of Command.undo:
+    return state.undo()
+  of Command.redo:
+    return state.redo()
+  else:
+    discard
+
+  let beforeVersion = state.buffer.version()
+  let beforeSelection = state.caretSelection
+  case command
+  of Command.deleteLine:
+    state.deleteSelectedLines()
+  of Command.newline:
+    state.insertNewline()
+  of Command.newlineAbove:
+    state.insertLineAround(true)
+  of Command.newlineBelow:
+    state.insertLineAround(false)
+  of Command.moveLinesUp:
+    state.moveSelectedLines(false)
+  of Command.moveLinesDown:
+    state.moveSelectedLines(true)
+  of Command.duplicateLinesUp:
+    state.duplicateSelectedLines(true)
+  of Command.duplicateLinesDown:
+    state.duplicateSelectedLines(false)
+  of Command.joinLines:
+    state.joinSelectedLines()
+  of Command.indent:
+    state.indentSelection(false, wholeLine = true)
+  of Command.outdent:
+    state.indentSelection(true, wholeLine = true)
+  of Command.tab:
+    state.indentSelection(false)
+  of Command.backtab:
+    state.indentSelection(true)
+  of Command.toggleComment:
+    state.toggleComment()
+  of Command.toggleBlockComment:
+    state.toggleBlockComment()
+  of Command.selectLine:
+    state.selectCurrentLines()
+  else:
+    return false
+  result = state.buffer.version() != beforeVersion or
+    state.caretSelection != beforeSelection
+
+proc findBinding(bindings: openArray[Binding]; mods: ui.Modifiers;
+                 key: ui.Key): tuple[found: bool, binding: Binding] =
+  for binding in bindings:
+    if binding.mods == mods and binding.key == key:
+      return (true, binding)
+
+proc findChord(bindings: openArray[Binding]; prefix: Binding;
+               mods: ui.Modifiers; key: ui.Key):
+    tuple[found: bool, binding: Binding] =
+  for binding in bindings:
+    if binding.thenKey != ui.keyUnknown and binding.mods == prefix.mods and
+        binding.key == prefix.key and binding.thenMods == mods and
+        binding.thenKey == key:
+      return (true, binding)
+
+proc executeBinding(state: State; binding: Binding): bool =
+  if binding.command == Command.noCommand:
+    return true
+  if state.readOnly and binding.command in {Command.tab, Command.backtab}:
+    return false
+  discard state.run(binding.command)
+  true
+
+proc handleBoundKey(state: State; key: ui.Key; mods: ui.Modifiers): bool =
+  let now = getMonoTime()
+  let defaults = defaultBindings()
+  if state.chordPending:
+    let prefix = state.pendingBinding
+    let fromApp = state.pendingBindingFromApp
+    state.chordPending = false
+    if now - state.chordStartedAt <= editorChordTimeout:
+      let chord = if fromApp:
+          findChord(state.bindings, prefix, mods, key)
+        else:
+          findChord(defaults, prefix, mods, key)
+      if chord.found:
+        return state.executeBinding(chord.binding)
+
+  var match = state.bindings.findBinding(mods, key)
+  var fromApp = match.found
+  if not match.found:
+    match = defaults.findBinding(mods, key)
+    fromApp = false
+  if not match.found:
+    return false
+  if match.binding.thenKey != ui.keyUnknown:
+    state.pendingBinding = match.binding
+    state.pendingBindingFromApp = fromApp
+    state.chordStartedAt = now
+    state.chordPending = true
+    return true
+  state.executeBinding(match.binding)
+
 proc view*(c: ui.Context; state: State): ui.Element =
   ## Builds a native, editable code-editor surface over `state.buffer`.
   ## The caller chooses its size with `fill`, `grow`, or an explicit size.
   ## Text rendering and native editing use the UI's virtualized text area;
-  ## line gutters, multi-caret input, and editor commands are added by later
-  ## editor layers.
+  ## app bindings and implemented editor commands layer on top of it. Line
+  ## gutters, multiple carets, and many commands remain to be ported.
   state.ensureState()
   let snapshot = state.buffer.snapshot()
   let language = state.buffer.language
@@ -1268,44 +1404,10 @@ proc view*(c: ui.Context; state: State): ui.Element =
       state.selectionPending = false
   discard result.textAreaHistory(recordAreaEdit, undoArea, redoArea)
   discard result.onTextKey(proc(key: ui.TextKey): bool =
-    let commandModifier = when defined(macosx): platform.modSuper
-      else: platform.modCtrl
-    if key.key == platform.keySlash and key.mods == commandModifier:
-      state.toggleComment()
+    if state.handleBoundKey(key.key, key.mods):
       return true
-    if key.key == platform.keyK and
-        key.mods == (commandModifier or platform.modShift):
-      state.deleteSelectedLines()
-      return true
-    if key.key == platform.keyJ and key.mods == platform.modCtrl:
-      state.joinSelectedLines()
-      return true
-    if key.key == platform.keyL and key.mods == commandModifier:
-      state.selectCurrentLines()
-      return true
-    if key.key == platform.keyEnter and
-        (key.mods == commandModifier or
-        key.mods == (commandModifier or platform.modShift)):
-      state.insertLineAround((key.mods and platform.modShift) != 0)
-      return true
-    if key.mods == commandModifier and
-        key.key in {platform.keyBracketLeft, platform.keyBracketRight}:
-      state.indentSelection(key.key == platform.keyBracketLeft, wholeLine = true)
-      return true
-    if key.key in {platform.keyUp, platform.keyDown}:
-      if key.mods == platform.modAlt:
-        state.moveSelectedLines(key.key == platform.keyDown)
-        return true
-      if key.mods == (platform.modAlt or platform.modShift):
-        state.duplicateSelectedLines(key.key == platform.keyUp)
-        return true
     if key.key == platform.keyTab:
-      if (key.mods and not platform.modShift) != 0:
-        return false
-      if state.readOnly:
-        return false
-      state.indentSelection((key.mods and platform.modShift) != 0)
-      return true
+      return false
     if key.key != platform.keyEnter or
         (key.mods and not platform.modShift) != 0:
       return false

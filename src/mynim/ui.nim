@@ -18,6 +18,26 @@ import mynim/image as sourceImage
 export platform.TextInputClient, platform.TextRange, platform.TextSelection,
   platform.RectF, platform.TitleBar, platform.Preferences, platform.Cursor,
   platform.Key, platform.Modifiers, i18n.Region
+export platform.modShift, platform.modCtrl, platform.modAlt, platform.modSuper
+export platform.keyUnknown, platform.keyEnter, platform.keyEscape,
+  platform.keyBackspace, platform.keyTab, platform.keySpace, platform.keyDelete,
+  platform.keyInsert, platform.keyHome, platform.keyEnd, platform.keyPageUp,
+  platform.keyPageDown, platform.keyLeft, platform.keyRight, platform.keyUp,
+  platform.keyDown, platform.keyF1, platform.keyF2, platform.keyF3,
+  platform.keyF4, platform.keyF5, platform.keyF6, platform.keyF7,
+  platform.keyF8, platform.keyF9, platform.keyF10, platform.keyF11,
+  platform.keyF12, platform.keyMinus, platform.keyEqual, platform.keyComma,
+  platform.keyPeriod, platform.keySlash, platform.keySemicolon,
+  platform.keyQuote, platform.keyBracketLeft, platform.keyBracketRight,
+  platform.keyBackslash, platform.keyBackquote, platform.keyContextMenu,
+  platform.key0, platform.key1, platform.key2, platform.key3, platform.key4,
+  platform.key5, platform.key6, platform.key7, platform.key8, platform.key9,
+  platform.keyA, platform.keyB, platform.keyC, platform.keyD, platform.keyE,
+  platform.keyF, platform.keyG, platform.keyH, platform.keyI, platform.keyJ,
+  platform.keyK, platform.keyL, platform.keyM, platform.keyN, platform.keyO,
+  platform.keyP, platform.keyQ, platform.keyR, platform.keyS, platform.keyT,
+  platform.keyU, platform.keyV, platform.keyW, platform.keyX, platform.keyY,
+  platform.keyZ, platform.keyBack, platform.keyForward
 when defined(macosx):
   import mynim/internal/gpu/metal as metalGpu
 elif defined(windows):
