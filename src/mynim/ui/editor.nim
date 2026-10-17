@@ -737,8 +737,7 @@ proc outdentLength(line: string; tabSize: int): int =
     let width = max(tabSize, 1)
     result = min(spaces, (spaces - 1) mod width + 1)
 
-proc moveIndentOffset(offset: int; biasLeft: bool;
-                      edits: seq[Edit]): int =
+proc moveEditOffset(offset: int; biasLeft: bool; edits: seq[Edit]): int =
   var delta = 0
   for edit in edits:
     if offset < edit.start:
@@ -752,6 +751,33 @@ proc moveIndentOffset(offset: int; biasLeft: bool;
     else:
       delta += edit.text.len - (edit.pastLast - edit.start)
   offset + delta
+
+proc applyEditorEdits(state: State; before: Snapshot;
+                      beforeSelection, afterSelection: Selection;
+                      edits: seq[Edit]) =
+  if edits.len == 0:
+    return
+  state.buffer.transact(proc() =
+    for index in countdown(edits.high, 0):
+      state.buffer.edit(edits[index])
+  )
+  let after = state.buffer.snapshot()
+  let selection = Selection(
+    anchor: after.normalizeOffset(afterSelection.anchor),
+    head: after.normalizeOffset(afterSelection.head))
+  state.caretSelection = selection
+  state.selectionPending = true
+  state.buffer.setEditOwner(state, before, after, beforeSelection, selection)
+  state.buffer.setSelectionAfter(state, selection)
+
+proc selectedLineSpan(snapshot: Snapshot; selection: Selection):
+    tuple[first, last: int] =
+  result.first = snapshot.pos(selection.start()).line
+  result.last = snapshot.pos(selection.pastLast()).line
+  if not selection.empty() and result.last > result.first and
+      snapshot.pos(selection.pastLast()).column == 0:
+    dec result.last
+  result.last = max(result.first, result.last)
 
 proc indentSelection(state: State; outdent: bool) =
   state.ensureState()
@@ -791,28 +817,116 @@ proc indentSelection(state: State; outdent: bool) =
     return
   var afterSelection: Selection
   if selection.empty():
-    let caret = moveIndentOffset(selection.head, false, edits)
+    let caret = moveEditOffset(selection.head, false, edits)
     afterSelection = Selection(anchor: caret, head: caret)
   else:
     let move = proc(offset: int): int =
       let atStartOfSelection = offset == selection.start() and
         snapshot.pos(offset).column == 0
-      moveIndentOffset(offset, atStartOfSelection, edits)
+      moveEditOffset(offset, atStartOfSelection, edits)
     afterSelection = Selection(anchor: move(selection.anchor),
       head: move(selection.head))
 
-  state.buffer.transact(proc() =
-    for index in countdown(edits.high, 0):
-      state.buffer.edit(edits[index])
-  )
-  let after = state.buffer.snapshot()
-  afterSelection = Selection(
-    anchor: after.normalizeOffset(afterSelection.anchor),
-    head: after.normalizeOffset(afterSelection.head))
-  state.caretSelection = afterSelection
-  state.selectionPending = true
-  state.buffer.setEditOwner(state, snapshot, after, selection, afterSelection)
-  state.buffer.setSelectionAfter(state, afterSelection)
+  state.applyEditorEdits(snapshot, selection, afterSelection, edits)
+
+proc toggleBlockComment(state: State) =
+  let language = state.buffer.language
+  if language == nil or language.blockComment[0].len == 0 or
+      language.blockComment[1].len == 0:
+    return
+  let snapshot = state.buffer.snapshot()
+  let selection = state.caretSelection
+  var first = selection.start()
+  var pastLast = selection.pastLast()
+  if selection.empty():
+    let position = snapshot.pos(first)
+    let line = snapshot.line(position.line)
+    let lineStart = snapshot.offset(Pos(line: position.line, column: 0))
+    first = lineStart + line.leadingIndent().len
+    pastLast = lineStart + line.len
+  let text = snapshot.slice(first, pastLast)
+  let open = language.blockComment[0]
+  let close = language.blockComment[1]
+  var edits: seq[Edit]
+  var wraps = true
+  if text.len >= open.len + close.len and text.startsWith(open) and
+      text.endsWith(close):
+    wraps = false
+    var openLength = open.len
+    var closeLength = close.len
+    if text.len >= open.len + close.len + 2 and
+        text[open.len] == ' ' and
+        text[text.len - close.len - 1] == ' ':
+      inc openLength
+      inc closeLength
+    edits.add(Edit(start: first, pastLast: first + openLength))
+    edits.add(Edit(start: pastLast - closeLength, pastLast: pastLast))
+  else:
+    edits.add(Edit(start: first, pastLast: first, text: open & " "))
+    edits.add(Edit(start: pastLast, pastLast: pastLast, text: " " & close))
+
+  var afterSelection: Selection
+  if selection.empty():
+    let caret = moveEditOffset(selection.head, false, edits)
+    afterSelection = Selection(anchor: caret, head: caret)
+  else:
+    let move = proc(offset: int): int =
+      var biasLeft = false
+      if wraps:
+        biasLeft = offset == selection.start()
+      moveEditOffset(offset, biasLeft, edits)
+    afterSelection = Selection(anchor: move(selection.anchor),
+      head: move(selection.head))
+  state.applyEditorEdits(snapshot, selection, afterSelection, edits)
+
+proc toggleComment(state: State) =
+  state.ensureState()
+  if state.readOnly:
+    return
+  let language = state.buffer.language
+  if language == nil:
+    return
+  if language.lineComment.len == 0:
+    state.toggleBlockComment()
+    return
+
+  let snapshot = state.buffer.snapshot()
+  let selection = state.caretSelection
+  let span = snapshot.selectedLineSpan(selection)
+  let prefix = language.lineComment
+  var minimumIndent = high(int)
+  var allCommented = true
+  for lineIndex in span.first .. span.last:
+    let line = snapshot.line(lineIndex)
+    let indent = line.leadingIndent().len
+    if indent < line.len:
+      minimumIndent = min(minimumIndent, indent)
+      if not line[indent .. ^1].startsWith(prefix):
+        allCommented = false
+  if minimumIndent == high(int):
+    minimumIndent = snapshot.line(span.first).leadingIndent().len
+
+  var edits: seq[Edit]
+  for lineIndex in span.first .. span.last:
+    let line = snapshot.line(lineIndex)
+    let indent = line.leadingIndent().len
+    let body = if indent < line.len: line[indent .. ^1] else: ""
+    let lineStart = snapshot.offset(Pos(line: lineIndex, column: 0))
+    if allCommented:
+      if body.len > 0:
+        var remove = prefix.len
+        if body.len > prefix.len and body[prefix.len] == ' ':
+          inc remove
+        let start = lineStart + indent
+        edits.add(Edit(start: start, pastLast: start + remove))
+    elif body.len > 0 or span.first == span.last:
+      let start = lineStart + min(minimumIndent, line.len)
+      edits.add(Edit(start: start, pastLast: start, text: prefix & " "))
+
+  let afterSelection = Selection(
+    anchor: moveEditOffset(selection.anchor, false, edits),
+    head: moveEditOffset(selection.head, false, edits))
+  state.applyEditorEdits(snapshot, selection, afterSelection, edits)
 
 proc insertNewline(state: State) =
   ## Inserts a newline with the current indentation and basic syntax hints.
@@ -935,6 +1049,11 @@ proc view*(c: ui.Context; state: State): ui.Element =
       state.selectionPending = false
   discard result.textAreaHistory(recordAreaEdit, undoArea, redoArea)
   discard result.onTextKey(proc(key: ui.TextKey): bool =
+    let commentModifier = when defined(macosx): platform.modSuper
+      else: platform.modCtrl
+    if key.key == platform.keySlash and key.mods == commentModifier:
+      state.toggleComment()
+      return true
     if key.key == platform.keyTab:
       if (key.mods and not platform.modShift) != 0:
         return false

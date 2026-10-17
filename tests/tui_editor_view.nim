@@ -117,6 +117,20 @@ proc indentKey(text: string; language: editor.Language; anchor, head: int;
   doAssert native.frame()
   $editorState.buffer
 
+proc commentKey(text: string; language: editor.Language; anchor, head: int):
+    string =
+  editorState.readOnly = false
+  editorState.buffer.set(text)
+  editorState.buffer.setLanguage(language)
+  editorState.select(anchor, head)
+  discard native.send(platform.SurfaceEvent(kind: platform.surfaceResize))
+  doAssert native.frame()
+  let mods = when defined(macosx): platform.modSuper else: platform.modCtrl
+  doAssert native.send(platform.SurfaceEvent(kind: platform.keyPressed,
+    key: platform.keySlash, mods: mods))
+  doAssert native.frame()
+  $editorState.buffer
+
 let go = editor.languageNamed("go")
 let emptyPair = "func main() {}"
 doAssert enter(emptyPair, go, emptyPair.len - 1) == "func main() {\n\t\n}"
@@ -161,6 +175,31 @@ doAssert indentKey(indentedLines, javascript, 0, indentedLines.len,
   outdent = true) == selectedLines
 doAssert editorState.selection() == editor.Selection(anchor: 0,
   head: selectedLines.len)
+
+let commentSource = "\tif x {\n\t\ty()\n\t}"
+let sourceStart = "\tif x {\n\t\t".len
+let commented = "\tif x {\n\t// \ty()\n\t// }"
+doAssert commentKey(commentSource, go, sourceStart, commentSource.len) ==
+  commented
+doAssert editorState.selection() == editor.Selection(
+  anchor: sourceStart + 3, head: commentSource.len + 6)
+doAssert editorState.undo()
+doAssert $editorState.buffer == commentSource
+doAssert editorState.selection() == editor.Selection(
+  anchor: sourceStart, head: commentSource.len)
+doAssert editorState.redo()
+doAssert $editorState.buffer == commented
+doAssert commentKey(commented, go, sourceStart + 3, commented.len) ==
+  commentSource
+
+let css = ".a { color: red; }"
+let blockCommented = "/* " & css & " */"
+doAssert commentKey(css, editor.languageNamed("css"), 0, css.len) ==
+  blockCommented
+doAssert editorState.selectedText() == blockCommented
+doAssert commentKey(blockCommented, editor.languageNamed("css"), 0,
+  blockCommented.len) == css
+doAssert editorState.selectedText() == css
 
 win.destroy()
 loop.shutdown()
