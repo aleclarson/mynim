@@ -501,6 +501,45 @@ doAssert $editorState.buffer == "a\nb\n"
 doAssert editorState.cursor() == 1
 doAssert editorState.undo()
 doAssert $editorState.buffer == "a  \nb\t \n"
+editorState.buffer.set("fooBarBaz")
+editorState.select(0, 0)
+doAssert editorState.run(editor.Command.snakeCase)
+doAssert $editorState.buffer == "foo_bar_baz"
+doAssert editorState.selectedText() == "foo_bar_baz"
+doAssert editorState.undo()
+doAssert $editorState.buffer == "fooBarBaz"
+editorState.buffer.set("[fooBarBaz]")
+editorState.select(1, 10)
+doAssert editorState.run(editor.Command.snakeCase)
+doAssert $editorState.buffer == "[foo_bar_baz]"
+doAssert editorState.selectedText() == "foo_bar_baz"
+doAssert editorState.run(editor.Command.kebabCase)
+doAssert $editorState.buffer == "[foo-bar-baz]"
+doAssert editorState.run(editor.Command.pascalCase)
+doAssert $editorState.buffer == "[FooBarBaz]"
+editorState.buffer.set("foo_bar_baz")
+editorState.select(0, 0)
+doAssert editorState.run(editor.Command.camelCase)
+doAssert $editorState.buffer == "fooBarBaz"
+editorState.buffer.set("hello-WORLD, again")
+editorState.select(0, editorState.buffer.len())
+doAssert editorState.run(editor.Command.titleCase)
+doAssert $editorState.buffer == "Hello-World, Again"
+editorState.buffer.set("FOO")
+editorState.select(0, editorState.buffer.len())
+doAssert editorState.run(editor.Command.lowercase)
+doAssert $editorState.buffer == "foo"
+editorState.buffer.set("café")
+editorState.select(0, editorState.buffer.len())
+doAssert editorState.run(editor.Command.uppercase)
+doAssert $editorState.buffer == "CAFÉ"
+editorState.buffer.setLanguage(editor.languageNamed("JavaScript"))
+editorState.buffer.set("$foo")
+editorState.select(4, 4)
+doAssert editorState.run(editor.Command.uppercase)
+doAssert $editorState.buffer == "$FOO",
+  "case conversion at a caret should include language word characters"
+editorState.buffer.setLanguage(editor.languageNamed("go"))
 editorState.buffer.set("  value")
 editorState.select(2, 2)
 doAssert editorState.run(editor.Command.deleteToLineStart)
@@ -520,6 +559,7 @@ editorState.select(0, 0)
 doAssert not editorState.run(editor.Command.deleteLine)
 doAssert not editorState.run(editor.Command.backspace)
 doAssert not editorState.run(editor.Command.trimTrailingWhitespace)
+doAssert not editorState.run(editor.Command.uppercase)
 doAssert $editorState.buffer == "one\ntwo"
 editorState.readOnly = false
 

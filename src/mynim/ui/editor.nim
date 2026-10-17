@@ -1271,9 +1271,9 @@ proc graphemeMove(snapshot: Snapshot; runeOffset: int; direction: int): int =
       return current + 1
   current
 
-proc wordCharClass(rune: Rune): int =
+proc wordCharClass(rune: Rune; extra = ""): int =
   if isAlpha(rune) or lookupGeneralCategory(int32(rune)) == Nd or
-      rune == Rune('_'):
+      rune == Rune('_') or rune.toUTF8 in extra:
     return 1
   if rune.isWhiteSpace:
     return 0
@@ -1576,6 +1576,117 @@ proc trimTrailingWhitespace(state: State): bool =
   state.applyEditorEdits(snapshot, selection, afterSelection, edits)
   true
 
+proc caseWords(text: string): seq[string] =
+  var runes: seq[Rune]
+  for rune in text.runes:
+    runes.add(rune)
+  var word = ""
+  for index, rune in runes:
+    if rune == Rune('_') or rune == Rune('-') or rune.isWhiteSpace:
+      if word.len > 0:
+        result.add(word)
+        word.setLen(0)
+      continue
+    let startsWord = rune.isUpper and word.len > 0 and
+      (runes[index - 1].isLower or
+      (runes[index - 1].isUpper and index + 1 < runes.len and
+       runes[index + 1].isLower))
+    if startsWord:
+      result.add(word)
+      word.setLen(0)
+    word.add(rune.toUTF8)
+  if word.len > 0:
+    result.add(word)
+
+proc upperFirst(text: string): string =
+  var first = true
+  for rune in text.runes:
+    result.add((if first: rune.toUpper else: rune.toLower).toUTF8)
+    first = false
+
+proc convertCase(text: string; command: Command): string =
+  case command
+  of Command.uppercase:
+    for rune in text.runes:
+      result.add(rune.toUpper.toUTF8)
+  of Command.lowercase:
+    for rune in text.runes:
+      result.add(rune.toLower.toUTF8)
+  of Command.titleCase:
+    var previousWord = false
+    for rune in text.runes:
+      result.add((if previousWord: rune.toLower else: rune.toUpper).toUTF8)
+      previousWord = wordCharClass(rune) == 1
+  of Command.snakeCase, Command.kebabCase, Command.camelCase,
+      Command.pascalCase:
+    let words = text.caseWords()
+    let separator = if command == Command.snakeCase: "_"
+      elif command == Command.kebabCase: "-" else: ""
+    for index, word in words:
+      if index > 0:
+        if command in {Command.snakeCase, Command.kebabCase}:
+          result.add(separator)
+      if command == Command.pascalCase or
+          (command == Command.camelCase and index > 0):
+        result.add(word.upperFirst())
+      else:
+        for rune in word.runes:
+          result.add(rune.toLower.toUTF8)
+  else:
+    result = text
+
+proc wordRange(snapshot: Snapshot; runeOffset: int; extra = ""):
+    tuple[first, pastLast: int] =
+  let document = snapshot.document
+  let current = max(0, min(runeOffset, document.len()))
+  let line = document.lineAt(current)
+  let range = document.lineRange(line)
+  var runes: seq[Rune]
+  for rune in document.line(line).runes:
+    runes.add(rune)
+  var local = current - range.start
+  var charClass: int
+  if local < runes.len:
+    charClass = wordCharClass(runes[local], extra)
+    if charClass != 1 and local > 0 and
+        wordCharClass(runes[local - 1], extra) == 1:
+      charClass = 1
+  elif local > 0:
+    charClass = wordCharClass(runes[local - 1], extra)
+  else:
+    return (current, current)
+  var first = local
+  var pastLast = local
+  while first > 0 and wordCharClass(runes[first - 1], extra) == charClass:
+    dec first
+  while pastLast < runes.len and
+      wordCharClass(runes[pastLast], extra) == charClass:
+    inc pastLast
+  (range.start + first, range.start + pastLast)
+
+proc convertSelectionCase(state: State; command: Command): bool =
+  let snapshot = state.buffer.snapshot()
+  let selection = state.caretSelection
+  var first = selection.start()
+  var pastLast = selection.pastLast()
+  if selection.empty():
+    let language = state.buffer.language()
+    let extra = if language == nil: "" else: language.wordChars
+    let word = snapshot.wordRange(
+      snapshot.document.runeOffsetAtByte(selection.head), extra)
+    if word.first == word.pastLast:
+      return false
+    first = snapshot.document.byteOffset(word.first)
+    pastLast = snapshot.document.byteOffset(word.pastLast)
+  let original = snapshot.slice(first, pastLast)
+  let converted = original.convertCase(command)
+  if converted == original:
+    return false
+  let afterSelection = Selection(anchor: first, head: first + converted.len)
+  let edit = Edit(start: first, pastLast: pastLast, text: converted)
+  state.applyEditorEdits(snapshot, selection, afterSelection, @[edit])
+  true
+
 proc run*(state: State; command: Command): bool =
   ## Runs a supported editor command; unsupported commands return false.
   state.ensureState()
@@ -1591,6 +1702,9 @@ proc run*(state: State; command: Command): bool =
       Command.sortLines, Command.sortLinesCaseInsensitive,
       Command.reverseLines, Command.uniqueLines,
       Command.trimTrailingWhitespace,
+      Command.uppercase, Command.lowercase, Command.titleCase,
+      Command.snakeCase, Command.kebabCase, Command.camelCase,
+      Command.pascalCase,
       Command.indent, Command.outdent, Command.tab, Command.backtab,
       Command.toggleComment, Command.toggleBlockComment}:
     return false
@@ -1678,6 +1792,10 @@ proc run*(state: State; command: Command): bool =
     discard state.manipulateLines(command)
   of Command.trimTrailingWhitespace:
     discard state.trimTrailingWhitespace()
+  of Command.uppercase, Command.lowercase, Command.titleCase,
+      Command.snakeCase, Command.kebabCase, Command.camelCase,
+      Command.pascalCase:
+    discard state.convertSelectionCase(command)
   else:
     return false
   result = state.buffer.version() != beforeVersion or
