@@ -187,6 +187,41 @@ app.run()
 """)
   doAssert runBuild(@["-skip-dmg", "-o", output, project]) == 0
   doAssert fileExists(project / "src" / "catalog_gen.nim")
+  when defined(posix):
+    writeFile(project / "resources" / "release.tar.gz", "release fixture")
+    config["updates"] = parseJson(
+      """{"publicKey":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=","github":"owner/app"}""")
+    writeFile(configPath, config.pretty & "\n")
+
+    let fakeBin = temporary / "fake-bin"
+    createDir(fakeBin)
+    let ghLog = temporary / "gh-args.txt"
+    let fakeGh = fakeBin / "gh"
+    writeFile(fakeGh, """#!/bin/sh
+printf '<%s>' "$@" >> "$MYNIM_TEST_GH_LOG"
+printf '\n' >> "$MYNIM_TEST_GH_LOG"
+if [ "$2" = "view" ]; then exit 1; fi
+exit 0
+""")
+    setFilePermissions(fakeGh, {fpUserRead, fpUserWrite, fpUserExec})
+    let oldPath = getEnv("PATH")
+    let oldGhLog = getEnv("MYNIM_TEST_GH_LOG")
+    putEnv("PATH", fakeBin & ":" & oldPath)
+    putEnv("MYNIM_TEST_GH_LOG", ghLog)
+    try:
+      doAssert runBuild(@["-upload", "-skip-build-command", "-o", output,
+        project]) == 0
+    finally:
+      putEnv("PATH", oldPath)
+      putEnv("MYNIM_TEST_GH_LOG", oldGhLog)
+    var ghCalls = readFile(ghLog).splitLines()
+    if ghCalls.len > 0 and ghCalls[^1].len == 0:
+      ghCalls.setLen(ghCalls.len - 1)
+    doAssert ghCalls.len == 3
+    doAssert ghCalls[0].contains("<release><view><v0.1.0>")
+    doAssert ghCalls[1].contains("<release><create><v0.1.0>")
+    doAssert ghCalls[2].contains("<release><upload><v0.1.0>")
+
   doAssert runBuild(@["-platform", "other/target", project]) == 1
   doAssert runBuild(@["-unknown", project]) == 2
   doAssert runBuild(@["--help"]) == 0

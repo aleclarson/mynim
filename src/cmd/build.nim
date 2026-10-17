@@ -3,6 +3,7 @@
 import std/[algorithm, json, os, osproc, streams, strutils, tempfiles]
 import ./resources as projectResources
 import ./generate
+import ./publish as releasePublisher
 when hostOS == "macosx":
   import ./dmg as dmgPackager
 
@@ -15,7 +16,8 @@ Flags:
   -platform target  host GOOS/GOARCH (default: this machine)
   -skip-build-command  do not run buildCommand from mygo.json
   -skip-dmg        do not create a disk image on macOS
-  -debug           compile with checks and debug information
+  -upload              upload installers to a draft GitHub release
+  -debug               compile with checks and debug information
   -h, --help       show this help
 """
 
@@ -233,6 +235,7 @@ proc runBuild*(args: seq[string]): int =
   var debug = false
   var skipBuildCommand = false
   var skipDmg = false
+  var upload = false
   var paths: seq[string]
   var index = 0
   while index < args.len:
@@ -250,6 +253,15 @@ proc runBuild*(args: seq[string]): int =
       skipBuildCommand = true
     elif arg == "-skip-dmg" or arg == "--skip-dmg":
       skipDmg = true
+    elif arg == "-upload" or arg == "--upload":
+      upload = true
+    elif arg.startsWith("-upload=") or arg.startsWith("--upload="):
+      let value = arg.split('=', maxsplit = 1)[1]
+      if value notin ["true", "false"]:
+        stderr.writeLine("mygo build: invalid boolean value for -upload: " &
+          value)
+        return 2
+      upload = value == "true"
     elif arg.startsWith("-"):
       let equalAt = arg.find('=')
       let flag = if equalAt < 0: arg else: arg[0 ..< equalAt]
@@ -305,6 +317,10 @@ proc runBuild*(args: seq[string]): int =
     let identifier = configString(config, "identifier",
       "com.mygo." & slug(name).replace("-", ""))
     let version = configString(config, "version", "0.1.0")
+    var githubRelease: releasePublisher.GitHubRelease
+    if upload:
+      githubRelease = releasePublisher.prepareGitHubRelease(config,
+        projectDir, version)
     let buildCommand = configString(config, "buildCommand", "")
     let configuredFrontend = configString(config, "frontendDist", "")
     let configuredOut = if outputOption.len > 0: outputOption
@@ -390,6 +406,11 @@ proc runBuild*(args: seq[string]): int =
     replaceBuildDir(stage, targetDir, outputRoot)
     stdout.writeLine("Built " & name & " for " & hostPlatform & " at " &
       targetDir)
+    if upload:
+      var artifacts: seq[string]
+      for kind, path in walkDir(targetDir):
+        artifacts.add path
+      releasePublisher.publishGitHub(githubRelease, artifacts)
     return 0
   except CatchableError as error:
     let message = if error.msg.startsWith("mygo build:"): error.msg
