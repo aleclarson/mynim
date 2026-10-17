@@ -100,10 +100,14 @@ when not defined(emscripten):
     except CatchableError:
       false
 
-  proc check*(u: UpdaterModule): tuple[update: Option[Update],
+  proc check*(u: UpdaterModule;
+      cancelled: proc(): bool {.closure.} = nil): tuple[update: Option[Update],
       err: ref CatchableError] =
     ## Fetches this app's update feed; returns none when it is current.
     result.update = none(Update)
+    if cancelled != nil and cancelled():
+      result.err = newException(IOError, "mynim: update operation cancelled")
+      return
     if not u.enabled():
       result.err = newException(ValueError,
         "mynim: updates are not enabled for this build")
@@ -112,7 +116,7 @@ when not defined(emscripten):
     let userAgent = "Mynim/" & Version & " " & app.name() & "/" & current
     let getter: updateRuntime.HttpGetter = proc(url: string;
         maxBytes: int): string =
-      updateRuntime.httpGet(url, userAgent, maxBytes)
+      updateRuntime.httpGet(url, userAgent, maxBytes, cancelled)
     try:
       let found = updateRuntime.checkUpdate(packageUpdateFeed, current, getter)
       if found.isSome:
@@ -125,10 +129,13 @@ when not defined(emscripten):
         "mynim: checking for updates: " & error.msg)
 
   proc install*(up: Update;
-      progress: UpdateProgress = nil): ref CatchableError =
+      progress: UpdateProgress = nil;
+      cancelled: proc(): bool {.closure.} = nil): ref CatchableError =
     ## Downloads, verifies, and installs this update beside the app.
     ## Requires `curl`, `openssl`, and `tar` on PATH.
     try:
+      if cancelled != nil and cancelled():
+        raise newException(IOError, "mynim: update operation cancelled")
       let target = installTarget()
       if target.len == 0:
         return newException(ValueError,
@@ -137,9 +144,10 @@ when not defined(emscripten):
         up.current
       let download: updateRuntime.FileDownloader = proc(url, path: string;
           size: int64; onProgress: updateRuntime.UpdateProgress) =
-        updateRuntime.httpDownload(url, userAgent, path, size, onProgress)
+        updateRuntime.httpDownload(url, userAgent, path, size, onProgress,
+          cancelled)
       result = updateRuntime.installUpdate(up.manifest, up.key, target,
-        progress, download, up.current)
+        progress, download, up.current, cancelled)
       when defined(linux):
         if result.isNil:
           let refreshError = updateRuntime.refreshDesktopEntry(target,

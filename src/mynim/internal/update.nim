@@ -201,12 +201,15 @@ proc isAllowedUrl(rawUrl: string): bool =
   except CatchableError:
     return false
 
-proc httpGet*(rawUrl, userAgent: string; maxBytes: int): string =
+proc httpGet*(rawUrl, userAgent: string; maxBytes: int;
+              cancelled: proc(): bool {.closure.} = nil): string =
   ## Fetches update data through curl, with HTTPS required outside loopback.
   if maxBytes <= 0:
     raise newException(ValueError, "update response size limit must be positive")
   if not isAllowedUrl(rawUrl):
     raise newException(IOError, "refusing update URL without HTTPS: " & rawUrl)
+  if cancelled != nil and cancelled():
+    raise newException(IOError, "update operation cancelled")
   let curl = findExe("curl")
   if curl.len == 0:
     raise newException(IOError, "checking for updates needs curl on PATH")
@@ -224,10 +227,23 @@ proc httpGet*(rawUrl, userAgent: string; maxBytes: int): string =
     options = {poUsePath, poStdErrToStdOut})
   var output = ""
   var code = -1
+  var finished = false
   try:
+    while process.peekExitCode() == -1:
+      if cancelled != nil and cancelled():
+        raise newException(IOError, "update operation cancelled")
+      sleep(50)
     output = process.outputStream.readAll()
     code = process.waitForExit()
+    finished = true
   finally:
+    if not finished:
+      try:
+        if process.peekExitCode() == -1:
+          process.kill()
+        discard process.waitForExit()
+      except CatchableError:
+        discard
     process.close()
   if code != 0:
     raise newException(IOError,
@@ -291,12 +307,14 @@ proc checkUpdate*(feed, current: string; getter: HttpGetter): Option[Manifest] =
   some(manifest)
 
 proc httpDownload*(rawUrl, userAgent, path: string; size: int64;
-    progress: UpdateProgress) =
+    progress: UpdateProgress; cancelled: proc(): bool {.closure.} = nil) =
   ## Downloads exactly size bytes through curl, enforcing HTTPS off loopback.
   if size <= 0 or size > maxArchiveSize:
     raise newException(ValueError, "invalid update archive size " & $size)
   if not isAllowedUrl(rawUrl):
     raise newException(IOError, "refusing update URL without HTTPS: " & rawUrl)
+  if cancelled != nil and cancelled():
+    raise newException(IOError, "update operation cancelled")
   let curl = findExe("curl")
   if curl.len == 0:
     raise newException(IOError, "installing updates needs curl on PATH")
@@ -312,6 +330,8 @@ proc httpDownload*(rawUrl, userAgent, path: string; size: int64;
   var lastReported = -1'i64
   try:
     while process.peekExitCode() == -1:
+      if cancelled != nil and cancelled():
+        raise newException(IOError, "update operation cancelled")
       if fileExists(path):
         let downloaded = getFileSize(path)
         if downloaded > size:
@@ -606,11 +626,17 @@ proc swapFiles(directory, target: string) =
       except CatchableError:
         discard
 
+proc ensureNotCancelled(cancelled: proc(): bool {.closure.}) =
+  if cancelled != nil and cancelled():
+    raise newException(IOError, "update operation cancelled")
+
 proc installUpdate*(manifest: Manifest; publicKey, target: string;
     progress: UpdateProgress; download: FileDownloader;
-    currentVersion = ""): ref CatchableError =
+    currentVersion = ""; cancelled: proc(): bool {.closure.} = nil):
+    ref CatchableError =
   ## Applies a matching signed delta when available, else installs the archive.
   try:
+    ensureNotCancelled(cancelled)
     if download.isNil:
       raise newException(ValueError, "no update downloader was provided")
     if not dirExists(parentDir(target)) or not pathExists(target):
@@ -630,6 +656,7 @@ proc installUpdate*(manifest: Manifest; publicKey, target: string;
         when defined(macosx):
           deltaOutput = deltaOutput / target.lastPathPart()
         try:
+          ensureNotCancelled(cancelled)
           if delta.size <= 0 or delta.size > maxArchiveSize:
             raise newException(ValueError,
               "invalid update delta size " & $delta.size)
@@ -637,20 +664,26 @@ proc installUpdate*(manifest: Manifest; publicKey, target: string;
             raise newException(ValueError, "incomplete update delta")
           let deltaPath = work / "update.delta"
           download(delta.url, deltaPath, delta.size, progress)
+          ensureNotCancelled(cancelled)
           if not fileExists(deltaPath) or getFileSize(deltaPath) != delta.size:
             let received = if fileExists(deltaPath): getFileSize(deltaPath) else: 0
             raise newException(IOError,
               "downloaded " & $received & " bytes, want " & $delta.size)
           verifyArchiveSignature(deltaPath, publicKey, delta.signature, work)
+          ensureNotCancelled(cancelled)
           let contents = readFile(deltaPath)
           applyDelta(contents.toOpenArrayByte(0, contents.high),
             delta.fromVersion, manifest.version, target, deltaOutput)
           when defined(macosx):
+            ensureNotCancelled(cancelled)
             swapBundle(work / "delta-app", target)
           else:
+            ensureNotCancelled(cancelled)
             swapFiles(deltaOutput, target)
           return
         except CatchableError as deltaError:
+          if cancelled != nil and cancelled():
+            raise deltaError
           stderr.writeLine("mynim: downloading the full update because its " &
             "delta failed: " & deltaError.msg)
           if pathExists(work / "delta-app"):
@@ -664,8 +697,10 @@ proc installUpdate*(manifest: Manifest; publicKey, target: string;
         $manifest.size)
     if manifest.url.len == 0 or manifest.signature.len == 0:
       raise newException(ValueError, "incomplete update manifest")
+    ensureNotCancelled(cancelled)
     let archive = work / "update.tar.gz"
     download(manifest.url, archive, manifest.size, progress)
+    ensureNotCancelled(cancelled)
     if not fileExists(archive) or getFileSize(archive) != manifest.size:
       let received = if fileExists(archive): getFileSize(archive) else: 0
       raise newException(IOError,
@@ -673,6 +708,7 @@ proc installUpdate*(manifest: Manifest; publicKey, target: string;
     verifyArchiveSignature(archive, publicKey, manifest.signature, work)
     let unpacked = work / "app"
     extractArchive(archive, unpacked)
+    ensureNotCancelled(cancelled)
     when defined(macosx):
       swapBundle(unpacked, target)
     else:

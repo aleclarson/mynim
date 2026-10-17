@@ -10,7 +10,9 @@ import mynim/plugins/updater/texts as texts
 
 type
   Progress* = proc(downloaded, total: int64) {.closure.}
-  InstallProc* = proc(progress: Progress): ref CatchableError {.closure.}
+  Cancelled* = proc(): bool {.closure.}
+  InstallProc* = proc(progress: Progress; cancelled: Cancelled):
+    ref CatchableError {.closure.}
 
   Release* = ref object
     version*, notes*: string
@@ -29,7 +31,7 @@ type
 
   Hooks* = object
     enabled*: proc(): bool {.closure.}
-    check*: proc(): CheckResult {.closure.}
+    check*: proc(cancelled: Cancelled): CheckResult {.closure.}
     appName*: proc(): string {.closure.}
     appVersion*: proc(): string {.closure.}
     isDevelopment*: proc(): bool {.closure.}
@@ -87,22 +89,25 @@ proc defaultHooks(): Hooks =
   result.now = proc(): Time = getTime()
   when defined(emscripten):
     result.enabled = proc(): bool = false
-    result.check = proc(): CheckResult = CheckResult(error:
+    result.check = proc(cancelled: Cancelled): CheckResult = CheckResult(error:
       newException(ValueError, "mynim: automatic updates are unavailable on web"))
   else:
     result.enabled = proc(): bool = core.Updater.enabled()
-    result.check = proc(): CheckResult =
-      let checked = core.Updater.check()
+    result.check = proc(cancelled: Cancelled): CheckResult =
+      let checked = core.Updater.check(cancelled)
       if checked.err != nil:
         return CheckResult(error: checked.err)
       if checked.update.isNone:
         return CheckResult()
       let update = checked.update.get()
-      CheckResult(release: Release(version: update.version, notes: update.notes,
-        install: proc(progress: Progress): ref CatchableError =
-          update.install(proc(downloaded, total: int64) =
-            if progress != nil:
-              progress(downloaded, total))))
+      let install: InstallProc = proc(progress: Progress;
+          cancelled: Cancelled): ref CatchableError =
+        let relay: core.UpdateProgress = proc(downloaded, total: int64) =
+          if progress != nil:
+            progress(downloaded, total)
+        update.install(relay, cancelled)
+      CheckResult(release: Release(version: update.version,
+        notes: update.notes, install: install))
 
 proc newUpdater*(options: Options; hooks = Hooks()): Updater =
   ## Creates the updater state; setup and background checks start separately.
@@ -264,19 +269,22 @@ proc checked(value: Updater; error: ref CatchableError) =
   )
 
 proc install(value: Updater; current: session.Session; release: Release) =
+  if current.isEnded():
+    return
   let windowText = value.text()
   current.setView(windowText.downloadingView(0, 0))
+  let progress: Progress = proc(downloaded, total: int64) =
+    if current.isEnded():
+      return
+    if downloaded < total:
+      current.setView(windowText.downloadingView(downloaded, total))
+    else:
+      current.setView(windowText.installingView())
   let error = if release.install == nil:
       newException(ValueError, "updater: release has no install operation")
     else:
-      release.install(proc(downloaded, total: int64) =
-        if current.isEnded():
-          return
-        if downloaded < total:
-          current.setView(windowText.downloadingView(downloaded, total))
-        else:
-          current.setView(windowText.installingView())
-      )
+      release.install(progress,
+        proc(): bool = current.isEnded())
   if current.isEnded():
     return
   if error != nil:
@@ -317,7 +325,9 @@ proc run(value: Updater; current: session.Session) =
   current.setView(windowText.checkingView())
   if current.user():
     value.hooks.show(current)
-  let checked = value.hooks.check()
+  if current.isEnded():
+    return
+  let checked = value.hooks.check(proc(): bool = current.isEnded())
   if current.isEnded():
     return
   value.checked(checked.error)

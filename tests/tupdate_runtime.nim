@@ -1,4 +1,4 @@
-import std/[assertions, options, strutils]
+import std/[assertions, options, os, strutils]
 import ../src/mynim/internal/update as updateRuntime
 
 block versionOrdering:
@@ -91,3 +91,17 @@ block requiresHttpsOutsideLoopback:
   doAssertRaises IOError:
     discard updateRuntime.httpGet("http://updates.example.test/update.json",
       "Mynim/test", 1024)
+
+block cancellationBeforeNetworkAndInstall:
+  let cancelled: proc(): bool {.closure.} = proc(): bool = true
+  doAssertRaises IOError:
+    discard updateRuntime.httpGet("https://updates.example.test/update.json",
+      "Mynim/test", 1024, cancelled)
+  doAssertRaises IOError:
+    updateRuntime.httpDownload("https://updates.example.test/update.tar.gz",
+      "Mynim/test", getTempDir() / "mynim-cancelled-update", 1, nil,
+      cancelled)
+  let installError = updateRuntime.installUpdate(updateRuntime.Manifest(), "",
+    "", nil, nil, cancelled = cancelled)
+  doAssert installError != nil
+  doAssert "cancelled" in installError.msg

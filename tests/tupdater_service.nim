@@ -48,7 +48,7 @@ block manual_up_to_date_check:
   var changes = 0
   let hooks = updater.Hooks(
     enabled: proc(): bool = true,
-    check: proc(): updater.CheckResult =
+    check: proc(cancelled: updater.Cancelled): updater.CheckResult =
       inc checks
       updater.CheckResult(),
     appName: proc(): string = "Mynim Test",
@@ -82,7 +82,7 @@ block skip_and_persist_preferences:
   var changed = 0
   let hooks = updater.Hooks(
     enabled: proc(): bool = true,
-    check: proc(): updater.CheckResult = updater.CheckResult(
+    check: proc(cancelled: updater.Cancelled): updater.CheckResult = updater.CheckResult(
       release: updater.Release(version: "2.0.0", notes: "- Change")),
     appName: proc(): string = "Mynim Test",
     appVersion: proc(): string = "1.0.0",
@@ -108,6 +108,61 @@ block skip_and_persist_preferences:
   doAssert saved.skippedVersion == "2.0.0"
   doAssert saved.automaticDownloads
 
+block cancellation_reaches_active_check:
+  let directory = testDirectory("cancel-check")
+  defer: removeTestDirectory(directory)
+  var active: updaterSession.Session
+  var checkCancelled = false
+  let hooks = updater.Hooks(
+    enabled: proc(): bool = true,
+    check: proc(cancelled: updater.Cancelled): updater.CheckResult =
+      active.cancel()
+      checkCancelled = cancelled()
+      updater.CheckResult(error: newException(IOError, "cancelled")),
+    appName: proc(): string = "Mynim Test",
+    appVersion: proc(): string = "1.0.0",
+    isDevelopment: proc(): bool = false,
+    locale: proc(): string = "en",
+    stateDirectory: proc(): string = directory,
+    show: proc(current: updaterSession.Session) = active = current,
+    now: proc(): Time = now
+  )
+  let value = updater.newUpdater(updater.Options(), hooks)
+  value.beginNow(true)
+  doAssert checkCancelled
+  doAssert value.lastCheck().isNone
+
+block cancellation_reaches_active_install:
+  let directory = testDirectory("cancel-install")
+  defer: removeTestDirectory(directory)
+  var active: updaterSession.Session
+  var installCancelled = false
+  let hooks = updater.Hooks(
+    enabled: proc(): bool = true,
+    check: proc(cancelled: updater.Cancelled): updater.CheckResult =
+      updater.CheckResult(release: updater.Release(version: "2.2.0",
+        install: proc(progress: updater.Progress;
+            cancelled: updater.Cancelled): ref CatchableError =
+          active.cancel()
+          installCancelled = cancelled()
+          newException(IOError, "cancelled"))),
+    appName: proc(): string = "Mynim Test",
+    appVersion: proc(): string = "1.0.0",
+    isDevelopment: proc(): bool = false,
+    locale: proc(): string = "en",
+    stateDirectory: proc(): string = directory,
+    show: proc(current: updaterSession.Session) =
+      active = current
+      let view = current.current()
+      for button in view.buttons:
+        if button.action == frontend.Install:
+          current.respond(view.prompt, button.action, false),
+    now: proc(): Time = now
+  )
+  let value = updater.newUpdater(updater.Options(), hooks)
+  value.beginNow(true)
+  doAssert installCancelled
+
 block background_auto_install_then_relaunch:
   let directory = testDirectory("install")
   defer: removeTestDirectory(directory)
@@ -119,9 +174,10 @@ block background_auto_install_then_relaunch:
   var relaunched = false
   let hooks = updater.Hooks(
     enabled: proc(): bool = true,
-    check: proc(): updater.CheckResult = updater.CheckResult(
+    check: proc(cancelled: updater.Cancelled): updater.CheckResult = updater.CheckResult(
       release: updater.Release(version: "2.1.0", install:
-        proc(progress: updater.Progress): ref CatchableError =
+        proc(progress: updater.Progress; cancelled: updater.Cancelled):
+            ref CatchableError =
           inc installs
           if progress != nil:
             progress(100, 100)
