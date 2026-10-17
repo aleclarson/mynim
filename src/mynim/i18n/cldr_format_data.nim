@@ -5281,3 +5281,48 @@ const skeletons* = [
   "yMMMMEEEEd", "yMMMMEd", "yMMMMccccd", "yMMMMd", "yMMMd",
   "yMMdd", "yMd",
 ]
+
+const weekRegions* = [
+  "001", "AD", "AE", "AF", "AG", "AI", "AL", "AM", "AN", "AR", "AS", "AT",
+  "AU", "AX", "AZ", "BA", "BD", "BE", "BG", "BH", "BM", "BN", "BR", "BS",
+  "BT", "BW", "BY", "BZ", "CA", "CH", "CL", "CM", "CN", "CO", "CR", "CY",
+  "CZ", "DE", "DJ", "DK", "DM", "DO", "DZ", "EC", "EE", "EG", "ES", "ET",
+  "FI", "FJ", "FO", "FR", "GB", "GE", "GF", "GG", "GI", "GP", "GR", "GT",
+  "GU", "HK", "HN", "HR", "HU", "ID", "IE", "IL", "IM", "IN", "IQ", "IR",
+  "IS", "IT", "JE", "JM", "JO", "JP", "KE", "KG", "KH", "KR", "KW", "KZ",
+  "LA", "LB", "LI", "LK", "LT", "LU", "LV", "LY", "MC", "MD", "ME", "MH",
+  "MK", "MM", "MN", "MO", "MQ", "MT", "MV", "MX", "MY", "MZ", "NI", "NL",
+  "NO", "NP", "NZ", "OM", "PA", "PE", "PH", "PK", "PL", "PR", "PT", "PY",
+  "QA", "RE", "RO", "RS", "RU", "SA", "SD", "SE", "SG", "SI", "SJ", "SK",
+  "SM", "SV", "SY", "TH", "TJ", "TM", "TR", "TT", "TW", "UA", "UM", "US",
+  "UY", "UZ", "VA", "VE", "VI", "VN", "WS", "XK", "YE", "ZA", "ZW",
+]
+
+const weekValues* = [
+  17'u8, 65'u8, 17'u8, 22'u8, 16'u8, 17'u8, 17'u8, 17'u8, 65'u8, 17'u8, 16'u8, 65'u8,
+  17'u8, 65'u8, 17'u8, 17'u8, 16'u8, 65'u8, 65'u8, 22'u8, 17'u8, 17'u8, 16'u8, 16'u8,
+  16'u8, 16'u8, 17'u8, 16'u8, 16'u8, 65'u8, 17'u8, 17'u8, 17'u8, 16'u8, 17'u8, 17'u8,
+  65'u8, 65'u8, 22'u8, 65'u8, 16'u8, 16'u8, 22'u8, 17'u8, 65'u8, 22'u8, 65'u8, 16'u8,
+  65'u8, 65'u8, 65'u8, 65'u8, 65'u8, 17'u8, 65'u8, 65'u8, 65'u8, 65'u8, 65'u8, 16'u8,
+  16'u8, 16'u8, 16'u8, 17'u8, 65'u8, 16'u8, 65'u8, 16'u8, 65'u8, 16'u8, 22'u8, 22'u8,
+  64'u8, 65'u8, 65'u8, 16'u8, 22'u8, 16'u8, 16'u8, 17'u8, 16'u8, 16'u8, 22'u8, 17'u8,
+  16'u8, 17'u8, 65'u8, 17'u8, 65'u8, 65'u8, 17'u8, 22'u8, 65'u8, 17'u8, 17'u8, 16'u8,
+  17'u8, 16'u8, 17'u8, 16'u8, 65'u8, 16'u8, 21'u8, 16'u8, 17'u8, 16'u8, 16'u8, 65'u8,
+  65'u8, 16'u8, 17'u8, 22'u8, 16'u8, 16'u8, 16'u8, 16'u8, 65'u8, 16'u8, 64'u8, 16'u8,
+  22'u8, 65'u8, 17'u8, 17'u8, 65'u8, 16'u8, 22'u8, 65'u8, 16'u8, 17'u8, 65'u8, 65'u8,
+  65'u8, 16'u8, 22'u8, 16'u8, 17'u8, 17'u8, 17'u8, 16'u8, 16'u8, 17'u8, 16'u8, 16'u8,
+  17'u8, 17'u8, 65'u8, 16'u8, 16'u8, 17'u8, 16'u8, 17'u8, 16'u8, 16'u8, 16'u8,
+]
+
+type FlexiblePeriodRule* = tuple[
+  language: string,
+  byHour: array[24, uint8],
+  noon: bool,
+]
+
+const flexiblePeriodRules* = [
+  (language: "zh", byHour: [
+    10'u8, 10'u8, 10'u8, 10'u8, 10'u8, 4'u8, 4'u8, 4'u8, 5'u8, 5'u8, 5'u8, 5'u8,
+    6'u8, 7'u8, 7'u8, 7'u8, 7'u8, 7'u8, 7'u8, 8'u8, 8'u8, 8'u8, 8'u8, 8'u8,
+  ], noon: false),
+]

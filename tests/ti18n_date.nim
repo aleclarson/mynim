@@ -111,3 +111,54 @@ block hour_skeletons:
     i18n.DateOptions(skeleton: "jm")) == "07:04"
   doAssert i18n.formatDate("en-US", morning,
     i18n.DateOptions(skeleton: "jm", hourCycle: 24)) == "07:04"
+
+block additional_date_fields:
+  let yearEnd = dateTime(2021, mDec, 31, zone = utc())
+  let yearStart = dateTime(2021, mJan, 1, zone = utc())
+  doAssert i18n.formatDate("en-US", yearEnd,
+    i18n.DateOptions(skeleton: "D")) == "365"
+  doAssert i18n.formatDate("en-US", dateTime(2020, mDec, 31, zone = utc()),
+    i18n.DateOptions(skeleton: "D")) == "366"
+  doAssert i18n.formatDate("en-US", yearStart,
+    i18n.DateOptions(skeleton: "Y")) == "2021"
+  doAssert i18n.formatDate("de-DE", yearStart,
+    i18n.DateOptions(skeleton: "Y")) == "2020"
+  let firstSunday = dateTime(2021, mJan, 3, zone = utc())
+  doAssert i18n.formatDate("de-DE", firstSunday,
+    i18n.DateOptions(skeleton: "Y")) == "2020"
+  doAssert i18n.formatDate("de-DE-u-fw-sun", firstSunday,
+    i18n.DateOptions(skeleton: "Y")) == "2021"
+  doAssert i18n.formatDate("en-US", dateTime(0, mJan, 1, zone = utc()),
+    i18n.DateOptions(skeleton: "y")) == "1"
+  doAssert i18n.formatDate("en-US", dateTime(0, mJan, 1, zone = utc()),
+    i18n.DateOptions(skeleton: "u")) == "1"
+
+  let fractional = dateTime(2026, mOct, 5, 7, 4, 9, 123_456_789, utc())
+  doAssert i18n.formatDate("en-US", fractional,
+    i18n.DateOptions(skeleton: "S")) == "1"
+  doAssert i18n.formatDate("en-US", fractional,
+    i18n.DateOptions(skeleton: "SSS")) == "123"
+  doAssert i18n.formatDate("en-US", fractional,
+    i18n.DateOptions(skeleton: "SSSSSSSSSS")) == "1234567890"
+  doAssert i18n.formatDate("fa", fractional,
+    i18n.DateOptions(skeleton: "S")) == "۱"
+
+  let chineseDawn = dateTime(2026, mOct, 5, 5, zone = utc())
+  let chineseNight = dateTime(2026, mOct, 5, 2, zone = utc())
+  let englishMorning = dateTime(2026, mOct, 5, 7, zone = utc())
+  doAssert i18n.formatDate("en-US", englishMorning,
+    i18n.DateOptions(skeleton: "B")) == "AM"
+  doAssert i18n.formatDate("zh-Hant", chineseDawn,
+    i18n.DateOptions(skeleton: "B")) == "清晨"
+  doAssert i18n.formatDate("zh-Hant", chineseNight,
+    i18n.DateOptions(skeleton: "B")) == "凌晨"
+
+  let easternZone = newTimezone("Test/EastFive", eastFiveFromTime,
+    eastFiveFromAdjTime)
+  let eastern = dateTime(2026, mOct, 5, 7, 4, zone = easternZone)
+  for field in ["O", "Z", "X", "x"]:
+    doAssert i18n.formatDate("en-US", eastern,
+      i18n.DateOptions(skeleton: field)) == "GMT+5"
+  for field in ["OOOO", "ZZZZ", "XXXX", "xxxx", "V"]:
+    doAssert i18n.formatDate("en-US", eastern,
+      i18n.DateOptions(skeleton: field)) == "GMT+05:00"

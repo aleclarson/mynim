@@ -90,6 +90,34 @@ def go_starts(source: str, name: str) -> list[int]:
     return [int(value) for value in re.findall(r"\b\d+\b", body)]
 
 
+def go_string_slice(source: str, name: str) -> list[str]:
+    match = re.search(
+        rf"var\s+{name}\s*=\s*\[\.\.\.\]string\s*\{{(.*?)\}}", source, re.S
+    )
+    if not match:
+        raise ValueError(f"missing Go string slice {name}")
+    literals = re.findall(r'"(?:\\.|[^"\\])*"', match.group(1), re.S)
+    return [go_unquote(literal).decode("utf-8") for literal in literals]
+
+
+def parse_period_rules(text: str) -> tuple[list[int], bool]:
+    by_hour = [0] * 24
+    by_hour[12:] = [1] * 12
+    noon = False
+    for rule in text.split():
+        if "@" in rule:
+            period, minute = rule.split("@", 1)
+            noon = noon or (int(period) == 3 and int(minute) == 720)
+            continue
+        period, span = rule.split(":", 1)
+        start, end = map(int, span.split("-", 1))
+        if end <= start:
+            end += 24 * 60
+        for minute in range(start, end, 60):
+            by_hour[(minute // 60) % 24] = int(period)
+    return by_hour, noon
+
+
 def unpack(source: str, name: str, lengths: list[int]) -> list[bytes]:
     raw = zlib.decompress(go_string(source, name), -15)
     result: list[bytes] = []
@@ -220,6 +248,18 @@ def generate(source: str) -> str:
         raise ValueError("number and date tables disagree about locale parents")
 
     skeletons = go_string(source, "fmtSkeletons").decode("utf-8").split()
+    week_regions = go_string(source, "fmtWeekRegions").decode("utf-8").split()
+    week_values = list(go_string(source, "fmtWeek"))
+    if len(week_regions) != len(week_values):
+        raise ValueError("week region and value tables have different lengths")
+    if week_regions != sorted(week_regions):
+        raise ValueError("week regions are not sorted for binary search")
+    period_languages = go_string(source, "fmtPeriodLangs").decode("utf-8").split()
+    period_texts = go_string_slice(source, "fmtPeriodRules")
+    if len(period_languages) != len(period_texts):
+        raise ValueError("period language and rule tables have different lengths")
+    if period_languages != sorted(period_languages):
+        raise ValueError("period languages are not sorted for binary search")
     header = "\n".join([
         "## Generated from MyGo's CLDR 48.2.0 tables. Do not edit.",
         f"## Source: i18n/format_tables.go at {SOURCE_REVISION}.",
@@ -237,6 +277,9 @@ def generate(source: str) -> str:
         nim_entries("numberEntries", number_entries),
         nim_array("numberStrings", [nim_quote(value) for value in number_strings], 4),
         nim_array("skeletons", [nim_quote(value) for value in skeletons], 5),
+        nim_array("weekRegions", [nim_quote(value) for value in week_regions], 12),
+        nim_array("weekValues", [f"{value}'u8" for value in week_values], 12),
+        nim_period_rules(period_languages, period_texts),
     ]
     return "\n\n".join(sections) + "\n"
 
@@ -252,6 +295,27 @@ def nim_entries(name: str, entries: list[tuple[int, int]]) -> str:
             )
             + ","
         )
+    lines.append("]")
+    return "\n".join(lines)
+
+
+def nim_period_rules(languages: list[str], texts: list[str]) -> str:
+    lines = [
+        "type FlexiblePeriodRule* = tuple[",
+        "  language: string,",
+        "  byHour: array[24, uint8],",
+        "  noon: bool,",
+        "]",
+        "",
+        "const flexiblePeriodRules* = [",
+    ]
+    for language, text in zip(languages, texts):
+        by_hour, noon = parse_period_rules(text)
+        lines.append(f"  (language: {nim_quote(language)}, byHour: [")
+        for i in range(0, len(by_hour), 12):
+            hours = ", ".join(f"{hour}'u8" for hour in by_hour[i : i + 12])
+            lines.append(f"    {hours},")
+        lines.append(f"  ], noon: {str(noon).lower()}),")
     lines.append("]")
     return "\n".join(lines)
 

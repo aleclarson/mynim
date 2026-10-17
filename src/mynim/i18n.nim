@@ -870,7 +870,7 @@ proc dateNumber(value, minDigits: int;
 proc dateZone(data: int; value: DateTime; field: char; width: int;
               digits: array[10, string]): string =
   var offset = -value.utcOffset
-  let long = width >= 4
+  let long = width >= 4 or field == 'V'
   let zoneName = if value.timezone.isNil: "" else: value.timezone.name
   if field in {'z', 'v'} and offset == 0 and zoneName in ["UTC", "Etc/UTC"]:
     return dateSlot(data, if long: 189 else: 190)
@@ -913,11 +913,100 @@ proc dateZone(data: int; value: DateTime; field: char; width: int;
   if pattern == "": pattern = "GMT{0}"
   pattern.replace("{0}", offsetText)
 
+proc weekMinimumDays(locale: string): int =
+  let region = regionOf(locale)
+  var low = 0
+  var high = formatData.weekRegions.len
+  while low < high:
+    let mid = low + (high - low) div 2
+    if formatData.weekRegions[mid] < region:
+      low = mid + 1
+    else:
+      high = mid
+  if low < formatData.weekRegions.len and formatData.weekRegions[low] == region:
+    return int(formatData.weekValues[low] shr 4)
+  1
+
+proc daysInYear(year: int): int =
+  dateTime(year, mDec, 31, zone = utc()).yearday.int + 1
+
+proc weekYear(locale: string; value: DateTime): int =
+  let year = value.year
+  let first = cldrWeekDayIndex(firstWeekday(locale))
+  let minDays = weekMinimumDays(locale)
+  let dayOfYear = value.yearday.int
+  for candidateYear in [year + 1, year, year - 1]:
+    let janFirst = dateTime(candidateYear, mJan, 1, zone = utc())
+    let before = (cldrWeekDayIndex(janFirst.weekday) - first + 7) mod 7
+    var weekStart = -before
+    if 7 - before < minDays:
+      weekStart += 7
+    let dayOffset =
+      if candidateYear == year + 1:
+        dayOfYear - daysInYear(year)
+      elif candidateYear == year:
+        dayOfYear
+      else:
+        daysInYear(year - 1) + dayOfYear
+    if dayOffset >= weekStart:
+      return candidateYear
+  year
+
+proc flexiblePeriodRule(locale: string; data: int): int =
+  let language = localeParts(locale).language
+  let dataTag = if data >= 0 and data < formatData.formatLocales.len:
+      formatData.formatLocales[data]
+    else: ""
+  for tag in [dataTag, language]:
+    var low = 0
+    var high = formatData.flexiblePeriodRules.len
+    while low < high:
+      let mid = low + (high - low) div 2
+      if formatData.flexiblePeriodRules[mid].language < tag:
+        low = mid + 1
+      else:
+        high = mid
+    if low < formatData.flexiblePeriodRules.len and
+        formatData.flexiblePeriodRules[low].language == tag:
+      return low
+  -1
+
 proc dateField(locale: string; data: int; value: DateTime; field: char;
-               width: int; digits: array[10, string]): string =
+               width: int; digits: array[10, string]; hasMinute,
+               hasSecond: bool): string
+
+proc flexibleDayPeriod(locale: string; data: int; value: DateTime; width: int;
+                        digits: array[10, string]; hasMinute,
+                        hasSecond: bool): string =
+  let rule = flexiblePeriodRule(locale, data)
+  if rule < 0:
+    return dateField(locale, data, value, 'a', min(width, 5), digits,
+      hasMinute, hasSecond)
+  let rules = formatData.flexiblePeriodRules[rule]
+  let nameWidth = monthWidthIndex(if width == 5: nameNarrow
+    elif width >= 4: nameWide else: nameAbbreviated)
+  var period = -1
+  if value.hour == 12 and (not hasMinute or value.minute == 0) and
+      (not hasSecond or value.second == 0) and rules.noon:
+    period = 3
+  if period < 0 or (period >= 2 and
+      dateSlot(data, 128 + nameWidth * 12 + period) == ""):
+    period = int(rules.byHour[value.hour])
+  let name = if period >= 2:
+      dateSlot(data, 128 + nameWidth * 12 + period)
+    else: ""
+  if name != "": return name
+  dateField(locale, data, value, 'a', min(width, 5), digits,
+    hasMinute, hasSecond)
+
+proc dateField(locale: string; data: int; value: DateTime; field: char;
+               width: int; digits: array[10, string]; hasMinute,
+               hasSecond: bool): string =
   case field
   of 'y', 'Y', 'u':
-    let year = if width == 2: value.year mod 100 else: value.year
+    var year = if field == 'Y': weekYear(locale, value) else: value.year
+    if field != 'u' and year <= 0: year = 1 - year
+    if width == 2: year = year mod 100
     return dateNumber(year, if width == 2: 2 else: width, digits)
   of 'M', 'L':
     let month = int(value.month)
@@ -931,6 +1020,8 @@ proc dateField(locale: string; data: int; value: DateTime; field: char;
     return dateSlot(data, context * 36 + nameWidth * 12 + month - 1)
   of 'd':
     return dateNumber(value.monthday, width, digits)
+  of 'D':
+    return dateNumber(value.yearday.int + 1, width, digits)
   of 'E', 'e', 'c':
     let weekday = cldrWeekDayIndex(value.weekday)
     if field != 'E' and width <= 2:
@@ -952,6 +1043,9 @@ proc dateField(locale: string; data: int; value: DateTime; field: char;
       elif width >= 4: nameWide else: nameAbbreviated)
     return dateSlot(data, 128 + nameWidth * 12 +
       (if value.hour < 12: 0 else: 1))
+  of 'B':
+    return flexibleDayPeriod(locale, data, value, width, digits,
+      hasMinute, hasSecond)
   of 'h':
     let hour = if value.hour mod 12 == 0: 12 else: value.hour mod 12
     return dateNumber(hour, width, digits)
@@ -961,7 +1055,15 @@ proc dateField(locale: string; data: int; value: DateTime; field: char;
     width, digits)
   of 'm': return dateNumber(value.minute, width, digits)
   of 's': return dateNumber(value.second, width, digits)
-  of 'z', 'v': return dateZone(data, value, field, width, digits)
+  of 'S':
+    let nanoseconds = $value.nanosecond.int
+    var fraction = repeat('0', max(0, 9 - nanoseconds.len)) & nanoseconds
+    if width > 9: fraction.add repeat('0', width - 9)
+    for index in 0..<width:
+      result.add digits[ord(fraction[index]) - ord('0')]
+    return
+  of 'z', 'O', 'v', 'V', 'Z', 'X', 'x':
+    return dateZone(data, value, field, width, digits)
   else:
     result = repeat(field, width)
 
@@ -983,8 +1085,30 @@ proc appendQuoted(pattern: string; index: var int; output: var string) =
       output.add pattern[index]
       inc index
 
+proc patternHasField(pattern: string; field: char): bool =
+  var index = 0
+  var quoted = false
+  while index < pattern.len:
+    let ch = pattern[index]
+    if ch == '\'':
+      if index + 1 < pattern.len and pattern[index + 1] == '\'':
+        index += 2
+      else:
+        quoted = not quoted
+        inc index
+    elif not quoted and ch in {'a'..'z', 'A'..'Z'}:
+      var past = index + 1
+      while past < pattern.len and pattern[past] == ch:
+        inc past
+      if ch == field: return true
+      index = past
+    else:
+      inc index
+
 proc formatPattern(locale: string; data: int; value: DateTime;
                    pattern: string; digits: array[10, string]): string =
+  let hasMinute = patternHasField(pattern, 'm')
+  let hasSecond = patternHasField(pattern, 's')
   var i = 0
   while i < pattern.len:
     let ch = pattern[i]
@@ -994,7 +1118,8 @@ proc formatPattern(locale: string; data: int; value: DateTime;
       var past = i + 1
       while past < pattern.len and pattern[past] == ch:
         inc past
-      result.add dateField(locale, data, value, ch, past - i, digits)
+      result.add dateField(locale, data, value, ch, past - i, digits,
+        hasMinute, hasSecond)
       i = past
     else:
       result.add ch
@@ -1002,8 +1127,9 @@ proc formatPattern(locale: string; data: int; value: DateTime;
 
 type
   DatePatternField = enum
-    dpfEra, dpfYear, dpfMonth, dpfWeekday, dpfDay, dpfDayPeriod,
-    dpfHour, dpfMinute, dpfSecond, dpfZone
+    dpfEra, dpfYear, dpfMonth, dpfWeekday, dpfDay, dpfDayOfYear,
+    dpfDayPeriod, dpfHour, dpfMinute, dpfSecond, dpfFractionalSecond,
+    dpfZone
 
   DateSkeleton = object
     types: array[DatePatternField, int]
@@ -1053,6 +1179,7 @@ proc datePatternField(ch: char; width: int):
       else: dtNarrow - context
     result = (dpfMonth, typ, true)
   of 'd': result = (dpfDay, dtNumeric + width, true)
+  of 'D': result = (dpfDayOfYear, dtNumeric + width, true)
   of 'E', 'e', 'c':
     let context = if ch == 'E': 0 elif ch == 'e': dtDelta else: 2 * dtDelta
     let typ = if width <= 3: dtShort - context
@@ -1075,9 +1202,27 @@ proc datePatternField(ch: char; width: int):
     result = (dpfHour, dtNumeric + delta + width, true)
   of 'm': result = (dpfMinute, dtNumeric + width, true)
   of 's': result = (dpfSecond, dtNumeric + width, true)
-  of 'z', 'v':
-    let context = if ch == 'v': 2 * dtDelta else: 0
-    result = (dpfZone, (if width >= 4: dtLong else: dtShort) - context, true)
+  of 'S': result = (dpfFractionalSecond, dtNumeric + width, true)
+  of 'z', 'v', 'O', 'V', 'Z', 'X', 'x':
+    let typ = case ch
+      of 'v': (if width >= 4: dtLong else: dtShort) - 2 * dtDelta
+      of 'z': (if width >= 4: dtLong else: dtShort)
+      of 'O': (if width >= 4: dtLong else: dtShort) - dtDelta
+      of 'V':
+        if width >= 4: dtLong - 2 * dtDelta
+        elif width == 3: dtLong - 1 - dtDelta
+        elif width == 2: dtLong - dtDelta
+        else: dtShort - dtDelta
+      of 'Z':
+        if width >= 5: dtShort - dtDelta
+        elif width >= 4: dtLong - dtDelta
+        else: dtNarrow - dtDelta
+      of 'X', 'x':
+        if width >= 4: dtLong - dtDelta
+        elif width >= 2: dtShort - dtDelta
+        else: dtNarrow - dtDelta
+      else: 0
+    result = (dpfZone, typ, true)
   else:
     result.valid = false
 
@@ -1156,7 +1301,7 @@ iterator datePatternCandidates(data: int): DatePatternCandidate =
     if time != "":
       yield DatePatternCandidate(pattern: time,
         skeleton: newDateSkeleton(time))
-  for ch in "GyQMwWEDFdaHmsSv":
+  for ch in "GyQMwWEDFdaBHmsSOzvVZXx":
     yield DatePatternCandidate(pattern: $ch, skeleton: newDateSkeleton($ch))
 
 # Selects the lowest-distance locale pattern, reporting absent requested fields.
