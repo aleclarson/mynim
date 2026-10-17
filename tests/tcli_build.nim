@@ -132,6 +132,14 @@ app.run()
     doAssert plist.contains("com.example.adacounter")
     doAssert fileExists(output / ".mynim-build" / target.lastPathPart())
     doAssert not fileExists(target / ".mynim-build")
+    let signature = startProcess("codesign", args = @[
+      "--verify", "--deep", "--strict", bundle],
+      options = {poUsePath, poStdErrToStdOut})
+    try:
+      let signatureLog = signature.outputStream.readAll()
+      doAssert signature.waitForExit() == 0, signatureLog
+    finally:
+      signature.close()
     let process = startProcess("plutil", args = @["-lint", infoPlist],
       options = {poUsePath, poStdErrToStdOut})
     try:

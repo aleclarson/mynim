@@ -6,19 +6,22 @@ import ./generate
 import ./publish as releasePublisher
 when hostOS == "macosx":
   import ./dmg as dmgPackager
+  import ./codesign as macCodeSign
 
 const usageBuild = """Usage: mygo build [flags] [dir]
 
 Build a native project for this machine.
 
 Flags:
-  -o path          output directory (default: out from mygo.json, or dist)
-  -platform target  host GOOS/GOARCH (default: this machine)
-  -skip-build-command  do not run buildCommand from mygo.json
-  -skip-dmg        do not create a disk image on macOS
-  -upload              upload installers to a draft GitHub release
-  -debug               compile with checks and debug information
-  -h, --help       show this help
+  -o path             output directory (default: out from mygo.json, or dist)
+  -platform target    host GOOS/GOARCH (default: this machine)
+  -skip-build-command do not run buildCommand from mygo.json
+  -skip-dmg           do not create a disk image on macOS
+  -skip-notarize      do not notarize even when macos.notarize is set
+  -sign identity      macOS signing identity (default: macos.signingIdentity or -)
+  -upload             upload installers to a draft GitHub release
+  -debug              compile with checks and debug information
+  -h, --help          show this help
 """
 
 proc configString*(config: JsonNode; key, fallback: string): string =
@@ -235,6 +238,8 @@ proc runBuild*(args: seq[string]): int =
   var debug = false
   var skipBuildCommand = false
   var skipDmg = false
+  var skipNotarize = false
+  var signingIdentity = ""
   var upload = false
   var paths: seq[string]
   var index = 0
@@ -253,6 +258,8 @@ proc runBuild*(args: seq[string]): int =
       skipBuildCommand = true
     elif arg == "-skip-dmg" or arg == "--skip-dmg":
       skipDmg = true
+    elif arg == "-skip-notarize" or arg == "--skip-notarize":
+      skipNotarize = true
     elif arg == "-upload" or arg == "--upload":
       upload = true
     elif arg.startsWith("-upload=") or arg.startsWith("--upload="):
@@ -281,6 +288,7 @@ proc runBuild*(args: seq[string]): int =
       case flag
       of "-o", "--output": outputOption = value
       of "-platform", "--platform": platformOption = value
+      of "-sign", "--sign": signingIdentity = value
       else:
         stderr.writeLine("mygo build: unknown flag " & flag)
         stderr.write(usageBuild)
@@ -321,6 +329,38 @@ proc runBuild*(args: seq[string]): int =
     if upload:
       githubRelease = releasePublisher.prepareGitHubRelease(config,
         projectDir, version)
+    var macosConfig = newJObject()
+    if config.hasKey("macos") and config["macos"].kind != JNull:
+      if config["macos"].kind != JObject:
+        raise newException(ValueError, "mygo.json: macos must be an object")
+      macosConfig = config["macos"]
+    if signingIdentity.len == 0:
+      signingIdentity = configString(macosConfig, "signingIdentity", "-")
+    if signingIdentity.len == 0:
+      signingIdentity = "-"
+    when hostOS == "macosx":
+      let entitlementsName = configString(macosConfig, "entitlements", "")
+      let entitlements = if entitlementsName.len == 0: ""
+        elif isAbsolute(entitlementsName): entitlementsName
+        else: projectDir / entitlementsName
+    var keychainProfile, keychain: string
+    var notarize = false
+    if macosConfig.hasKey("notarize") and macosConfig["notarize"].kind != JNull:
+      let notaryConfig = macosConfig["notarize"]
+      if notaryConfig.kind != JObject:
+        raise newException(ValueError,
+          "mygo.json: macos.notarize must be an object")
+      keychainProfile = configString(notaryConfig, "keychainProfile", "")
+      keychain = configString(notaryConfig, "keychain", "")
+      if keychainProfile.len == 0:
+        raise newException(ValueError,
+          "macos.notarize needs a keychainProfile (see xcrun notarytool " &
+          "store-credentials)")
+      notarize = true
+    if notarize and not skipNotarize and signingIdentity == "-":
+      raise newException(ValueError,
+        "notarization needs a Developer ID signing identity: set " &
+        "macos.signingIdentity or pass -sign")
     let buildCommand = configString(config, "buildCommand", "")
     let configuredFrontend = configString(config, "frontendDist", "")
     let configuredOut = if outputOption.len > 0: outputOption
@@ -384,14 +424,15 @@ proc runBuild*(args: seq[string]): int =
         targetArch, config)
       writeInfoPlist(contents / "Info.plist", name, identifier, version,
         executable)
+      macCodeSign.signBundle(bundle, signingIdentity, entitlements)
       if not skipDmg:
-        var dmgTitle = name
-        if config.hasKey("macos") and config["macos"].kind != JNull:
-          if config["macos"].kind != JObject:
-            raise newException(ValueError, "mygo.json: macos must be an object")
-          dmgTitle = configString(config["macos"], "dmgTitle", name)
-        discard dmgPackager.buildDmg(bundle, stage, name, version,
+        let dmgTitle = configString(macosConfig, "dmgTitle", name)
+        let dmg = dmgPackager.buildDmg(bundle, stage, name, version,
           targetArch, dmgTitle)
+        macCodeSign.signDiskImage(dmg, signingIdentity)
+        if notarize and not skipNotarize:
+          macCodeSign.notarizeDmg(dmg, keychainProfile, keychain)
+          macCodeSign.staple(bundle)
     else:
       let binary = stage / executable
       let compiled = compileApp(projectDir, compileSource, binary, cache,
