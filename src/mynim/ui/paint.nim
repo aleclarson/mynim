@@ -423,6 +423,45 @@ proc line*(painter: var Painter; x0, y0, x1, y1, width: float32;
     rect.h = width
   painter.fill(rect, color, 0)
 
+type
+  ImageOptions* = object
+    ## Options for drawing one region of a bitmap with Painter.imageRegion.
+    flipX*, flipY*: bool ## Mirrors the source region on either axis.
+    tint*: Color ## Multiplies image color and alpha; zero means no tint.
+
+proc paintSvg(s: scene.Scene; node: ElementNode; rect, root: Rect;
+              scale, opacity: float32)
+proc paintBitmap(s: scene.Scene; node: ElementNode; rect, root: Rect;
+                 scale, opacity: float32)
+
+proc image*(painter: var Painter; bitmap: Bitmap; rect: Rect; fit: Fit) =
+  ## Draws a bitmap fitted into a rectangle.
+  if painter.frame == nil:
+    return
+  let node = ElementNode(bitmap: bitmap, fit: fit)
+  painter.frame.paintBitmap(node, rect, painter.root, painter.scale,
+    painter.opacity)
+
+proc image*(painter: var Painter; vector: Svg; rect: Rect; fit: Fit) =
+  ## Draws an SVG fitted into a rectangle, using the theme text color for currentColor.
+  if painter.frame == nil:
+    return
+  let node = ElementNode(vector: vector, vectorColor: painter.theme.text,
+    fit: fit)
+  painter.frame.paintSvg(node, rect, painter.root, painter.scale,
+    painter.opacity)
+
+proc imageRegion*(painter: var Painter; bitmap: Bitmap; source, destination: Rect;
+                  options = ImageOptions()) =
+  ## Draws a clipped source region stretched into a destination rectangle.
+  if painter.frame == nil:
+    return
+  let node = ElementNode(bitmap: bitmap, imageRegion: source,
+    flipX: options.flipX, flipY: options.flipY, imageTint: options.tint,
+    fit: Fit.FillBox)
+  painter.frame.paintBitmap(node, destination, painter.root, painter.scale,
+    painter.opacity)
+
 proc fillPath*(painter: var Painter; path: Path; color: Color) =
   ## Fills a vector path with non-zero winding.
   painter.paintPath(path, 0, color, LinearGradient(), false)
