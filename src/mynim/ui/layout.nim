@@ -2126,11 +2126,9 @@ proc update(channel: var ScalarAnimation; owner: ElementOwner; target: float64;
   channel.generation = owner.generation
   channel.value
 
-proc animate*(e: Element; key: string; target: float32;
-              animation: Animation): float32 =
-  ## Moves a keyed scalar value with a timed easing curve or spring and
-  ## requests frames while it moves. The first target appears immediately.
-  ## Reduced motion preferences also apply immediately.
+proc animateValue(e: Element; key: string; target: float32;
+                  animation: Animation;
+                  respectReduceMotion: bool): float32 =
   if not finiteMotion(float64(target)):
     raise newException(ValueError, "ui: animation values must be finite")
   animation.validateAnimation()
@@ -2141,10 +2139,18 @@ proc animate*(e: Element; key: string; target: float32;
   var channels = owner.animations.mgetOrPut(node.identity,
     initTable[string, ScalarAnimation]())
   var channel = channels.getOrDefault(key)
-  let value = channel.update(owner, float64(target), animation)
+  let value = channel.update(owner, float64(target), animation,
+    respectReduceMotion)
   channels[key] = channel
   owner.animations[node.identity] = channels
   float32(value)
+
+proc animate*(e: Element; key: string; target: float32;
+              animation: Animation): float32 =
+  ## Moves a keyed scalar value with a timed easing curve or spring and
+  ## requests frames while it moves. The first target appears immediately.
+  ## Reduced motion preferences also apply immediately.
+  e.animateValue(key, target, animation, true)
 
 proc animate*(e: Element; key: string; target: float32;
               duration: Duration): float32 =
@@ -2552,14 +2558,17 @@ proc childClip(clip: Rect; node: ElementNode; box: Rect): Rect =
     result.h = max(bottom - top, 0'f32)
 
 proc localTransform(node: ElementNode; box: Rect): scene.Affine =
-  if not node.transform.set:
+  var transform = node.transform
+  if node.poseTransform.set:
+    transform = transform.then(node.poseTransform)
+  if not transform.set:
     return
   let originX = box.x + box.w *
     (if node.transformOriginSet: node.transformOriginX else: 0.5'f32)
   let originY = box.y + box.h *
     (if node.transformOriginSet: node.transformOriginY else: 0.5'f32)
   validateTransformValues(originX, originY)
-  result = scene.translation(originX, originY).mul(node.transform.flat())
+  result = scene.translation(originX, originY).mul(transform.flat())
     .mul(scene.translation(-originX, -originY))
   validateTransform(result)
 

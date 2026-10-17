@@ -2,6 +2,12 @@
 ## GPU-ready scene display list.
 
 const continuousCorners = defined(macosx)
+const
+  poseXKey = "\x00mynim.pose.x"
+  poseYKey = "\x00mynim.pose.y"
+  poseScaleKey = "\x00mynim.pose.scale"
+  poseRotateKey = "\x00mynim.pose.rotate"
+  poseFadeKey = "\x00mynim.pose.fade"
 
 proc finite(value: float32): bool =
   classify(value) notin {fcNan, fcInf, fcNegInf}
@@ -387,6 +393,28 @@ proc backfaceHidden*(element: Element): Element =
   if node != nil:
     node[].backfaceHidden = true
   element
+
+proc animatePose*(element: Element; pose: Pose;
+                  animation: Animation): Element =
+  ## Animates visual translation, uniform scale, rotation, and opacity.
+  ## Pose transforms follow the element transform and share its origin.
+  result = element
+  for value in [pose.x, pose.y, pose.scale, pose.rotate, pose.fade]:
+    if not finiteMotion(float64(value)):
+      raise newException(ValueError, "ui: pose values must be finite")
+  let target = pose.channels()
+  animation.validateAnimation()
+  let node = element.node
+  if node == nil:
+    return
+  let x = element.animateValue(poseXKey, target[0], animation, true)
+  let y = element.animateValue(poseYKey, target[1], animation, true)
+  let scale = element.animateValue(poseScaleKey, target[2], animation, true)
+  let rotate = element.animateValue(poseRotateKey, target[3], animation, true)
+  let fade = element.animateValue(poseFadeKey, target[4], animation, false)
+  node[].poseTransform = scaling(scale, scale).then(rotation(rotate))
+    .then(translation(x, y))
+  node[].poseFade = fade
 
 proc transformOrigin*(element: Element; x, y: float32): Element =
   ## Sets the transform origin as fractions of the border box.
@@ -1222,6 +1250,9 @@ proc opacityOf(nodes: seq[ElementNode]; slot: int): float32 =
       result *= node.opacity
       if result == 0:
         return
+    result *= 1'f32 - node.poseFade
+    if result == 0:
+      return
     if node.disabled and not disabledSeen:
       result *= 0.5'f32
       disabledSeen = true

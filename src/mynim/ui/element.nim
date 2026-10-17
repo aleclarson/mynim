@@ -31,6 +31,12 @@ type
     value3d: Transform3D
     has3d: bool
 
+  Pose* = object ## A visual offset, uniform scale, rotation, and fade.
+    x*, y*: float32 ## Translation in device-independent pixels.
+    scale*: float32 ## Uniform scale; zero means one.
+    rotate*: float32 ## Clockwise rotation in degrees.
+    fade*: float32 ## Fade from 0 (opaque) to 1 (invisible).
+
   DragAxis* {.pure.} = enum ## An axis along which a Draggable element moves.
     Horizontal
     Vertical
@@ -386,6 +392,10 @@ proc validateTransform(value: Transform) =
       validateTransformValues(component)
   else:
     validateTransform(value.value)
+
+proc channels(pose: Pose): array[5, float32] =
+  [pose.x, pose.y, if pose.scale == 0: 1'f32 else: pose.scale,
+    pose.rotate, max(0'f32, min(pose.fade, 1'f32))]
 
 proc transform3dIdentity(): Transform3D =
   result[0] = 1

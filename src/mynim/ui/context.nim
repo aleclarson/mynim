@@ -456,6 +456,8 @@ type
     draggable, draggableDragging, draggableMoving: bool
     dragOffset: Point
     transform: Transform
+    poseTransform: Transform
+    poseFade: float32
     transformOriginX, transformOriginY: float32
     transformOriginSet: bool
     label: string
