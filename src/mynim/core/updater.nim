@@ -140,6 +140,13 @@ when not defined(emscripten):
         updateRuntime.httpDownload(url, userAgent, path, size, onProgress)
       result = updateRuntime.installUpdate(up.manifest, up.key, target,
         progress, download)
+      when defined(linux):
+        if result.isNil:
+          let refreshError = updateRuntime.refreshDesktopEntry(target,
+            startExe.lastPathPart())
+          if refreshError != nil:
+            stderr.writeLine("mynim: registering the desktop entry of the " &
+              "update: " & refreshError.msg)
     except CatchableError as error:
       result = newException(IOError,
         "mynim: installing the update: " & error.msg)

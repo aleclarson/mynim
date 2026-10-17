@@ -152,4 +152,46 @@ when defined(posix):
     doAssert readFile(installedBundle / "Contents" / "MacOS" / "sample-app") ==
       "current app"
 
+  proc testDesktopEntryRefresh() =
+    let temporary = createTempDir("mynim-desktop-refresh-", "")
+    defer: removeDir(temporary)
+    let name = "sample"
+    let appDirectory = temporary / "installed"
+    let data = temporary / "xdg-data"
+    createDir(appDirectory)
+    createDir(data / "applications")
+    createDir(data / "mime" / "packages")
+    let executable = appDirectory / name
+    writeFile(executable, "app")
+    writeFile(appDirectory / (name & ".png"), "icon")
+    writeFile(appDirectory / (name & ".desktop"),
+      "[Desktop Entry]\nName=Sample\nExec=sample --flag\nIcon=sample\n")
+    writeFile(appDirectory / (name & ".xml"), "<mime-package>new</mime-package>\n")
+    let entryPath = data / "applications" / (name & ".desktop")
+    writeFile(entryPath, "[Desktop Entry]\nName=Sample\nExec=\"" &
+      executable & "\" --flag\nIcon=old-icon\n")
+    let mimePath = data / "mime" / "packages" / (name & ".xml")
+    writeFile(mimePath, "<mime-package>old</mime-package>\n")
+
+    let previousDataHome = getEnv("XDG_DATA_HOME")
+    putEnv("XDG_DATA_HOME", data)
+    try:
+      let refreshError = updateRuntime.refreshDesktopEntry(appDirectory, name)
+      doAssert refreshError.isNil,
+        (if refreshError.isNil: "" else: refreshError.msg)
+      let refreshed = readFile(entryPath)
+      doAssert refreshed.contains("Exec=\"" & executable & "\" --flag")
+      doAssert refreshed.contains(
+        "Icon=" & (appDirectory / (name & ".png")))
+      doAssert readFile(mimePath) == "<mime-package>new</mime-package>\n"
+
+      removeFile(appDirectory / (name & ".xml"))
+      let removeError = updateRuntime.refreshDesktopEntry(appDirectory, name)
+      doAssert removeError.isNil,
+        (if removeError.isNil: "" else: removeError.msg)
+      doAssert not fileExists(mimePath)
+    finally:
+      putEnv("XDG_DATA_HOME", previousDataHome)
+
   testSignedInstall()
+  testDesktopEntryRefresh()

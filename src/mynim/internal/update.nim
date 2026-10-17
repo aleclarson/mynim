@@ -642,3 +642,98 @@ proc installUpdate*(manifest: Manifest; publicKey, target: string;
   except CatchableError as error:
     result = newException(IOError,
       "mynim: installing the update: " & error.msg)
+
+proc registeredExec(entry: string): string =
+  for line in entry.splitLines():
+    if line.startsWith("Exec=\"") and line.len > 6:
+      let value = line[6 .. ^1]
+      let endQuote = value.find('"')
+      if endQuote > 0:
+        let executable = value[0 ..< endQuote]
+        if isAbsolute(executable):
+          return executable
+
+proc desktopEntry(packaged, directory, name: string): string =
+  let icon = directory / (name & ".png")
+  let hasIcon = fileExists(icon)
+  let execPrefix = "Exec=" & name
+  var offset = 0
+  while offset < packaged.len:
+    var endLine = packaged.find('\n', offset)
+    if endLine < 0:
+      endLine = packaged.len
+    var line = packaged[offset ..< endLine]
+    if line.startsWith(execPrefix):
+      let rest = if line.len == execPrefix.len: ""
+        else: line[execPrefix.len .. ^1]
+      if rest.len == 0 or rest[0] == ' ':
+        line = "Exec=\"" & (directory / name) & "\"" & rest
+    elif line == "Icon=" & name and hasIcon:
+      line = "Icon=" & icon
+    result.add line & "\n"
+    offset = endLine + 1
+
+proc sameFile(first, second: string): bool =
+  try:
+    expandFilename(first) == expandFilename(second)
+  except OSError:
+    false
+
+proc runDesktopTool(name, path: string) =
+  let executable = findExe(name)
+  if executable.len == 0:
+    return
+  try:
+    let process = startProcess(executable, args = @[path],
+      options = {poStdErrToStdOut})
+    try:
+      discard process.outputStream.readAll()
+      discard process.waitForExit()
+    finally:
+      process.close()
+  except CatchableError:
+    discard
+
+proc writeDesktopFile(path, contents: string) =
+  writeFile(path, contents)
+  when defined(posix):
+    setFilePermissions(path,
+      {fpUserRead, fpUserWrite, fpGroupRead, fpOthersRead})
+
+proc refreshDesktopEntry*(directory, name: string): ref CatchableError =
+  ## Refreshes a registered Linux desktop entry and MIME package after install.
+  try:
+    let configuredData = getEnv("XDG_DATA_HOME")
+    let data = if isAbsolute(configuredData): configuredData
+      else: getHomeDir() / ".local" / "share"
+    let entryPath = data / "applications" / (name & ".desktop")
+    var registered: string
+    try:
+      registered = readFile(entryPath)
+    except OSError:
+      return
+    let executable = registeredExec(registered)
+    if executable.len == 0 or executable.lastPathPart() != name or
+        not sameFile(executable, directory / name):
+      return
+    let appDirectory = executable.parentDir()
+    let packaged = readFile(appDirectory / (name & ".desktop"))
+    let updatedEntry = desktopEntry(packaged, appDirectory, name)
+    if updatedEntry != registered:
+      writeDesktopFile(entryPath, updatedEntry)
+      runDesktopTool("update-desktop-database", data / "applications")
+
+    let packagedMimePath = appDirectory / (name & ".xml")
+    let registeredMimePath = data / "mime" / "packages" / (name & ".xml")
+    if fileExists(packagedMimePath):
+      let mime = readFile(packagedMimePath)
+      if not fileExists(registeredMimePath) or
+          readFile(registeredMimePath) != mime:
+        createDir(registeredMimePath.parentDir())
+        writeDesktopFile(registeredMimePath, mime)
+        runDesktopTool("update-mime-database", data / "mime")
+    elif fileExists(registeredMimePath):
+      removeFile(registeredMimePath)
+      runDesktopTool("update-mime-database", data / "mime")
+  except CatchableError as error:
+    result = error
