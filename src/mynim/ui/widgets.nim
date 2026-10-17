@@ -354,6 +354,21 @@ proc contextMenu*(e: Element;
   if node != nil:
     node[].contextMenuBuilder = build
 
+func hasUnsafeLinkByte(url: string): bool =
+  for c in url:
+    let value = ord(c)
+    if value < 0x20 or value == 0x7f or c == '\\':
+      return true
+
+func safeToOpen*(url: string): bool =
+  ## Reports whether a URL may open in the system browser.
+  if url.hasUnsafeLinkByte:
+    return false
+  let colon = url.find(':')
+  if colon <= 0:
+    return false
+  url[0 ..< colon].toLowerAscii in ["http", "https", "mailto"]
+
 proc primaryButton*(c: Context; label: string): Element =
   ## Creates an accent-colored button for the primary action.
   c.themedButton(label, primary = true)
@@ -366,9 +381,10 @@ proc link*(c: Context; label, url: string): Element =
   result = c.text(label).textColor(c.theme.accent)
     .cursor(platform.cursorPointer)
     .onClick(proc() =
-      if url.len > 0 and router != nil and isAppPath(url):
+      if url.len > 0 and not url.hasUnsafeLinkByte and
+          not url.startsWith("//") and router != nil and isAppPath(url):
         router.push(url)
-      elif url.len > 0 and open != nil:
+      elif url.safeToOpen and open != nil:
         open(url, nil)
     )
   let node = result.node
