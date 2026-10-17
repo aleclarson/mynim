@@ -390,6 +390,10 @@ doAssert editorState.cursor() == 5
 editorState.select(0, 0)
 doAssert editorState.run(editor.Command.selectWordRight)
 doAssert editorState.selectedText() == "one"
+editorState.select(3, 3)
+doAssert editorState.run(editor.Command.moveWordRight)
+doAssert editorState.cursor() == 4,
+  "word navigation should stop at punctuation class boundaries"
 editorState.buffer.set("first\nsecond")
 editorState.select("first\nsec".len, "first\nsec".len)
 doAssert editorState.run(editor.Command.moveLineStart)
@@ -425,6 +429,18 @@ doAssert $editorState.buffer == "first\nsecond"
 editorState.select("first\nsec".len, "first\nsec".len)
 doAssert editorState.run(editor.Command.deleteToLineEnd)
 doAssert $editorState.buffer == "first\nsec"
+editorState.buffer.set("  value")
+editorState.select(2, 2)
+doAssert editorState.run(editor.Command.deleteToLineStart)
+doAssert $editorState.buffer == "value"
+editorState.buffer.set("a\nb")
+editorState.select(2, 2)
+doAssert editorState.run(editor.Command.deleteToLineStart)
+doAssert $editorState.buffer == "ab"
+editorState.buffer.set("a\nb")
+editorState.select(1, 1)
+doAssert editorState.run(editor.Command.deleteToLineEnd)
+doAssert $editorState.buffer == "ab"
 
 editorState.readOnly = true
 editorState.buffer.set("one\ntwo")

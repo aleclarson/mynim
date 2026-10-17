@@ -6,6 +6,7 @@ import mynim/internal/text as textStack
 import mynim/ui as ui
 import mynim/ui/editor/commands as editorCommands
 import mynim/ui/editor/syntax as syntax
+from mynim/internal/ucd import lookupGeneralCategory, Nd
 
 export syntax
 
@@ -1270,6 +1271,14 @@ proc graphemeMove(snapshot: Snapshot; runeOffset: int; direction: int): int =
       return current + 1
   current
 
+proc wordCharClass(rune: Rune): int =
+  if isAlpha(rune) or lookupGeneralCategory(int32(rune)) == Nd or
+      rune == Rune('_'):
+    return 1
+  if rune.isWhiteSpace:
+    return 0
+  2
+
 proc wordMove(snapshot: Snapshot; runeOffset: int; direction: int): int =
   let document = snapshot.document
   let current = max(0, min(runeOffset, document.len()))
@@ -1278,22 +1287,49 @@ proc wordMove(snapshot: Snapshot; runeOffset: int; direction: int): int =
   var runes: seq[Rune]
   for rune in document.line(line).runes:
     runes.add(rune)
-  var boundaries: textStack.Boundaries
-  boundaries.reset(runes)
   let local = current - range.start
   if direction < 0:
-    let target = range.start + boundaries.prevWord(local)
-    if target != current:
-      return target
+    if local == 0:
+      if current > 0:
+        return current - 1
+      return current
+    var target = local
+    while target > 0 and runes[target - 1].isWhiteSpace:
+      dec target
+    if target > 0:
+      let charClass = wordCharClass(runes[target - 1])
+      dec target
+      while target > 0 and wordCharClass(runes[target - 1]) == charClass:
+        dec target
+    if target != local:
+      return range.start + target
     if current > 0:
       return current - 1
   elif direction > 0:
-    let target = range.start + boundaries.nextWord(local)
-    if target != current:
-      return target
+    if local < runes.len and runes[local] == Rune('\n'):
+      return current + 1
+    var target = local
+    while target < runes.len and runes[target].isWhiteSpace:
+      inc target
+    if target < runes.len:
+      let charClass = wordCharClass(runes[target])
+      inc target
+      while target < runes.len and runes[target] != Rune('\n') and
+          wordCharClass(runes[target]) == charClass:
+        inc target
+    if target != local:
+      return range.start + target
     if current < document.len():
       return current + 1
   current
+
+proc smartHome(snapshot: Snapshot; runeOffset: int): int =
+  let document = snapshot.document
+  let current = max(0, min(runeOffset, document.len()))
+  let line = document.lineAt(current)
+  let range = document.lineRange(line)
+  let firstNonIndent = range.start + document.line(line).leadingIndent().runeLen
+  if current == firstNonIndent: range.start else: firstNonIndent
 
 proc moveCaret(state: State; command: Command): bool =
   let snapshot = state.buffer.snapshot()
@@ -1323,8 +1359,7 @@ proc moveCaret(state: State; command: Command): bool =
     of Command.moveWordRight, Command.selectWordRight:
       targetRune = snapshot.wordMove(currentRune, 1)
     of Command.moveLineStart, Command.selectLineStart:
-      targetRune = snapshot.document.lineRange(
-        snapshot.document.lineAt(currentRune)).start
+      targetRune = snapshot.smartHome(currentRune)
     of Command.moveLineEnd, Command.selectLineEnd:
       targetRune = snapshot.document.lineRange(
         snapshot.document.lineAt(currentRune)).`end`
@@ -1360,11 +1395,15 @@ proc deleteByCommand(state: State; command: Command): bool =
     of Command.deleteWordRight:
       pastRune = snapshot.wordMove(current, 1)
     of Command.deleteToLineStart:
-      firstRune = snapshot.document.lineRange(
-        snapshot.document.lineAt(current)).start
+      let range = snapshot.document.lineRange(snapshot.document.lineAt(current))
+      firstRune = if current == range.start:
+          snapshot.graphemeMove(current, -1)
+        else: snapshot.smartHome(current)
     of Command.deleteToLineEnd:
-      pastRune = snapshot.document.lineRange(
-        snapshot.document.lineAt(current)).`end`
+      let range = snapshot.document.lineRange(snapshot.document.lineAt(current))
+      pastRune = if current == range.`end`:
+          snapshot.graphemeMove(current, 1)
+        else: range.`end`
     else:
       return false
   else:
