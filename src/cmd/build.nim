@@ -10,6 +10,7 @@ Build a native project for this machine.
 Flags:
   -o path          output directory (default: out from mygo.json, or dist)
   -platform target  host GOOS/GOARCH (default: this machine)
+  -skip-build-command  do not run buildCommand from mygo.json
   -debug           compile with checks and debug information
   -h, --help       show this help
 """
@@ -56,6 +57,19 @@ proc compileApp(projectDir, source, output, cache: string; debug: bool):
   try:
     result.log = process.outputStream.readAll()
     result.code = process.waitForExit()
+  finally:
+    process.close()
+
+proc runBuildCommand(command, projectDir: string): int =
+  when hostOS == "windows":
+    let shell = getEnv("COMSPEC", "cmd.exe")
+    let process = startProcess(shell, args = @["/C", command],
+      workingDir = projectDir, options = {poUsePath, poParentStreams})
+  else:
+    let process = startProcess("/bin/sh", args = @["-c", command],
+      workingDir = projectDir, options = {poUsePath, poParentStreams})
+  try:
+    result = process.waitForExit()
   finally:
     process.close()
 
@@ -134,6 +148,7 @@ proc replaceBuildDir(stage, target, parent: string) =
 proc runBuild*(args: seq[string]): int =
   var outputOption, platformOption = ""
   var debug = false
+  var skipBuildCommand = false
   var paths: seq[string]
   var index = 0
   while index < args.len:
@@ -147,6 +162,8 @@ proc runBuild*(args: seq[string]): int =
       return 0
     if arg == "-debug" or arg == "--debug":
       debug = true
+    elif arg == "-skip-build-command" or arg == "--skip-build-command":
+      skipBuildCommand = true
     elif arg.startsWith("-"):
       let equalAt = arg.find('=')
       let flag = if equalAt < 0: arg else: arg[0 ..< equalAt]
@@ -202,9 +219,7 @@ proc runBuild*(args: seq[string]): int =
     let identifier = configString(config, "identifier",
       "com.mygo." & slug(name).replace("-", ""))
     let version = configString(config, "version", "0.1.0")
-    if configString(config, "buildCommand", "").len > 0:
-      raise newException(ValueError,
-        "mygo build: configured buildCommand is not supported yet")
+    let buildCommand = configString(config, "buildCommand", "")
     let configuredOut = if outputOption.len > 0: outputOption
       else: configString(config, "out", "dist")
     let outputRoot = absolutePath(if isAbsolute(configuredOut): configuredOut
@@ -214,6 +229,12 @@ proc runBuild*(args: seq[string]): int =
     if not fileExists(source):
       raise newException(ValueError,
         "mygo build: expected src/main.nim or main.nim in " & projectDir)
+    if buildCommand.len > 0 and not skipBuildCommand:
+      stdout.writeLine("Running buildCommand")
+      let code = runBuildCommand(buildCommand, projectDir)
+      if code != 0:
+        stderr.writeLine("mygo build: buildCommand exited with status " & $code)
+        return 1
 
     let executable = slug(name) & (when hostOS == "windows": ".exe" else: "")
     let targetName = targetOs & "-" & targetArch

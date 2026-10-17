@@ -1,4 +1,4 @@
-import std/[assertions, os, osproc, streams, strutils, tempfiles]
+import std/[assertions, json, os, osproc, streams, strutils, tempfiles]
 import ../src/cmd/build
 import ../src/cmd/init
 
@@ -12,8 +12,19 @@ proc testBuild() =
     "--mygo", getCurrentDir(),
     project]) == 0
 
+  let buildStep = project / "build_step.nim"
+  let buildMarker = project / "build-step-ran.txt"
+  writeFile(buildStep, """import std/os
+writeFile("build-step-ran.txt", "yes")
+""")
+  let configPath = project / "mygo.json"
+  var config = parseFile(configPath)
+  config["buildCommand"] = %"nim r build_step.nim"
+  writeFile(configPath, config.pretty & "\n")
+
   let output = temporary / "build output"
   doAssert runBuild(@["-o", output, project]) == 0
+  doAssert readFile(buildMarker) == "yes"
   let targetOs = if hostOS == "macosx": "darwin" else: hostOS
   let target = output / (targetOs & "-" & hostCPU)
   let executable = "ada-counter" & (when hostOS == "windows": ".exe" else: "")
@@ -39,13 +50,20 @@ proc testBuild() =
     doAssert fileExists(target / executable)
     doAssert fileExists(target / "icon.png")
 
+  removeFile(buildMarker)
+  doAssert runBuild(@["-skip-build-command", "-o", output, project]) == 0
+  doAssert not fileExists(buildMarker)
+
   doAssert runBuild(@["-o", output, project]) == 0
+  doAssert fileExists(buildMarker)
   when hostOS == "macosx":
     doAssert fileExists(target / "ada-counter.app" / "Contents" / "MacOS" /
       executable)
   else:
     doAssert fileExists(target / executable)
 
+  writeFile(buildStep, "quit(17)\n")
+  doAssert runBuild(@["-o", output, project]) == 1
   doAssert runBuild(@["-platform", "other/target", project]) == 1
   doAssert runBuild(@["-unknown", project]) == 2
   doAssert runBuild(@["--help"]) == 0
