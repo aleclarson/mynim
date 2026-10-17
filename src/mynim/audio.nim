@@ -2,8 +2,8 @@
 ##
 ## WAV decoding is built in. Other codecs can register a decoder with
 ## `registerFormat`. Players mix and advance in real time. macOS uses CoreAudio,
-## Linux uses PulseAudio with an ALSA fallback, and other platforms advance
-## silently and report that through `err()`.
+## Linux uses PulseAudio with an ALSA fallback, and Windows uses shared-mode
+## WASAPI. Other platforms advance silently and report that through `err()`.
 
 import std/[exitprocs, locks, math, monotimes, os, streams, times]
 import ./internal/audio_output_types
@@ -11,6 +11,8 @@ when defined(macosx):
   import ./internal/darwin/audio_output as darwinAudioOutput
 elif defined(linux) and (defined(amd64) or defined(arm64)):
   import ./internal/linux/audio_output as linuxAudioOutput
+elif defined(windows) and (defined(amd64) or defined(arm64)):
+  import ./internal/windows/audio_output as windowsAudioOutput
 
 type
   AudioError* = object of CatchableError ## An unsupported or malformed audio format.
@@ -590,6 +592,14 @@ proc runAudioOutput() {.thread.} =
           withLock audioLock:
             audioOutputError = error
           canRetry = true
+      elif defined(windows) and (defined(amd64) or defined(arm64)):
+        try:
+          device = windowsAudioOutput.openAudioOutput()
+          deviceFrames = windowsAudioOutput.windowsFrames
+        except CatchableError as error:
+          withLock audioLock:
+            audioOutputError = error
+          canRetry = true
       if device.isNil:
         withLock audioLock:
           if audioOutputError.isNil:
@@ -628,6 +638,20 @@ proc runAudioOutput() {.thread.} =
             try:
               device = linuxAudioOutput.openAudioOutput()
               deviceFrames = linuxAudioOutput.linuxFrames
+              output.setLen(deviceFrames * outputChannels)
+              deadline = getMonoTime()
+              idleTime = 0
+              canRetry = false
+              withLock audioLock:
+                audioOutputError = nil
+            except CatchableError as error:
+              retryAt = getMonoTime() + retryDelay
+              withLock audioLock:
+                audioOutputError = error
+          elif defined(windows) and (defined(amd64) or defined(arm64)):
+            try:
+              device = windowsAudioOutput.openAudioOutput()
+              deviceFrames = windowsAudioOutput.windowsFrames
               output.setLen(deviceFrames * outputChannels)
               deadline = getMonoTime()
               idleTime = 0

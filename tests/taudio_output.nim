@@ -12,6 +12,7 @@ doAssert player.position().inNanoseconds > 0
 doAssert player.playing()
 when defined(macosx):
   doAssert err().isNil
-elif not (defined(linux) and (defined(amd64) or defined(arm64))):
+elif not ((defined(linux) or defined(windows)) and
+    (defined(amd64) or defined(arm64))):
   doAssert err() != nil
 player.close()
