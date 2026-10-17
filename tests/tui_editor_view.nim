@@ -383,6 +383,13 @@ doAssert editorState.cursor() == "A👩‍💻".len,
 editorState.select(1, 1)
 doAssert editorState.run(editor.Command.selectRight)
 doAssert editorState.selectedText() == "👩‍💻"
+editorState.buffer.set("one, two")
+editorState.select("one, two".len, "one, two".len)
+doAssert editorState.run(editor.Command.moveWordLeft)
+doAssert editorState.cursor() == 5
+editorState.select(0, 0)
+doAssert editorState.run(editor.Command.selectWordRight)
+doAssert editorState.selectedText() == "one"
 editorState.buffer.set("first\nsecond")
 editorState.select("first\nsec".len, "first\nsec".len)
 doAssert editorState.run(editor.Command.moveLineStart)

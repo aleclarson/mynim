@@ -1299,11 +1299,13 @@ proc moveCaret(state: State; command: Command): bool =
   let snapshot = state.buffer.snapshot()
   let selection = state.caretSelection
   let selecting = command in {
-    Command.selectLeft, Command.selectRight, Command.selectLineStart,
-    Command.selectLineEnd, Command.selectDocStart, Command.selectDocEnd}
+    Command.selectLeft, Command.selectRight, Command.selectWordLeft,
+    Command.selectWordRight, Command.selectLineStart, Command.selectLineEnd,
+    Command.selectDocStart, Command.selectDocEnd}
   let movingLeft = command in {
-    Command.moveLeft, Command.selectLeft, Command.moveLineStart,
-    Command.selectLineStart, Command.moveDocStart, Command.selectDocStart}
+    Command.moveLeft, Command.selectLeft, Command.moveWordLeft,
+    Command.selectWordLeft, Command.moveLineStart, Command.selectLineStart,
+    Command.moveDocStart, Command.selectDocStart}
   var targetByte = selection.head
   if not selecting and not selection.empty() and
       command in {Command.moveLeft, Command.moveRight}:
@@ -1316,6 +1318,10 @@ proc moveCaret(state: State; command: Command): bool =
       targetRune = snapshot.graphemeMove(currentRune, -1)
     of Command.moveRight, Command.selectRight:
       targetRune = snapshot.graphemeMove(currentRune, 1)
+    of Command.moveWordLeft, Command.selectWordLeft:
+      targetRune = snapshot.wordMove(currentRune, -1)
+    of Command.moveWordRight, Command.selectWordRight:
+      targetRune = snapshot.wordMove(currentRune, 1)
     of Command.moveLineStart, Command.selectLineStart:
       targetRune = snapshot.document.lineRange(
         snapshot.document.lineAt(currentRune)).start
@@ -1395,8 +1401,10 @@ proc run*(state: State; command: Command): bool =
     return state.redo()
   of Command.moveLeft, Command.moveRight, Command.moveLineStart,
       Command.moveLineEnd, Command.moveDocStart, Command.moveDocEnd,
-      Command.selectLeft, Command.selectRight, Command.selectLineStart,
-      Command.selectLineEnd, Command.selectDocStart, Command.selectDocEnd:
+      Command.moveWordLeft, Command.moveWordRight,
+      Command.selectLeft, Command.selectRight, Command.selectWordLeft,
+      Command.selectWordRight, Command.selectLineStart, Command.selectLineEnd,
+      Command.selectDocStart, Command.selectDocEnd:
     return state.moveCaret(command)
   of Command.backspace, Command.delete, Command.deleteWordLeft,
       Command.deleteWordRight, Command.deleteToLineStart,
