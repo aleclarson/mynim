@@ -21,6 +21,13 @@ block date_skeletons:
   doAssert i18n.formatDate("fa", date,
     i18n.DateOptions(skeleton: "yMd")) == "۲۰۲۶/۱۰/۵"
 
+block best_fit_skeletons:
+  doAssert i18n.formatDate("en-US", date,
+    i18n.DateOptions(skeleton: "yyMMd")) == "10/5/26"
+  let morning = dateTime(2026, mOct, 5, 7, 4, zone = utc())
+  doAssert i18n.formatDate("en-US", morning,
+    i18n.DateOptions(skeleton: "yMMMdHm")) == "Oct 5, 2026, 07:04"
+
 block localized_names:
   doAssert i18n.months("en", i18n.nameAbbreviated)[0] == "Jan"
   doAssert i18n.months("de", i18n.nameWide, true)[0] == "Januar"

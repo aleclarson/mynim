@@ -6,8 +6,9 @@
 ## rules, names, and common date skeletons use CLDR data. ICU message
 ## parsing, choice evaluation, number styles, date/time styles, and the
 ## en-XA/ar-XB pseudo locales are supported, along with runtime catalog
-## lookup and locale fallback. Full date pattern matching and generated typed
-## catalog accessors are still being ported.
+## lookup and locale fallback. Date skeletons use best-fit CLDR patterns;
+## week-based years, fractional seconds, and localized time-zone names remain
+## open, as do TypeScript catalog accessors.
 
 import std/[strutils, tables, times, atomics, unicode, math, json, algorithm,
   locks]
@@ -30,7 +31,7 @@ type
     ## Options for localized Gregorian date formatting.
     skeleton*: string
       ## CLDR fields in any order. Common forms include "yMd", "yMMMM",
-      ## and "yMMMMd"; exact CLDR skeleton patterns are used when present.
+      ## and "yMMMMd"; the closest CLDR skeleton pattern is selected.
     hourCycle*: int
       ## 12 or 24 to override the locale's hour cycle for hour fields.
 
@@ -945,12 +946,299 @@ proc formatPattern(locale: string; data: int; value: DateTime;
       result.add ch
       inc i
 
+type
+  DatePatternField = enum
+    dpfEra, dpfYear, dpfMonth, dpfWeekday, dpfDay, dpfDayPeriod,
+    dpfHour, dpfMinute, dpfSecond, dpfZone
+
+  DateSkeleton = object
+    types: array[DatePatternField, int]
+    chars: array[DatePatternField, char]
+    widths: array[DatePatternField, int]
+
+  DatePatternCandidate = object
+    pattern: string
+    skeleton: DateSkeleton
+    specified: bool
+
+  DatePatternMatch = object
+    candidate: DatePatternCandidate
+    distance: int
+    missing: int
+    found: bool
+
+const
+  dtNarrow = -0x101
+  dtShorter = -0x102
+  dtShort = -0x103
+  dtLong = -0x104
+  dtNumeric = 0x100
+  dtDelta = 0x10
+  extraDateField = 0x10000
+  missingDateField = 0x1000
+
+# These field types and distance weights follow ICU's date pattern matcher.
+proc datePatternField(ch: char; width: int):
+    tuple[field: DatePatternField, typ: int, valid: bool] =
+  case ch
+  of 'G':
+    result = (dpfEra, if width >= 5: dtNarrow
+      elif width >= 4: dtLong else: dtShort, true)
+  of 'y', 'Y', 'u':
+    let delta = case ch
+      of 'Y': dtDelta
+      of 'u': 2 * dtDelta
+      else: 0
+    result = (dpfYear, dtNumeric + delta + width, true)
+  of 'M', 'L':
+    let context = if ch == 'L': dtDelta else: 0
+    let typ = if width <= 2: dtNumeric + context + width
+      elif width == 3: dtShort - context
+      elif width == 4: dtLong - context
+      else: dtNarrow - context
+    result = (dpfMonth, typ, true)
+  of 'd': result = (dpfDay, dtNumeric + width, true)
+  of 'E', 'e', 'c':
+    let context = if ch == 'E': 0 elif ch == 'e': dtDelta else: 2 * dtDelta
+    let typ = if width <= 3: dtShort - context
+      elif width == 4: dtLong - context
+      elif width == 5: dtNarrow - context
+      else: dtShorter - context
+    result = (dpfWeekday, typ, true)
+  of 'a', 'b', 'B':
+    let context = if ch == 'a': 0 elif ch == 'b': dtDelta else: 3 * dtDelta
+    let typ = if width <= 3: dtShort - context
+      elif width == 4: dtLong - context
+      else: dtNarrow - context
+    result = (dpfDayPeriod, typ, true)
+  of 'h', 'H', 'K', 'k':
+    let delta = case ch
+      of 'K': dtDelta
+      of 'H': 10 * dtDelta
+      of 'k': 11 * dtDelta
+      else: 0
+    result = (dpfHour, dtNumeric + delta + width, true)
+  of 'm': result = (dpfMinute, dtNumeric + width, true)
+  of 's': result = (dpfSecond, dtNumeric + width, true)
+  of 'z', 'v':
+    let context = if ch == 'v': 2 * dtDelta else: 0
+    result = (dpfZone, (if width >= 4: dtLong else: dtShort) - context, true)
+  else:
+    result.valid = false
+
+proc addDatePatternField(skeleton: var DateSkeleton; ch: char; width: int) =
+  let info = datePatternField(ch, width)
+  if info.valid:
+    skeleton.types[info.field] = info.typ
+    skeleton.chars[info.field] = ch
+    skeleton.widths[info.field] = width
+
+# Reads a skeleton or CLDR pattern, ignoring quoted literal text.
+proc newDateSkeleton(value: string): DateSkeleton =
+  var index = 0
+  var quoted = false
+  while index < value.len:
+    let ch = value[index]
+    if ch == '\'':
+      if index + 1 < value.len and value[index + 1] == '\'':
+        index += 2
+      else:
+        quoted = not quoted
+        inc index
+    elif quoted:
+      inc index
+    elif ch in {'a'..'z', 'A'..'Z'}:
+      var past = index + 1
+      while past < value.len and value[past] == ch:
+        inc past
+      result.addDatePatternField(ch, past - index)
+      index = past
+    else:
+      inc index
+  let hour = result.chars[dpfHour]
+  if hour in {'h', 'K'} and result.types[dpfDayPeriod] == 0:
+    result.addDatePatternField('a', 1)
+  elif hour in {'H', 'k'}:
+    result.types[dpfDayPeriod] = 0
+    result.chars[dpfDayPeriod] = '\0'
+    result.widths[dpfDayPeriod] = 0
+
+proc dateFieldMask(skeleton: DateSkeleton): int =
+  for field in DatePatternField:
+    if skeleton.types[field] != 0:
+      result = result or (1 shl ord(field))
+
+proc datePatternDistance(request, candidate: DateSkeleton; mask: int):
+    tuple[distance: int, missing: int] =
+  for field in DatePatternField:
+    let requestedType = if (mask and (1 shl ord(field))) != 0:
+        request.types[field] else: 0
+    let availableType = candidate.types[field]
+    if requestedType == availableType:
+      discard
+    elif requestedType == 0:
+      result.distance += extraDateField
+    elif availableType == 0:
+      result.distance += missingDateField
+      result.missing = result.missing or (1 shl ord(field))
+    else:
+      result.distance += abs(requestedType - availableType)
+
+iterator datePatternCandidates(data: int): DatePatternCandidate =
+  for i, key in formatData.skeletons:
+    let pattern = dateSlot(data, 214 + i)
+    if pattern != "":
+      yield DatePatternCandidate(pattern: pattern,
+        skeleton: newDateSkeleton(key), specified: true)
+  for i in 0..3:
+    let date = dateSlot(data, 170 + i)
+    if date != "":
+      yield DatePatternCandidate(pattern: date,
+        skeleton: newDateSkeleton(date))
+    let time = dateSlot(data, 174 + i)
+    if time != "":
+      yield DatePatternCandidate(pattern: time,
+        skeleton: newDateSkeleton(time))
+  for ch in "GyQMwWEDFdaHmsSv":
+    yield DatePatternCandidate(pattern: $ch, skeleton: newDateSkeleton($ch))
+
+# Selects the lowest-distance locale pattern, reporting absent requested fields.
+proc bestDatePattern(data: int; request: DateSkeleton; mask: int):
+    DatePatternMatch =
+  result.distance = high(int)
+  var bestMissing = -1
+  for candidate in datePatternCandidates(data):
+    let score = datePatternDistance(request, candidate.skeleton, mask)
+    if score.distance < result.distance or
+        (score.distance == result.distance and bestMissing < score.missing):
+      result.candidate = candidate
+      result.distance = score.distance
+      result.missing = score.missing
+      result.found = true
+      bestMissing = score.missing
+      if score.distance == 0:
+        return
+
+proc adjustedDatePattern(pattern: string; candidate: DatePatternCandidate;
+                         request: DateSkeleton; defaultHour: char): string =
+  var index = 0
+  var quoted = false
+  while index < pattern.len:
+    let ch = pattern[index]
+    if ch == '\'':
+      if index + 1 < pattern.len and pattern[index + 1] == '\'':
+        result.add "''"
+        index += 2
+      else:
+        quoted = not quoted
+        result.add ch
+        inc index
+    elif quoted:
+      result.add ch
+      inc index
+    elif ch in {'a'..'z', 'A'..'Z'}:
+      var past = index + 1
+      while past < pattern.len and pattern[past] == ch:
+        inc past
+      let width = past - index
+      let info = datePatternField(ch, width)
+      if not info.valid or request.types[info.field] == 0:
+        result.add pattern[index..<past]
+      else:
+        let field = info.field
+        let requestedChar = request.chars[field]
+        var requestedWidth = request.widths[field]
+        if requestedChar == 'E' and requestedWidth < 3:
+          requestedWidth = 3
+        var adjustedWidth = requestedWidth
+        if field in {dpfMinute, dpfSecond}:
+          adjustedWidth = width
+        elif candidate.specified and requestedChar notin {'c', 'e'}:
+          let skeletonWidth = candidate.skeleton.widths[field]
+          let patternNumeric = info.typ > 0
+          let skeletonNumeric = candidate.skeleton.types[field] > 0
+          if skeletonWidth == requestedWidth or
+              patternNumeric != skeletonNumeric:
+            adjustedWidth = width
+        var adjustedChar = requestedChar
+        if field in {dpfHour, dpfMonth, dpfWeekday} or
+            (field == dpfYear and requestedChar != 'Y'):
+          adjustedChar = ch
+        if field == dpfHour:
+          if requestedChar == defaultHour:
+            adjustedChar = defaultHour
+          elif requestedChar == 'h' and defaultHour == 'K':
+            adjustedChar = 'K'
+          elif requestedChar == 'H' and defaultHour == 'k':
+            adjustedChar = 'k'
+          elif requestedChar == 'k' and defaultHour == 'H':
+            adjustedChar = 'H'
+          elif requestedChar == 'K' and defaultHour == 'h':
+            adjustedChar = 'h'
+        result.add repeat(adjustedChar, adjustedWidth)
+      index = past
+    else:
+      result.add ch
+      inc index
+
+proc replaceDateHours(pattern: string; hour: char): string =
+  var quoted = false
+  for ch in pattern:
+    if ch == '\'': quoted = not quoted
+    result.add if not quoted and ch in {'h', 'H', 'k', 'K'}: hour else: ch
+
+proc bestAppendingDatePattern(data: int; request: DateSkeleton; mask: int;
+                              defaultHour: char): string =
+  if mask == 0: return ""
+  let best = bestDatePattern(data, request, mask)
+  if not best.found: return ""
+  result = adjustedDatePattern(best.candidate.pattern, best.candidate,
+    request, defaultHour)
+  var missing = best.missing
+  var previousMissing = 0
+  while missing != 0 and missing != previousMissing:
+    previousMissing = missing
+    let start = missing
+    let next = bestDatePattern(data, request, missing)
+    if not next.found: break
+    missing = next.missing
+    if (start and (not missing)) == 0: break
+    result.add " " & adjustedDatePattern(next.candidate.pattern,
+      next.candidate, request, defaultHour)
+
+proc generatedDatePattern(data: int; skeleton: string; hour,
+                          defaultHour: char): string =
+  let request = newDateSkeleton(skeleton)
+  let allFields = dateFieldMask(request)
+  let best = bestDatePattern(data, request, allFields)
+  if not best.found: return ""
+  if best.missing == 0 and best.distance < extraDateField:
+    return replaceDateHours(adjustedDatePattern(best.candidate.pattern,
+      best.candidate, request, defaultHour), hour)
+  let dateMask = (1 shl ord(dpfDayPeriod)) - 1
+  let timeMask = ((1 shl (ord(high(DatePatternField)) + 1)) - 1) xor dateMask
+  let date = bestAppendingDatePattern(data, request,
+    allFields and dateMask, defaultHour)
+  let time = bestAppendingDatePattern(data, request,
+    allFields and timeMask, defaultHour)
+  if date == "": return replaceDateHours(time, hour)
+  if time == "": return replaceDateHours(date, hour)
+  var glueIndex = 3
+  if request.widths[dpfMonth] == 4:
+    glueIndex = if request.types[dpfWeekday] != 0: 0 else: 1
+  elif request.widths[dpfMonth] == 3:
+    glueIndex = 2
+  var glue = dateSlot(data, 182 + glueIndex)
+  if glue == "": glue = dateSlot(data, 178 + glueIndex)
+  if glue == "": glue = "{1} {0}"
+  replaceDateHours(glue.replace("{1}", date).replace("{0}", time), hour)
+
 proc datePattern(locale: string; data: int; options: DateOptions): string =
   var skeleton = options.skeleton
   if skeleton == "": skeleton = "yMd"
+  let defaultHour = preferredHourSymbol(locale)
   var hour = if options.hourCycle == 12: 'h'
-    elif options.hourCycle == 24: 'H'
-    else: preferredHourSymbol(locale)
+    elif options.hourCycle == 24: 'H' else: defaultHour
   if options.hourCycle == 0:
     for ch in skeleton:
       if ch in {'h', 'H', 'K', 'k'}:
@@ -961,29 +1249,13 @@ proc datePattern(locale: string; data: int; options: DateOptions): string =
   elif options.hourCycle in [12, 24]:
     for ch in ['h', 'H', 'K', 'k']:
       skeleton = skeleton.replace($ch, $hour)
-  for i, key in formatData.skeletons:
-    if key == skeleton:
-      let pattern = dateSlot(data, 214 + i)
-      if pattern != "": return pattern
-  if skeleton == "yMMMMd" or (skeleton.contains("d") and
-      skeleton.count('M') >= 4):
-    return dateSlot(data, 171) # CLDR long date pattern.
-  if skeleton == "yMMMd":
-    return dateSlot(data, 172) # CLDR medium date pattern.
-  if skeleton == "yMd":
-    return dateSlot(data, 173) # CLDR short date pattern fallback.
-  for i, key in formatData.skeletons:
-    if key == "yMd":
-      return dateSlot(data, 214 + i)
-  dateSlot(data, 171)
+  generatedDatePattern(data, skeleton, hour, defaultHour)
 
 proc formatDate*(locale: string; value: DateTime;
                  options = DateOptions()): string =
   ## Formats a Gregorian date using CLDR names, patterns, and digits.
-  ## Exact available skeleton patterns are used; yMMMMd and yMMMd use
-  ## the matching long and medium CLDR date styles when no exact pattern
-  ## is available. Other unmatched skeletons currently fall back to yMd;
-  ## full DateTimePatternGenerator matching is still being ported.
+  ## The closest available CLDR skeleton pattern is adjusted to the requested
+  ## field widths; missing date and time fields are composed from CLDR patterns.
   let data = formatLocaleIndex(locale)
   let digits = localizedDigits(locale, data)
   let pattern = datePattern(locale, data, options)
