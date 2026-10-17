@@ -360,6 +360,34 @@ proc rotate*(element: Element; degrees: float32): Element =
     node[].transform = node[].transform.then(rotation(degrees))
   element
 
+proc rotateX*(element: Element; degrees: float32): Element =
+  ## Turns the element around its horizontal axis in 3D.
+  let node = element.node
+  if node != nil:
+    node[].transform = node[].transform.then(rotationX(degrees))
+  element
+
+proc rotateY*(element: Element; degrees: float32): Element =
+  ## Turns the element around its vertical axis in 3D.
+  let node = element.node
+  if node != nil:
+    node[].transform = node[].transform.then(rotationY(degrees))
+  element
+
+proc perspective*(element: Element; distance: float32): Element =
+  ## Applies a 3D perspective view at the given distance in DIPs.
+  let node = element.node
+  if node != nil:
+    node[].transform = node[].transform.then(perspective(distance))
+  element
+
+proc backfaceHidden*(element: Element): Element =
+  ## Hides and disables the element when its 3D transform faces away.
+  let node = element.node
+  if node != nil:
+    node[].backfaceHidden = true
+  element
+
 proc transformOrigin*(element: Element; x, y: float32): Element =
   ## Sets the transform origin as fractions of the border box.
   validateTransformValues(x, y)
@@ -383,9 +411,11 @@ proc painterTransform(painter: Painter; value: Transform;
     painter.scale)
   if painter.scale <= 0:
     raise newException(ValueError, "ui: painter scale must be positive")
-  var pixelTransform = value.value
+  var pixelTransform = value.flat()
   pixelTransform.x *= painter.scale
   pixelTransform.y *= painter.scale
+  pixelTransform.g /= painter.scale
+  pixelTransform.h /= painter.scale
   validateTransform(pixelTransform)
   let pixelOriginX = (originX - painter.root.x) * painter.scale
   let pixelOriginY = (originY - painter.root.y) * painter.scale
@@ -408,7 +438,7 @@ proc transform*(painter: var Painter; value: Transform;
   ## Applies a visual transform around an origin; callback receives the painter.
   if callback == nil:
     raise newException(ValueError, "ui: painter transform callback is nil")
-  if painter.frame == nil or not value.value.`set`:
+  if painter.frame == nil or not value.set:
     callback(painter)
     return
   let frame = painter.frame
@@ -1123,12 +1153,23 @@ proc pixelTransform(layout: LayoutResult; slot: int;
   let world = layout.worldTransforms[slot]
   if not world.`set`:
     return
-  let x = scale * (world.a * layout.root.x + world.c * layout.root.y +
-    world.x - layout.root.x)
-  let y = scale * (world.b * layout.root.x + world.d * layout.root.y +
-    world.y - layout.root.y)
-  validateTransformValues(x, y)
-  result = scene.matrix(world.a, world.b, world.c, world.d, x, y)
+  let rootX = layout.root.x
+  let rootY = layout.root.y
+  let divisor = world.w(rootX, rootY)
+  if divisor == 0 or not divisor.finite:
+    return scene.Affine(`set`: true)
+  let a = (world.a - rootX * world.g) / divisor
+  let b = (world.b - rootY * world.g) / divisor
+  let c = (world.c - rootX * world.h) / divisor
+  let d = (world.d - rootY * world.h) / divisor
+  let x = scale * (world.a * rootX + world.c * rootY + world.x -
+    rootX * divisor) / divisor
+  let y = scale * (world.b * rootX + world.d * rootY + world.y -
+    rootY * divisor) / divisor
+  let g = world.g / (scale * divisor)
+  let h = world.h / (scale * divisor)
+  validateTransformValues(a, b, c, d, x, y, g, h)
+  result = scene.projective(a, b, c, d, x, y, g, h)
 
 proc applyLayoutTransform(frame: scene.Scene; first: int;
                           layout: LayoutResult; slot: int; scale: float32) =
@@ -1354,6 +1395,8 @@ proc paintScene*(layout: LayoutResult; scale = 1'f32;
       result.colorAtlas = system.colorAtlas
 
       for slot in layout.owner.paintSlots:
+        if layout.backfaceBlocked[slot]:
+          continue
         let node = layout.owner.nodes[slot]
         let opacity = opacityOf(layout.owner.nodes, slot)
         if opacity == 0:
@@ -1446,6 +1489,8 @@ proc paintScene*(layout: LayoutResult; scale = 1'f32;
           result.ops.add(scene.Op(kind: scene.opPopClip))
 
       for slot in layout.owner.paintSlots:
+        if layout.backfaceBlocked[slot]:
+          continue
         let node = layout.owner.nodes[slot]
         if not node.focused or not (node.textClient of TextFieldClient):
           continue
@@ -1460,6 +1505,8 @@ proc paintScene*(layout: LayoutResult; scale = 1'f32;
         result.applyLayoutTransform(firstCaretOp, layout, slot, scale)
 
       for slot in layout.owner.paintSlots:
+        if layout.backfaceBlocked[slot]:
+          continue
         let node = layout.owner.nodes[slot]
         let state = node.scrollState
         if state == nil or
@@ -1478,6 +1525,8 @@ proc paintScene*(layout: LayoutResult; scale = 1'f32;
         result.applyLayoutTransform(firstScrollbarOp, layout, slot, scale)
 
       for slot in layout.owner.paintSlots:
+        if layout.backfaceBlocked[slot]:
+          continue
         let node = layout.owner.nodes[slot]
         let firstDecorationOp = result.ops.len
         if node.listState != nil and node.listRowIndex == -1:

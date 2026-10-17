@@ -23,9 +23,13 @@ type
   Point* = object ## An offset in device independent pixels.
     x*, y*: float32
 
-  Transform* = object ## A visual 2D transform for Painter drawing or an element.
+  Transform3D = array[16, float32]
+
+  Transform* = object ## A visual 2D or perspective 3D transform.
                        ## The zero value is identity.
     value: scene.Affine
+    value3d: Transform3D
+    has3d: bool
 
   DragAxis* {.pure.} = enum ## An axis along which a Draggable element moves.
     Horizontal
@@ -376,6 +380,61 @@ proc validateTransform(value: scene.Affine) =
   validateTransformValues(value.a, value.b, value.c, value.d, value.x,
     value.y, value.g, value.h)
 
+proc validateTransform(value: Transform) =
+  if value.has3d:
+    for component in value.value3d:
+      validateTransformValues(component)
+  else:
+    validateTransform(value.value)
+
+proc transform3dIdentity(): Transform3D =
+  result[0] = 1
+  result[5] = 1
+  result[10] = 1
+  result[15] = 1
+
+proc transform3d(value: Transform): Transform3D =
+  if value.has3d:
+    return value.value3d
+  result = transform3dIdentity()
+  let m = value.value
+  if m.`set`:
+    result[0] = m.a
+    result[1] = m.c
+    result[3] = m.x
+    result[4] = m.b
+    result[5] = m.d
+    result[7] = m.y
+    result[12] = m.g
+    result[13] = m.h
+
+proc flat(value: Transform): scene.Affine =
+  ## Flattens a 3D transform to the element plane viewed in perspective.
+  if not value.has3d:
+    return value.value
+  let m = value.value3d
+  let divisor = m[15]
+  if divisor == 0 or not finiteTransformValue(divisor):
+    return scene.Affine(`set`: true)
+  result = scene.projective(m[0] / divisor, m[4] / divisor,
+    m[1] / divisor, m[5] / divisor, m[3] / divisor, m[7] / divisor,
+    m[12] / divisor, m[13] / divisor)
+  validateTransform(result)
+
+proc set(value: Transform): bool =
+  value.has3d or value.value.`set`
+
+proc facesAway(value: Transform): bool =
+  if not value.has3d:
+    return false
+  let m = value.value3d
+  let determinant = m[0] * (m[5] * m[10] - m[6] * m[9]) -
+    m[1] * (m[4] * m[10] - m[6] * m[8]) +
+    m[2] * (m[4] * m[9] - m[5] * m[8])
+  if determinant == 0:
+    return false
+  (m[0] * m[5] - m[1] * m[4]) / determinant < 0
+
 proc translation*(x, y: float32): Transform =
   ## Moves drawing by x and y DIPs.
   validateTransformValues(x, y)
@@ -399,10 +458,59 @@ proc skewing*(x, y: float32): Transform =
   validateTransformValues(horizontal, vertical)
   Transform(value: scene.matrix(1, vertical, horizontal, 1, 0, 0))
 
+proc rotationX*(degrees: float32): Transform =
+  ## Turns content around the horizontal axis; positive degrees tip the top away.
+  validateTransformValues(degrees)
+  let angle = degrees.float64 * PI / 180
+  let s = sin(angle).float32
+  let c = cos(angle).float32
+  var value = transform3dIdentity()
+  value[5] = c
+  value[6] = -s
+  value[9] = s
+  value[10] = c
+  Transform(value3d: value, has3d: true)
+
+proc rotationY*(degrees: float32): Transform =
+  ## Turns content around the vertical axis; positive degrees tip the right away.
+  validateTransformValues(degrees)
+  let angle = degrees.float64 * PI / 180
+  let s = sin(angle).float32
+  let c = cos(angle).float32
+  var value = transform3dIdentity()
+  value[0] = c
+  value[2] = s
+  value[8] = -s
+  value[10] = c
+  Transform(value3d: value, has3d: true)
+
+proc perspective*(distance: float32): Transform =
+  ## Views 3D transforms from `distance` DIPs in front of the origin.
+  validateTransformValues(distance)
+  if distance <= 0:
+    raise newException(ValueError, "ui: perspective distance must be positive")
+  var value = transform3dIdentity()
+  value[14] = -1'f32 / distance
+  validateTransformValues(value[14])
+  Transform(value3d: value, has3d: true)
+
 proc then*(transform, next: Transform): Transform =
   ## Applies transform first, then next.
-  result.value = scene.mul(next.value, transform.value)
-  validateTransform(result.value)
+  if not transform.has3d and not next.has3d:
+    result.value = scene.mul(next.value, transform.value)
+    validateTransform(result.value)
+    return
+  let a = next.transform3d()
+  let b = transform.transform3d()
+  result.has3d = true
+  for row in 0..<4:
+    for column in 0..<4:
+      let i = row * 4 + column
+      result.value3d[i] = a[row * 4] * b[column] +
+        a[row * 4 + 1] * b[4 + column] +
+        a[row * 4 + 2] * b[8 + column] +
+        a[row * 4 + 3] * b[12 + column]
+  result.validateTransform()
 
 proc newScrollState*(): ScrollState =
   ## Creates persistent state for a scroll container.

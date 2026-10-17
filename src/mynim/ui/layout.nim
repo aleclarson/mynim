@@ -2552,14 +2552,14 @@ proc childClip(clip: Rect; node: ElementNode; box: Rect): Rect =
     result.h = max(bottom - top, 0'f32)
 
 proc localTransform(node: ElementNode; box: Rect): scene.Affine =
-  if not node.transform.value.`set`:
+  if not node.transform.set:
     return
   let originX = box.x + box.w *
     (if node.transformOriginSet: node.transformOriginX else: 0.5'f32)
   let originY = box.y + box.h *
     (if node.transformOriginSet: node.transformOriginY else: 0.5'f32)
   validateTransformValues(originX, originY)
-  result = scene.translation(originX, originY).mul(node.transform.value)
+  result = scene.translation(originX, originY).mul(node.transform.flat())
     .mul(scene.translation(-originX, -originY))
   validateTransform(result)
 
@@ -2823,9 +2823,11 @@ proc layoutAt(c: Context; bounds: Rect; now: MonoTime;
     c.owner.draggableOffsetScratch[slot] = inherited
   result.worldTransforms = newSeq[scene.Affine](c.owner.nodes.len)
   result.visualRects = newSeq[Rect](c.owner.nodes.len)
+  result.backfaceBlocked = newSeq[bool](c.owner.nodes.len)
   for slot in 0..<c.owner.nodes.len:
-    let local = c.owner.nodes[slot].localTransform(result.rects[slot])
-    let parent = int(c.owner.nodes[slot].parent)
+    let node = c.owner.nodes[slot]
+    let local = node.localTransform(result.rects[slot])
+    let parent = int(node.parent)
     result.worldTransforms[slot] = if parent >= 0:
         scene.mul(result.worldTransforms[parent], local)
       else:
@@ -2833,6 +2835,9 @@ proc layoutAt(c: Context; bounds: Rect; now: MonoTime;
     validateTransform(result.worldTransforms[slot])
     result.visualRects[slot] = transformedRect(result.worldTransforms[slot],
       result.rects[slot])
+    result.backfaceBlocked[slot] =
+      (parent >= 0 and result.backfaceBlocked[parent]) or
+      (node.backfaceHidden and node.transform.facesAway())
   c.owner.visibleIdentities.clear()
   c.owner.visibleClipScratch.setLen(c.owner.nodes.len)
   c.owner.visibilityBlockedScratch.setLen(c.owner.nodes.len)
@@ -2843,7 +2848,8 @@ proc layoutAt(c: Context; bounds: Rect; now: MonoTime;
     let node = c.owner.nodes[slot]
     let parent = int(node.parent)
     let inheritedClip = c.owner.visibleClipScratch[parent]
-    let blocked = c.owner.visibilityBlockedScratch[parent] or node.inert
+    let blocked = c.owner.visibilityBlockedScratch[parent] or node.inert or
+      result.backfaceBlocked[slot]
     c.owner.visibilityBlockedScratch[slot] = blocked
     if not blocked and hasVisibleArea(result.visualRects[slot], inheritedClip):
       c.owner.visibleIdentities.incl(c.owner.nodes[slot].identity)
@@ -2979,6 +2985,9 @@ proc insideClips(layout: LayoutResult; slot: int; x, y: float32): bool =
   true
 
 proc pointerTransparent(layout: LayoutResult; slot: int): bool =
+  if slot >= 0 and slot < layout.backfaceBlocked.len and
+      layout.backfaceBlocked[slot]:
+    return true
   var current = slot
   while current > 0:
     if layout.owner.nodes[current].passThrough:
@@ -3368,7 +3377,8 @@ proc dispatchAccessTreeAction(layout: LayoutResult; id: uint64;
   for slot in 1..<layout.owner.nodes.len:
     if uint64(slot + 1) != id:
       continue
-    if layout.owner.effectivelyDisabled(slot) or
+    if layout.backfaceBlocked[slot] or
+        layout.owner.effectivelyDisabled(slot) or
         layout.owner.effectivelyToolbarCollapsed(slot):
       return false
     let node = layout.owner.nodes[slot]
@@ -3388,7 +3398,8 @@ proc dispatchAccessPress(layout: LayoutResult; id: uint64): bool =
   for slot in 1..<layout.owner.nodes.len:
     if uint64(slot + 1) != id:
       continue
-    if layout.owner.effectivelyDisabled(slot) or
+    if layout.backfaceBlocked[slot] or
+        layout.owner.effectivelyDisabled(slot) or
         layout.owner.effectivelyToolbarCollapsed(slot):
       return false
     let handler = layout.owner.nodes[slot].clickHandler

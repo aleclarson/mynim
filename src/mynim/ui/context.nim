@@ -420,7 +420,7 @@ type
     tabStopSet, tabStop: bool
     noInputMethod: bool
     formContainer, formField, formLabel, accessHidden, disabled, inert,
-      invalid, tooltipEnabled, tooltipOverlay, passThrough: bool
+      invalid, tooltipEnabled, tooltipOverlay, passThrough, backfaceHidden: bool
     popoverAnchor: bool
     focusOrientation: FocusOrientation
     logical: uint8
@@ -558,6 +558,7 @@ type
     rects: seq[Rect]
     worldTransforms: seq[scene.Affine]
     visualRects: seq[Rect]
+    backfaceBlocked: seq[bool]
     animating: bool
 
   LocalCell*[T] = ref object of RootObj

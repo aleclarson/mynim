@@ -220,7 +220,7 @@ proc focusableSlot(layout: LayoutResult; slot: int): bool =
       layout.generation != owner.generation or slot <= 0 or
       slot >= owner.nodes.len:
     return false
-  if owner.effectivelyDisabled(slot) or
+  if layout.backfaceBlocked[slot] or owner.effectivelyDisabled(slot) or
       owner.effectivelyToolbarCollapsed(slot):
     return false
   let node = owner.nodes[slot]
@@ -579,7 +579,8 @@ proc accessibilityTree(layout: LayoutResult;
     index = -1
   for slot in 1..<owner.nodes.len:
     let node = owner.nodes[slot]
-    if node.accessHidden or owner.effectivelyInert(slot) or
+    if node.accessHidden or layout.backfaceBlocked[slot] or
+        owner.effectivelyInert(slot) or
         not owner.inActiveModalScope(slot) or
         owner.effectivelyToolbarCollapsed(slot):
       continue
