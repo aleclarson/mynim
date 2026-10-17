@@ -53,6 +53,8 @@ type
   HandleFocusRequest = object
     handleIdentity, identity: uint64
 
+  RouterPageKey = tuple[routerIdentity, viewIdentity, pageIdentity: uint64]
+
   UiActionKind = enum
     actionShortcut, actionChange, actionSubmit
 
@@ -253,6 +255,9 @@ type
     pendingValueDrops: Table[uint64, RootRef]
     pendingFileDrops: Table[uint64, seq[string]]
     localStates: Table[uint64, Table[string, RootRef]]
+    routerPageMembers: Table[RouterPageKey, HashSet[uint64]]
+    retainedRouterPages: HashSet[RouterPageKey]
+    retainedRouteIdentities: HashSet[uint64]
     dataOverIdentity, fileOverIdentity: uint64
     dataOverOffer: transfer.Offer
     dataOverLocalIdentity, dragSourceIdentity, dragOverIdentity: uint64
@@ -344,6 +349,7 @@ type
   ElementNode = object
     parent, firstChild, lastChild, nextSibling: int32
     identity: uint64
+    routeRouterIdentity, routeViewIdentity, routePageIdentity: uint64
     childCount: uint64
     keyed: bool
     keyScope: string
@@ -636,6 +642,10 @@ proc newContext*(): Context =
   result.owner.pendingValueDrops = initTable[uint64, RootRef]()
   result.owner.pendingFileDrops = initTable[uint64, seq[string]]()
   result.owner.localStates = initTable[uint64, Table[string, RootRef]]()
+  result.owner.routerPageMembers =
+    initTable[RouterPageKey, HashSet[uint64]]()
+  result.owner.retainedRouterPages = initHashSet[RouterPageKey]()
+  result.owner.retainedRouteIdentities = initHashSet[uint64]()
   result.accordionHeaders = initTable[uint64, seq[uint64]]()
   result.theme = lightTheme()
 
@@ -1029,6 +1039,9 @@ proc retire(owner: ElementOwner) =
   owner.pendingValueDrops.clear()
   owner.pendingFileDrops.clear()
   owner.localStates.clear()
+  owner.routerPageMembers.clear()
+  owner.retainedRouterPages.clear()
+  owner.retainedRouteIdentities.clear()
   owner.dataOverIdentity = 0
   owner.fileOverIdentity = 0
   owner.dataOverOffer = transfer.Offer()
@@ -1363,6 +1376,46 @@ proc children*(e: Element; build: proc() {.closure.}): Element =
 proc buildTooltips(c: Context)
 proc buildToasts(c: Context)
 
+proc retainRouterPageState(owner: ElementOwner; routerIdentity, viewIdentity,
+                           pageIdentity: uint64) =
+  if owner != nil and routerIdentity != 0 and viewIdentity != 0 and
+      pageIdentity != 0:
+    owner.retainedRouterPages.incl((routerIdentity, viewIdentity, pageIdentity))
+
+proc retainedRouterIdentity(owner: ElementOwner; identity: uint64): bool =
+  owner != nil and identity in owner.retainedRouteIdentities
+
+proc updateRouterPageState(owner: ElementOwner) =
+  if owner == nil:
+    return
+  var current = initTable[RouterPageKey, HashSet[uint64]]()
+  for index in 1..<owner.nodes.len:
+    var ancestor = index
+    while ancestor > 0 and ancestor < owner.nodes.len:
+      let node = owner.nodes[ancestor]
+      if node.routePageIdentity != 0 and node.routeRouterIdentity != 0 and
+          node.routeViewIdentity != 0:
+        let key = (node.routeRouterIdentity, node.routeViewIdentity,
+          node.routePageIdentity)
+        if not current.hasKey(key):
+          current[key] = initHashSet[uint64]()
+        current[key].incl(owner.nodes[index].identity)
+      ancestor = int(node.parent)
+
+  for key, members in current:
+    owner.routerPageMembers[key] = members
+  var stalePages: seq[RouterPageKey]
+  for key in owner.routerPageMembers.keys:
+    if not current.hasKey(key) and key notin owner.retainedRouterPages:
+      stalePages.add(key)
+  for key in stalePages:
+    owner.routerPageMembers.del(key)
+
+  owner.retainedRouteIdentities.clear()
+  for key in owner.retainedRouterPages:
+    for identity in owner.routerPageMembers.getOrDefault(key):
+      owner.retainedRouteIdentities.incl(identity)
+
 proc build*(c: Context; view: proc(c: Context) {.closure.}) =
   ## Runs one view build pass. Elements made in view expire when it returns.
   if c == nil or c.owner.closed:
@@ -1418,6 +1471,10 @@ proc build*(c: Context; view: proc(c: Context) {.closure.}) =
     c.owner.findBarStates = initTable[uint64, FindBarState]()
     c.owner.pendingDataDrops = initTable[uint64, transfer.Drop]()
     c.owner.localStates = initTable[uint64, Table[string, RootRef]]()
+    c.owner.routerPageMembers =
+      initTable[RouterPageKey, HashSet[uint64]]()
+    c.owner.retainedRouterPages = initHashSet[RouterPageKey]()
+    c.owner.retainedRouteIdentities = initHashSet[uint64]()
     c.owner.pendingFileDrops = initTable[uint64, seq[string]]()
     c.accordion = nil
     c.accordionHeaders.clear()
@@ -1425,6 +1482,8 @@ proc build*(c: Context; view: proc(c: Context) {.closure.}) =
   c.owner.frameNow = getMonoTime()
   c.owner.animating = false
   c.owner.activeModalIdentity = 0
+  c.owner.retainedRouterPages.clear()
+  c.owner.retainedRouteIdentities.clear()
   c.owner.dialogOrdinals.clear()
   c.owner.actions.setLen(0)
   c.owner.nodes.setLen(0)
@@ -1483,40 +1542,47 @@ proc build*(c: Context; view: proc(c: Context) {.closure.}) =
       if node.parent >= 0:
         c.owner.identityParents[node.identity] =
           c.owner.nodes[int(node.parent)].identity
+    c.owner.updateRouterPageState()
     var staleBounds: seq[uint64]
     for identity in c.owner.trackedBounds:
-      if not c.owner.idSlots.hasKey(identity):
+      if not c.owner.idSlots.hasKey(identity) and
+          not c.owner.retainedRouterIdentity(identity):
         staleBounds.add(identity)
     for identity in staleBounds:
       c.owner.trackedBounds.excl(identity)
       c.owner.lastBounds.del(identity)
     var staleAccordions: seq[uint64]
     for identity in c.accordionHeaders.keys:
-      if not c.owner.idSlots.hasKey(identity):
+      if not c.owner.idSlots.hasKey(identity) and
+          not c.owner.retainedRouterIdentity(identity):
         staleAccordions.add(identity)
     for identity in staleAccordions:
       c.accordionHeaders.del(identity)
     var staleAnimations: seq[uint64]
     for identity in c.owner.animations.keys:
-      if not c.owner.idSlots.hasKey(identity):
+      if not c.owner.idSlots.hasKey(identity) and
+          not c.owner.retainedRouterIdentity(identity):
         staleAnimations.add(identity)
     for identity in staleAnimations:
       c.owner.animations.del(identity)
     var staleColorMotions: seq[uint64]
     for identity in c.owner.colorMotions.keys:
-      if not c.owner.idSlots.hasKey(identity):
+      if not c.owner.idSlots.hasKey(identity) and
+          not c.owner.retainedRouterIdentity(identity):
         staleColorMotions.add(identity)
     for identity in staleColorMotions:
       c.owner.colorMotions.del(identity)
     var staleKeyframes: seq[uint64]
     for identity in c.owner.keyframes.keys:
-      if not c.owner.idSlots.hasKey(identity):
+      if not c.owner.idSlots.hasKey(identity) and
+          not c.owner.retainedRouterIdentity(identity):
         staleKeyframes.add(identity)
     for identity in staleKeyframes:
       c.owner.keyframes.del(identity)
     var staleDialogs: seq[uint64]
     for identity, state in c.owner.dialogStates:
-      if state == nil or state.seenGeneration != c.owner.generation:
+      if (state == nil or state.seenGeneration != c.owner.generation) and
+          not c.owner.retainedRouterIdentity(identity):
         staleDialogs.add(identity)
     for identity in staleDialogs:
       c.owner.dialogStates.del(identity)
@@ -1539,60 +1605,68 @@ proc build*(c: Context; view: proc(c: Context) {.closure.}) =
     var staleNumberInputs: seq[uint64]
     for identity in c.owner.numberInputStates.keys:
       let slot = c.owner.idSlots.getOrDefault(identity, -1)
-      if slot <= 0 or slot >= c.owner.nodes.len or
-          not c.owner.nodes[slot].numberInput:
+      if (slot <= 0 or slot >= c.owner.nodes.len or
+          not c.owner.nodes[slot].numberInput) and
+          not c.owner.retainedRouterIdentity(identity):
         staleNumberInputs.add(identity)
     for identity in staleNumberInputs:
       c.owner.numberInputStates.del(identity)
     var stalePopovers: seq[uint64]
     for identity in c.owner.popoverStates.keys:
       let slot = c.owner.idSlots.getOrDefault(identity, -1)
-      if slot <= 0 or slot >= c.owner.nodes.len or
-          not c.owner.nodes[slot].popoverAnchor:
+      if (slot <= 0 or slot >= c.owner.nodes.len or
+          not c.owner.nodes[slot].popoverAnchor) and
+          not c.owner.retainedRouterIdentity(identity):
         stalePopovers.add(identity)
     for identity in stalePopovers:
       c.owner.popoverStates.del(identity)
     var staleComboBoxes: seq[uint64]
     for identity in c.owner.comboBoxStates.keys:
       let slot = c.owner.idSlots.getOrDefault(identity, -1)
-      if slot <= 0 or slot >= c.owner.nodes.len or
-          not c.owner.nodes[slot].comboBoxRoot:
+      if (slot <= 0 or slot >= c.owner.nodes.len or
+          not c.owner.nodes[slot].comboBoxRoot) and
+          not c.owner.retainedRouterIdentity(identity):
         staleComboBoxes.add(identity)
     for identity in staleComboBoxes:
       c.owner.comboBoxStates.del(identity)
     var staleColorPickers: seq[uint64]
     for identity in c.owner.colorPickerStates.keys:
       let slot = c.owner.idSlots.getOrDefault(identity, -1)
-      if slot <= 0 or slot >= c.owner.nodes.len or
-          not c.owner.nodes[slot].colorPickerRoot:
+      if (slot <= 0 or slot >= c.owner.nodes.len or
+          not c.owner.nodes[slot].colorPickerRoot) and
+          not c.owner.retainedRouterIdentity(identity):
         staleColorPickers.add(identity)
     for identity in staleColorPickers:
       c.owner.colorPickerStates.del(identity)
     var staleDateControls: seq[uint64]
     for identity in c.owner.dateControlStates.keys:
       let slot = c.owner.idSlots.getOrDefault(identity, -1)
-      if slot <= 0 or slot >= c.owner.nodes.len or
-          not c.owner.nodes[slot].dateControl:
+      if (slot <= 0 or slot >= c.owner.nodes.len or
+          not c.owner.nodes[slot].dateControl) and
+          not c.owner.retainedRouterIdentity(identity):
         staleDateControls.add(identity)
     for identity in staleDateControls:
       c.owner.dateControlStates.del(identity)
     var staleTimeControls: seq[uint64]
     for identity in c.owner.timeControlStates.keys:
       let slot = c.owner.idSlots.getOrDefault(identity, -1)
-      if slot <= 0 or slot >= c.owner.nodes.len or
-          not c.owner.nodes[slot].timeControlRoot:
+      if (slot <= 0 or slot >= c.owner.nodes.len or
+          not c.owner.nodes[slot].timeControlRoot) and
+          not c.owner.retainedRouterIdentity(identity):
         staleTimeControls.add(identity)
     for identity in staleTimeControls:
       c.owner.timeControlStates.del(identity)
     var staleEditableTexts: seq[uint64]
     for identity in c.owner.editableTextStates.keys:
-      if not c.owner.idSlots.hasKey(identity):
+      if not c.owner.idSlots.hasKey(identity) and
+          not c.owner.retainedRouterIdentity(identity):
         staleEditableTexts.add(identity)
     for identity in staleEditableTexts:
       c.owner.editableTextStates.del(identity)
     var staleLocals: seq[uint64]
     for identity in c.owner.localStates.keys:
-      if not c.owner.idSlots.hasKey(identity):
+      if not c.owner.idSlots.hasKey(identity) and
+          not c.owner.retainedRouterIdentity(identity):
         staleLocals.add(identity)
     for identity in staleLocals:
       c.owner.localStates.del(identity)

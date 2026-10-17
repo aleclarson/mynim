@@ -39,7 +39,9 @@ type
     rest: int
     level, offset: int
 
-const routerHistoryLimit = 100
+const
+  routerHistoryLimit = 100
+  routerKeptPageLimit = 10
 
 var nextRouterIdentity = 0'u64
 

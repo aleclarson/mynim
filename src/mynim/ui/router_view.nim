@@ -129,6 +129,12 @@ proc routePage(c: Context; router: Router; entry: RouteEntry; level,
     .minWidth(0).minHeight(0).focusable()
   let page = result
   let pageNode = page.node
+  if pageNode != nil:
+    pageNode[].routeRouterIdentity = router.identity
+    pageNode[].routePageIdentity = pageId
+    let parent = int(pageNode[].parent)
+    if parent > 0 and parent < c.owner.nodes.len:
+      pageNode[].routeViewIdentity = c.owner.nodes[parent].identity
   let requestPageFocus = takeFocus or (level == 0 and not inert and
     entry == router.current() and router.pendingPageFocus)
   if pageNode != nil:
@@ -172,6 +178,44 @@ proc dimPage(c: Context; page: Element; amount: float32) =
     node[].accessHidden = true
   discard page.children(proc() = discard overlay)
 
+proc keepRouterPages(c: Context; router: Router; state: RouteViewState;
+                     box: Element; entry: RouteEntry; level: int) =
+  if c == nil or c.owner == nil or router == nil or entry == nil:
+    return
+  let boxNode = box.node
+  if boxNode == nil:
+    return
+  let viewIdentity = boxNode[].identity
+  let shownPage = router.pageIdentity(entry, level)
+  var kept = 0
+  var distance = 1
+  while kept < routerKeptPageLimit and
+      (router.at - distance >= 0 or
+       router.at + distance < router.entries.len):
+    for index in [router.at - distance, router.at + distance]:
+      if index < 0 or index >= router.entries.len or
+          kept == routerKeptPageLimit:
+        continue
+      let candidate = router.entries[index]
+      if candidate.pages.len <= level:
+        continue
+      if level > 0 and (entry.pages.len < level or
+          candidate.pages[level - 1] != entry.pages[level - 1]):
+        continue
+      let page = candidate.pages[level]
+      if page == shownPage:
+        continue
+      if state != nil and state.leaving != nil and state.direction != 0 and
+          state.leaving.pages.len > level and
+          page == state.leaving.pages[level]:
+        continue
+      let key = (router.identity, viewIdentity, page)
+      if key in c.owner.retainedRouterPages:
+        continue
+      c.owner.retainRouterPageState(router.identity, viewIdentity, page)
+      inc kept
+    inc distance
+
 proc buildRouteView(c: Context; router: Router; state: RouteViewState;
                     box: Element; entry: RouteEntry; level, offset: int;
                     baseParams: seq[RouteParam];
@@ -212,6 +256,7 @@ proc buildRouteView(c: Context; router: Router; state: RouteViewState;
     state.announcing = false
     c.announce(entry.title)
   state.focusing = false
+  c.keepRouterPages(router, state, box, entry, level)
   result = box
 
 proc view*(router: Router; c: Context;
