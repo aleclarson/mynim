@@ -69,6 +69,61 @@ proc updateFileUrl(updates: JsonNode; filename, version: string): string =
       "mygo.json: updates.url must be an HTTPS URL")
   baseUrl.strip(chars = {'/'}) & "/" & escapePathSegment(filename)
 
+proc runtimeUpdateSettings*(config: JsonNode; target: string):
+    tuple[feed, publicKey: string] =
+  ## Validates the app-side update settings and returns their link-time values.
+  if config.kind != JObject or not config.hasKey("updates") or
+      config["updates"].kind == JNull:
+    return
+  let updates = config["updates"]
+  if updates.kind != JObject:
+    raise newException(ValueError, "mygo.json: updates must be an object")
+  result.publicKey = configString(updates, "publicKey", "").strip()
+  if result.publicKey.len == 0:
+    raise newException(ValueError,
+      "mygo.json: updates needs the publicKey of mygo keygen")
+  var decodedPublic: string
+  try:
+    decodedPublic = decode(result.publicKey)
+  except ValueError:
+    raise newException(ValueError, "updates.publicKey: invalid update key")
+  if decodedPublic.len != 32:
+    raise newException(ValueError, "updates.publicKey: invalid update key")
+
+  let github = configString(updates, "github", "")
+  let baseUrl = configString(updates, "url", "")
+  if github.len > 0 and baseUrl.len > 0:
+    raise newException(ValueError,
+      "mygo.json: updates needs either github or url, not both")
+  if github.len > 0:
+    let slash = github.find('/')
+    if slash <= 0 or slash == github.high or
+        github.find('/', slash + 1) >= 0:
+      raise newException(ValueError,
+        "mygo.json: updates.github must be owner/name")
+    var prefix = configString(updates, "tagPrefix", "v")
+    if prefix.len == 0:
+      prefix = "v"
+    let manifestName = "update-" & target & ".json"
+    if prefix == "v":
+      result.feed = "https://github.com/" & github &
+        "/releases/latest/download/" & manifestName
+    else:
+      result.feed = "mygo+github-tags:" & escapePathSegment(github) & "/" &
+        escapePathSegment(prefix) & "/" & escapePathSegment(manifestName)
+  elif baseUrl.len > 0:
+    let parsed = try: parseUri(baseUrl)
+      except CatchableError:
+        raise newException(ValueError,
+          "mygo.json: updates.url must be an HTTPS URL")
+    if parsed.scheme.toLowerAscii() != "https" or parsed.hostname.len == 0:
+      raise newException(ValueError,
+        "mygo.json: updates.url must be an HTTPS URL")
+    result.feed = baseUrl.strip(chars = {'/'}) & "/update-" & target & ".json"
+  else:
+    raise newException(ValueError,
+      "mygo.json: updates needs either github or url")
+
 proc signingKey(updates: JsonNode; projectDir, publicKey: string): string =
   var encoded = getEnv("MYGO_UPDATER_PRIVATE_KEY").strip()
   if encoded.len == 0:

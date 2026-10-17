@@ -50,8 +50,16 @@ proc hostTarget*(): tuple[os, arch, path: string] =
   let targetArch = hostCPU
   (targetOs, targetArch, targetOs & "/" & targetArch)
 
+proc addStringDefine(args: var seq[string]; name, value: string) =
+  for ch in value:
+    if ord(ch) < 32 or ord(ch) == 127:
+      raise newException(ValueError,
+        "mygo build: " & name & " cannot contain control characters")
+  args.add("-d:" & name & "=" & value)
+
 proc compileApp(projectDir, source, output, cache: string; debug,
-    embedFrontend: bool):
+    embedFrontend: bool; name, identifier, version, updateFeed,
+    updateKey: string):
     tuple[code: int, log: string] =
   let nim = findExe("nim")
   if nim.len == 0:
@@ -61,6 +69,12 @@ proc compileApp(projectDir, source, output, cache: string; debug,
     args.add "-d:release"
   if embedFrontend:
     args.add "-d:mynimGeneratedFrontend"
+  addStringDefine(args, "packageName", name)
+  addStringDefine(args, "packageIdentifier", identifier)
+  addStringDefine(args, "packageVersion", version)
+  if updateFeed.len > 0:
+    addStringDefine(args, "packageUpdateFeed", updateFeed)
+    addStringDefine(args, "packageUpdateKey", updateKey)
   when hostOS == "windows":
     args.add "--app:gui"
   args.add "--out:" & output
@@ -326,6 +340,8 @@ proc runBuild*(args: seq[string]): int =
     let identifier = configString(config, "identifier",
       "com.mygo." & slug(name).replace("-", ""))
     let version = configString(config, "version", "0.1.0")
+    let updateSettings = updateArtifacts.runtimeUpdateSettings(config,
+      targetOs & "-" & targetArch)
     var githubRelease: releasePublisher.GitHubRelease
     if upload:
       githubRelease = releasePublisher.prepareGitHubRelease(config,
@@ -419,7 +435,8 @@ proc runBuild*(args: seq[string]): int =
       createDir(resourcesDir)
       let binary = macOSDir / executable
       let compiled = compileApp(projectDir, compileSource, binary, cache,
-        debug, configuredFrontend.len > 0)
+        debug, configuredFrontend.len > 0, name, identifier, version,
+        updateSettings.feed, updateSettings.publicKey)
       if compiled.code != 0:
         stderr.write(compiled.log)
         return 1
@@ -440,7 +457,8 @@ proc runBuild*(args: seq[string]): int =
     else:
       let binary = stage / executable
       let compiled = compileApp(projectDir, compileSource, binary, cache,
-        debug, configuredFrontend.len > 0)
+        debug, configuredFrontend.len > 0, name, identifier, version,
+        updateSettings.feed, updateSettings.publicKey)
       if compiled.code != 0:
         stderr.write(compiled.log)
         return 1

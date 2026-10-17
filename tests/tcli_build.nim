@@ -16,6 +16,19 @@ proc runFrontendCheck(binary, workingDir: string): int =
   for key, value in envPairs():
     env[key] = value
   env["MYGO_FRONTEND_TEST"] = "1"
+  env["MYNIM_PACKAGE_TEST"] = "1"
+  let process = startProcess(binary, workingDir = workingDir, env = env,
+    options = {poUsePath, poParentStreams})
+  try:
+    result = process.waitForExit()
+  finally:
+    process.close()
+
+proc runUpdaterCheck(binary, workingDir: string): int =
+  var env = newStringTable(modeCaseSensitive)
+  for key, value in envPairs():
+    env[key] = value
+  env["MYNIM_UPDATER_TEST"] = "1"
   let process = startProcess(binary, workingDir = workingDir, env = env,
     options = {poUsePath, poParentStreams})
   try:
@@ -103,6 +116,17 @@ import mynim
 
 if getEnv("MYNIM_GENERATE").len > 0:
   writeFile("client-generation-ran.txt", "yes")
+
+if getEnv("MYNIM_PACKAGE_TEST") == "1":
+  if app.name() != "Ada & Counter" or app.version() != "0.1.0":
+    quit(4)
+  if Updater.enabled():
+    quit(5)
+
+if getEnv("MYNIM_UPDATER_TEST") == "1":
+  if not Updater.enabled():
+    quit(6)
+  quit(0)
 
 when defined(mynimGeneratedFrontend):
   import mynim/internal/vfs as mynimVfs
@@ -193,10 +217,16 @@ app.run()
   createDir(project / "locales")
   writeFile(project / "locales" / "en.json", """{"hello": "Hello"}""")
   writeFile(project / "locales" / "de.json", """{"hello": "Hallo"}""")
-  writeFile(project / "src" / "main.nim", """import mynim
+  writeFile(project / "src" / "main.nim", """import std/os
+import mynim
 import catalog_gen
 
 doAssert catalog_gen.inLocale("de").hello() == "Hallo"
+if getEnv("MYNIM_UPDATER_TEST") == "1":
+  if app.name() != "Ada & Counter" or app.version() != "0.1.0" or
+      not Updater.enabled():
+    quit(6)
+  quit(0)
 app.run()
 """)
   doAssert runBuild(@["-skip-dmg", "-o", output, project]) == 0
@@ -263,6 +293,7 @@ exit 0
     let manifest = target / ("update-" & targetOs & "-" & hostCPU & ".json")
     doAssert fileExists(archive)
     doAssert parseFile(manifest)["version"].getStr() == "0.1.0"
+    doAssert runUpdaterCheck(binary, project) == 0
     ghCalls = readFile(ghLog).splitLines()
     if ghCalls.len > 0 and ghCalls[^1].len == 0:
       ghCalls.setLen(ghCalls.len - 1)

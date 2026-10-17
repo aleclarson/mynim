@@ -52,6 +52,12 @@ when defined(posix):
     updates["privateKey"] = %privatePath
     config["updates"] = updates
 
+    let githubSettings = runtimeUpdateSettings(config, "darwin-arm64")
+    doAssert githubSettings.feed ==
+      "mygo+github-tags:owner%2Fapp/desktop-v/" &
+      "update-darwin-arm64.json"
+    doAssert githubSettings.publicKey == encode(publicKey)
+
     let previousKey = getEnv("MYGO_UPDATER_PRIVATE_KEY")
     putEnv("MYGO_UPDATER_PRIVATE_KEY", "")
     var files: seq[string]
@@ -103,6 +109,10 @@ when defined(posix):
     urlUpdates["url"] = %"https://downloads.example.test/my-app/"
     urlUpdates["deltas"] = %0
     urlConfig["updates"] = urlUpdates
+    let urlSettings = runtimeUpdateSettings(urlConfig, "linux-amd64")
+    doAssert urlSettings.feed ==
+      "https://downloads.example.test/my-app/update-linux-amd64.json"
+    doAssert urlSettings.publicKey == encode(publicKey)
     let urlStage = temporary / "url-stage"
     createDir(urlStage / "sample-app.app" / "Contents" / "MacOS")
     writeFile(urlStage / "sample-app.app" / "Contents" / "MacOS" /
