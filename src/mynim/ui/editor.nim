@@ -1372,6 +1372,61 @@ proc paragraphMove(snapshot: Snapshot; runeOffset: int; direction: int): int =
     if isBlank(line) and not isBlank(line - direction):
       return document.lineRange(line).start
 
+const bracketScanLines = 1000
+
+proc editorBracketPairs(state: State): seq[tuple[open, close: char]] =
+  let language = state.buffer.language()
+  if language == nil:
+    return @[('(', ')'), ('[', ']'), ('{', '}')]
+  for pair in language.brackets:
+    if pair.open.len == 1 and pair.close.len == 1 and pair.open[0] != '<':
+      result.add((pair.open[0], pair.close[0]))
+
+proc matchingBracketsAround(state: State; snapshot: Snapshot; offset: int):
+    tuple[openAt, closeAt: int, found: bool] =
+  let pairs = state.editorBracketPairs()
+  if pairs.len == 0:
+    return
+  let language = state.buffer.language()
+  let caretLine = snapshot.pos(offset).line
+  let firstLine = max(0, caretLine - bracketScanLines)
+  let lastLine = min(snapshot.lineCount() - 1,
+    caretLine + bracketScanLines)
+  var openings = newSeq[seq[int]](pairs.len)
+  var bestWidth = high(int)
+  var bestOpen = -1
+  var bestClose = -1
+  for lineIndex in firstLine .. lastLine:
+    let text = snapshot.line(lineIndex)
+    let start = snapshot.lineStart(lineIndex)
+    for column, character in text:
+      var pairIndex = -1
+      var isOpen = false
+      for index, pair in pairs:
+        if character == pair.open:
+          pairIndex = index
+          isOpen = true
+          break
+        if character == pair.close:
+          pairIndex = index
+          break
+      if pairIndex < 0 or state.tokenKindAt(snapshot, language,
+          lineIndex, column) in {syntax.tokenString, syntax.tokenComment,
+          syntax.tokenRegexp, syntax.tokenEscape, syntax.tokenCode}:
+        continue
+      if isOpen:
+        openings[pairIndex].add(start + column)
+      elif openings[pairIndex].len > 0:
+        let openAt = openings[pairIndex].pop()
+        let closeAt = start + column
+        let width = closeAt - openAt
+        if openAt <= offset and offset <= closeAt + 1 and width < bestWidth:
+          bestWidth = width
+          bestOpen = openAt
+          bestClose = closeAt
+  if bestOpen >= 0:
+    return (bestOpen, bestClose, true)
+
 proc moveCaret(state: State; command: Command): bool =
   let snapshot = state.buffer.snapshot()
   let selection = state.caretSelection
@@ -1380,7 +1435,8 @@ proc moveCaret(state: State; command: Command): bool =
     Command.selectWordRight, Command.selectSubwordLeft,
     Command.selectSubwordRight, Command.selectLineStart,
     Command.selectLineEnd, Command.selectDocStart, Command.selectDocEnd,
-    Command.selectParagraphUp, Command.selectParagraphDown}
+    Command.selectParagraphUp, Command.selectParagraphDown,
+    Command.selectToBracket}
   let movingLeft = command in {
     Command.moveLeft, Command.selectLeft, Command.moveWordLeft,
     Command.selectWordLeft, Command.moveSubwordLeft,
@@ -1419,9 +1475,23 @@ proc moveCaret(state: State; command: Command): bool =
       targetRune = snapshot.paragraphMove(currentRune, -1)
     of Command.moveParagraphDown, Command.selectParagraphDown:
       targetRune = snapshot.paragraphMove(currentRune, 1)
+    of Command.moveToBracket, Command.selectToBracket:
+      let matched = state.matchingBracketsAround(snapshot, selection.head)
+      if not matched.found:
+        return false
+      let inside = selection.head >= matched.openAt + 1 and
+        selection.head <= matched.closeAt
+      if selection.head >= matched.closeAt and
+          selection.head <= matched.closeAt + 1:
+        targetByte = if inside: matched.openAt + 1 else: matched.openAt
+      elif inside:
+        targetByte = matched.closeAt
+      else:
+        targetByte = matched.closeAt + 1
     else:
       return false
-    targetByte = snapshot.document.byteOffset(targetRune)
+    if command notin {Command.moveToBracket, Command.selectToBracket}:
+      targetByte = snapshot.document.byteOffset(targetRune)
   let anchor = if selecting: selection.anchor else: targetByte
   if anchor == selection.anchor and targetByte == selection.head:
     return false
@@ -1720,6 +1790,7 @@ proc run*(state: State; command: Command): bool =
       Command.moveWordLeft, Command.moveWordRight,
       Command.moveSubwordLeft, Command.moveSubwordRight,
       Command.moveParagraphUp, Command.moveParagraphDown,
+      Command.moveToBracket, Command.selectToBracket,
       Command.selectLeft, Command.selectRight, Command.selectWordLeft,
       Command.selectWordRight, Command.selectSubwordLeft,
       Command.selectSubwordRight, Command.selectLineStart,

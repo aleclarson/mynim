@@ -540,6 +540,24 @@ doAssert editorState.run(editor.Command.uppercase)
 doAssert $editorState.buffer == "$FOO",
   "case conversion at a caret should include language word characters"
 editorState.buffer.setLanguage(editor.languageNamed("go"))
+let bracketText = "g(f(x))"
+editorState.buffer.set(bracketText)
+editorState.select(4, 4)
+doAssert editorState.run(editor.Command.moveToBracket)
+doAssert editorState.cursor() == 5
+editorState.select(bracketText.len, bracketText.len)
+doAssert editorState.run(editor.Command.moveToBracket)
+doAssert editorState.cursor() == 1
+editorState.select(4, 4)
+doAssert editorState.run(editor.Command.selectToBracket)
+doAssert editorState.selectedText() == "x"
+editorState.buffer.setLanguage(editor.languageNamed("JavaScript"))
+let quotedBracketPrefix = "const value = \""
+editorState.buffer.set(quotedBracketPrefix & "(x)\"")
+editorState.select(quotedBracketPrefix.len + 1, quotedBracketPrefix.len + 1)
+doAssert not editorState.run(editor.Command.moveToBracket),
+  "bracket navigation should skip string tokens"
+editorState.buffer.setLanguage(editor.languageNamed("go"))
 editorState.buffer.set("  value")
 editorState.select(2, 2)
 doAssert editorState.run(editor.Command.deleteToLineStart)
