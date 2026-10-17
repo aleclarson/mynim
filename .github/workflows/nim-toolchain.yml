@@ -1,0 +1,38 @@
+name: npm Nim toolchain
+
+on:
+  push:
+    paths:
+      - 'packages/nim-toolchain/**'
+      - '.github/workflows/nim-toolchain.yml'
+  pull_request:
+    paths:
+      - 'packages/nim-toolchain/**'
+      - '.github/workflows/nim-toolchain.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, ubuntu-24.04-arm, macos-15, macos-15-intel, windows-2025]
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        working-directory: packages/nim-toolchain
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          package-manager-cache: false
+      - name: Check the Windows C compiler
+        if: runner.os == 'Windows'
+        run: gcc --version
+      - run: npm test
+      - run: npm run test:smoke
+      - run: npm pack --dry-run

@@ -1,0 +1,46 @@
+{
+  "name": "nim-toolchain",
+  "version": "0.1.0",
+  "description": "A pinned native Nim compiler, standard library, and Nimble for npm projects",
+  "type": "module",
+  "license": "MIT",
+  "author": "Alec Larson",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/aleclarson/mynim.git",
+    "directory": "packages/nim-toolchain"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "bin": {
+    "nim-toolchain": "bin/nim.js",
+    "nim": "bin/nim.js",
+    "nimble": "bin/nimble.js",
+    "nimsuggest": "bin/nimsuggest.js"
+  },
+  "exports": {
+    ".": {
+      "types": "./index.d.ts",
+      "default": "./index.js"
+    }
+  },
+  "files": [
+    "bin/",
+    "lib/",
+    "index.js",
+    "index.d.ts",
+    "release.json"
+  ],
+  "scripts": {
+    "test": "node --test test/*.test.js",
+    "test:smoke": "node test/smoke.js",
+    "prepublishOnly": "npm test"
+  },
+  "keywords": [
+    "nim",
+    "nimble",
+    "compiler",
+    "toolchain"
+  ]
+}
