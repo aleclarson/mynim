@@ -5,11 +5,14 @@
 ## PORT STATUS: regional preferences, localized number formatting, plural
 ## rules, names, and common date skeletons use CLDR data. ICU message
 ## parsing, choice evaluation, number styles, date/time styles, and the
-## en-XA/ar-XB pseudo locales are supported. Full date pattern matching and
-## catalog-backed lookup/accessors are still being ported.
+## en-XA/ar-XB pseudo locales are supported, along with runtime catalog
+## lookup and locale fallback. Full date pattern matching and generated typed
+## catalog accessors are still being ported.
 
-import std/[strutils, tables, times, atomics, unicode, math]
+import std/[strutils, tables, times, atomics, unicode, math, json, algorithm,
+  locks]
 import ./i18n/cldr_regions as cldr
+import ./i18n/cldr_parents as parentData
 import ./i18n/cldr_format_data as formatData
 import ./i18n/message as messageFormat
 import ./i18n/plural as pluralRuntime
@@ -56,6 +59,17 @@ type
     ## or 0 when it is not known. The zero Region's weekday is ignored.
     hourCycle*: int
 
+  CatalogFile* = object
+    ## One ARB-style catalog: a canonical BCP 47 locale and its JSON text.
+    locale*: string
+    contents*: string
+
+  Catalog* = ref object
+    sourceTag: string
+    namespaceTag: string
+    localeTags: seq[string]
+    messages: Table[string, Table[string, messageFormat.Message]]
+
 const
   pluralZero* = pluralRuntime.pluralZero
   pluralOne* = pluralRuntime.pluralOne
@@ -70,12 +84,6 @@ const
   pseudoDoubled* = "en-XB"
   pseudoBrackets* = "en-XC"
   pseudoBidi* = "ar-XB"
-
-proc isPseudo*(locale: string): bool =
-  ## Whether locale is a pseudo locale.
-  let normalized = normalize(locale)
-  normalized == pseudoAccented or normalized == pseudoDoubled or
-    normalized == pseudoBrackets or normalized == pseudoBidi
 
 # modifierScripts are the scripts the modifiers of POSIX locales name.
 const modifierScripts = {
@@ -132,6 +140,11 @@ proc normalize*(locale: string): string =
   if script != "": res.add "-" & script
   if region != "": res.add "-" & region
   res
+
+proc isPseudo*(locale: string): bool =
+  ## Whether locale is a pseudo locale.
+  let normalized = normalize(locale)
+  normalized in [pseudoAccented, pseudoDoubled, pseudoBrackets, pseudoBidi]
 
 proc pluralName*(plural: Plural): string = pluralRuntime.pluralName(plural)
 
@@ -326,16 +339,29 @@ proc formatLocale*(r: Region; lang: string): string =
   t & "-u-" & ext.join("-")
 
 var appCatalogLanguages {.global.}: seq[string]
+var catalogRegistryLock {.global.}: Lock
+var registeredCatalogs {.global.}: seq[Catalog]
+initLock(catalogRegistryLock)
 
 proc registerLanguages*(tags: seq[string]) =
-  ## Registers the languages an app's catalog adds (i18n.Register's
-  ## effect on Languages); the full catalog machinery lands with the
-  ## rest of the i18n port.
-  appCatalogLanguages = tags
+  ## Registers app catalog languages for generated-accessor integrations.
+  withLock catalogRegistryLock:
+    appCatalogLanguages.setLen(0)
+    for tag in tags:
+      let normalized = normalize(tag)
+      if normalized != "" and normalized notin appCatalogLanguages:
+        appCatalogLanguages.add normalized
 
 proc languages*(): seq[string] =
-  ## The languages of the registered catalogs (i18n.Languages).
-  appCatalogLanguages
+  ## The unique languages shipped by registered app catalogs, sorted.
+  var hasCatalogs = false
+  withLock catalogRegistryLock:
+    for tag in appCatalogLanguages: result.add tag
+    for catalog in registeredCatalogs:
+      hasCatalogs = true
+      for tag in catalog.localeTags:
+        if tag notin result: result.add tag
+  if hasCatalogs: result.sort()
 
 proc firstWeekday*(tag: string): WeekDay =
   ## The day the locale's calendars start weeks on, including its
@@ -1364,19 +1390,20 @@ proc formatMessageNodes(nodes: seq[messageFormat.MessageNode];
       of messageFormat.messageText, messageFormat.messagePound:
         discard
 
-proc format*(message: messageFormat.Message; locale: string;
-    args: varargs[messageFormat.FormatArg]): string =
-  ## Formats an ICU message using localized number/date data and CLDR plural
-  ## rules. Missing arguments keep their `{name}` spelling. en-XA accents and
-  ## pads message text; ar-XB adds bidirectional test markers.
+proc formatMessage(message: messageFormat.Message; locale, messageLocale: string;
+    args: openArray[messageFormat.FormatArg]): string =
   if message.isNil: return ""
   var values = initTable[string, messageFormat.FormatArg]()
   for arg in args:
     values[arg.name] = arg
   let tag = normalize(locale)
   let pseudoLocale = isPseudo(locale)
-  let ruleLocale = if pseudoLocale: "en" else: tag
-  let formatLocale = if pseudoLocale: "en" else: locale
+  let ruleLocale = if normalize(messageLocale) == "": "en"
+    else: normalize(messageLocale)
+  let formatLocale = if pseudoLocale:
+      (if ruleLocale == "": "en" else: ruleLocale)
+    elif locale == "": ruleLocale
+    else: locale
   var pseudo = MessagePseudo()
   if tag == pseudoAccented:
     pseudo.kind = messagePseudoAccent
@@ -1396,23 +1423,272 @@ proc format*(message: messageFormat.Message; locale: string;
       inc index
     result = "[" & padded & "]"
 
+proc format*(message: messageFormat.Message; locale: string;
+    args: varargs[messageFormat.FormatArg]): string =
+  ## Formats an ICU message using localized number/date data and CLDR plural
+  ## rules. Missing arguments keep their `{name}` spelling. en-XA accents and
+  ## pads message text; ar-XB adds bidirectional test markers.
+  let messageLocale = if isPseudo(locale): "en" else: locale
+  formatMessage(message, locale, messageLocale, args)
+
+proc parent*(tag: string): string =
+  ## Returns the CLDR parent locale, or "" when tag is its root.
+  ## Unicode extensions and variants are removed before finding the parent.
+  var base = tag.strip()
+  let at = base.find('@')
+  if at >= 0: base.setLen(at)
+  let dot = base.find('.')
+  if dot >= 0: base.setLen(dot)
+  base = base.replace('_', '-')
+  let rawParts = base.split('-')
+  for i in 1 ..< rawParts.len:
+    let part = rawParts[i]
+    if part.len == 1: break
+    let isVariant = (part.len >= 5 and part.len <= 8 and
+        part.allCharsInSet({'a'..'z', 'A'..'Z', '0'..'9'})) or
+      (part.len == 4 and part[0] in {'0'..'9'} and
+        part.allCharsInSet({'a'..'z', 'A'..'Z', '0'..'9'}))
+    if isVariant:
+      return normalize(rawParts[0 ..< i].join("-"))
+
+  let normalized = normalize(tag)
+  if normalized == "": return ""
+  var low = 0
+  var high = parentData.parentLocales.len
+  while low < high:
+    let mid = low + (high - low) div 2
+    if parentData.parentLocales[mid].child < normalized:
+      low = mid + 1
+    else:
+      high = mid
+  if low < parentData.parentLocales.len and
+      parentData.parentLocales[low].child == normalized:
+    return parentData.parentLocales[low].parent
+
+  let separator = normalized.rfind('-')
+  if separator < 0: return ""
+  let language = normalized[0 ..< normalized.find('-')]
+  let rest = normalized[normalized.find('-') + 1 .. ^1]
+  if rest.len == 4 and rest.allCharsInSet({'a'..'z', 'A'..'Z'}):
+    let usual = likelyParts(language)
+    if usual.script != "" and usual.script != rest:
+      return ""
+  normalized[0 ..< separator]
+
+proc parentChain(tag: string): seq[string] =
+  var current = normalize(tag)
+  while current != "" and result.len < 8:
+    result.add current
+    current = parent(current)
+
 proc `match`*(want, supported: seq[string]): string =
-  ## The supported tag want likes best (i18n's match): an exact
-  ## normalized tag first, then its language with a different
-  ## region, then the language itself.
+  ## Returns the supported language that best matches the preferences,
+  ## preferring exact and CLDR-parent matches before script-compatible
+  ## language matches.
   var norm: seq[string]
-  for t in supported:
-    let n = normalize(t)
-    if n != "": norm.add n
-  for w0 in want:
-    let w = normalize(w0)
-    if w == "": continue
-    if w in norm: return w
-    let wl = w.split('-')[0]
-    var langMatch = ""
-    for t in norm:
-      if t.split('-')[0] == wl:
-        langMatch = t
-        break
-    if langMatch != "": return langMatch
+  for tag in supported:
+    let normalized = normalize(tag)
+    if normalized != "" and normalized notin norm:
+      norm.add normalized
+  for preferred in want:
+    let normalized = normalize(preferred)
+    if normalized == "": continue
+    if normalized in norm: return normalized
+    for candidate in parentChain(normalized):
+      if candidate in norm: return candidate
+    let desired = likelyParts(normalized)
+    if desired.language == "": continue
+    for candidate in norm:
+      let likely = likelyParts(candidate)
+      if likely.language == desired.language and
+          likely.script == desired.script:
+        return candidate
   ""
+
+type CatalogLookupSource = object
+  catalog: Catalog
+  prefix: string
+
+proc catalogFile*(locale, contents: string): CatalogFile =
+  ## Names one ARB-style JSON catalog by its canonical locale tag.
+  CatalogFile(locale: locale, contents: contents)
+
+proc catalogMessages(contents: string):
+    Table[string, messageFormat.Message] =
+  result = initTable[string, messageFormat.Message]()
+  var document: JsonNode
+  try:
+    document = parseJson(contents)
+  except CatchableError:
+    return
+  if document.kind != JObject: return
+  for key, value in document:
+    if key.startsWith("@") or value.kind != JString: continue
+    try:
+      result[key] = messageFormat.parseMessage(value.getStr())
+    except CatchableError:
+      discard
+
+proc newCatalog*(source: string; files: openArray[CatalogFile]): Catalog =
+  ## Builds an app catalog from canonical-locale JSON texts. Invalid JSON
+  ## documents and invalid message strings are ignored and fall back as
+  ## missing messages do.
+  let sourceTag = normalize(source)
+  if sourceTag == "" or sourceTag != source or isPseudo(sourceTag):
+    raise newException(ValueError,
+      "i18n: the source language " & source.escape() & " is not a language")
+  result = Catalog(sourceTag: sourceTag)
+  result.messages = initTable[string, Table[string, messageFormat.Message]]()
+  for file in files:
+    let tag = normalize(file.locale)
+    if tag == "" or tag != file.locale:
+      raise newException(ValueError, "i18n: " & file.locale.escape() &
+        " is not named after a canonical BCP 47 tag")
+    if isPseudo(tag):
+      raise newException(ValueError,
+        "i18n: pseudo locales come from the source language and have no files")
+    if result.messages.hasKey(tag):
+      raise newException(ValueError, "i18n: duplicate catalog for " & tag)
+    result.messages[tag] = catalogMessages(file.contents)
+    if tag != sourceTag: result.localeTags.add tag
+  if not result.messages.hasKey(sourceTag):
+    raise newException(ValueError,
+      "i18n: the catalog has no " & sourceTag & ".json, the source messages")
+  result.localeTags.sort()
+  result.localeTags.insert(sourceTag, 0)
+
+proc newLibraryCatalog*(source: string; namespace: string;
+    files: openArray[CatalogFile]): Catalog =
+  ## Builds a library catalog. App catalogs may override its keys as
+  ## `<namespace>.<key>` without registering the library itself.
+  if namespace.len == 0 or namespace.contains({' ', '.', '@'}):
+    raise newException(ValueError, "i18n: invalid catalog namespace " &
+      namespace.escape())
+  result = newCatalog(source, files)
+  result.namespaceTag = namespace
+
+proc source*(catalog: Catalog): string =
+  if catalog.isNil: "" else: catalog.sourceTag
+
+proc namespace*(catalog: Catalog): string =
+  if catalog.isNil: "" else: catalog.namespaceTag
+
+proc languages*(catalog: Catalog): seq[string] =
+  if catalog.isNil: return
+  withLock catalogRegistryLock:
+    for tag in catalog.localeTags: result.add tag
+
+proc add*(catalog: Catalog; files: openArray[CatalogFile]) =
+  ## Adds translations to a catalog. A locale already present is an error.
+  if catalog.isNil:
+    raise newException(ValueError, "i18n: cannot add to a nil catalog")
+  var additions = initTable[string, Table[string, messageFormat.Message]]()
+  for file in files:
+    let tag = normalize(file.locale)
+    if tag == "" or tag != file.locale:
+      raise newException(ValueError, "i18n: " & file.locale.escape() &
+        " is not named after a canonical BCP 47 tag")
+    if isPseudo(tag):
+      raise newException(ValueError,
+        "i18n: pseudo locales come from the source language and have no files")
+    if additions.hasKey(tag):
+      raise newException(ValueError, "i18n: duplicate catalog for " & tag)
+    additions[tag] = catalogMessages(file.contents)
+  withLock catalogRegistryLock:
+    for tag in additions.keys:
+      if catalog.messages.hasKey(tag):
+        raise newException(ValueError, "i18n: the catalog has " & tag & " already")
+    for tag, messages in additions:
+      catalog.messages[tag] = messages
+      catalog.localeTags.add tag
+    if additions.len > 0:
+      let sourceTag = catalog.sourceTag
+      var translations: seq[string]
+      for tag in catalog.localeTags:
+        if tag != sourceTag: translations.add tag
+      translations.sort()
+      catalog.localeTags = @[sourceTag] & translations
+
+proc register*(catalog: Catalog) =
+  ## Registers an app catalog, making its locales available to
+  ## `languages()` and its namespaced keys available to library catalogs.
+  if catalog.isNil:
+    raise newException(ValueError, "i18n: cannot register a nil catalog")
+  if catalog.namespaceTag != "":
+    raise newException(ValueError, "i18n: cannot register a library catalog")
+  withLock catalogRegistryLock:
+    if catalog in registeredCatalogs: return
+    registeredCatalogs.add catalog
+
+proc registeredApps(): seq[Catalog] =
+  withLock catalogRegistryLock:
+    for catalog in registeredCatalogs: result.add catalog
+
+proc catalogSources(catalog: Catalog): seq[CatalogLookupSource] =
+  if catalog.namespaceTag == "":
+    return @[CatalogLookupSource(catalog: catalog)]
+  for app in registeredApps():
+    result.add CatalogLookupSource(catalog: app,
+      prefix: catalog.namespaceTag & ".")
+  result.add CatalogLookupSource(catalog: catalog)
+
+proc catalogCandidates(catalog: Catalog; locale: string;
+    sources: seq[CatalogLookupSource]): seq[string] =
+  var candidates: seq[string]
+  var added = initTable[string, bool]()
+  proc add(tags: seq[string]) =
+    for tag in tags:
+      if tag notin added:
+        added[tag] = true
+        candidates.add tag
+
+  let tag = normalize(locale)
+  if tag != "" and not isPseudo(locale):
+    add(parentChain(tag))
+    for source in sources:
+      let supported = source.catalog.languages()
+      if tag in supported: continue
+      let selected = match(@[tag], supported)
+      if selected != "": add(parentChain(selected))
+  if sources.len > 1:
+    add(parentChain(sources[0].catalog.sourceTag))
+  add(parentChain(catalog.sourceTag))
+  result = candidates
+
+proc catalogMessage(catalog: Catalog; locale, key: string):
+    messageFormat.Message
+
+proc lookup(catalog: Catalog; locale, key: string):
+    tuple[message: messageFormat.Message, language: string, found: bool] =
+  if catalog.isNil: return
+  let sources = catalogSources(catalog)
+  for tag in catalogCandidates(catalog, locale, sources):
+    for source in sources:
+      let found = source.catalog.catalogMessage(tag, source.prefix & key)
+      if not found.isNil:
+        return (found, tag, true)
+
+proc catalogMessage(catalog: Catalog; locale, key: string):
+    messageFormat.Message =
+  withLock catalogRegistryLock:
+    let messages = catalog.messages.getOrDefault(locale)
+    result = messages.getOrDefault(key)
+
+proc message*(catalog: Catalog; locale, key: string):
+    tuple[message: messageFormat.Message, language: string, found: bool] =
+  ## Returns the best matching message and its catalog language.
+  lookup(catalog, locale, key)
+
+proc format*(catalog: Catalog; locale, key: string;
+    args: varargs[messageFormat.FormatArg]): string =
+  ## Formats a catalog message, falling back through CLDR parents and then
+  ## to its source language. Missing keys return their key unchanged.
+  let found = lookup(catalog, locale, key)
+  if not found.found: return key
+  let displayLocale = if locale == "": found.language else: locale
+  formatMessage(found.message, displayLocale, found.language, args)
+
+proc format*(catalog: Catalog; key: string;
+    args: varargs[messageFormat.FormatArg]): string =
+  ## Formats a message in the app's current locale.
+  format(catalog, locale(), key, args)

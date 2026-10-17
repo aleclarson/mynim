@@ -9,6 +9,27 @@ block locale_normalization:
   doAssert i18n.normalize("sr_RS@latin") == "sr-Latn-RS"
   doAssert i18n.normalize("C.UTF-8") == ""
   doAssert i18n.direction("ar_SA") == "rtl"
+  doAssert i18n.isPseudo("en-XA")
+  doAssert i18n.isPseudo("ar-XB")
+
+block locale_parents_and_matching:
+  for (tag, expected) in [
+    ("en-AU", "en-001"), ("en-001", "en"), ("en-GB", "en-001"),
+    ("en-CH", "en-150"), ("en-150", "en-001"), ("en", ""),
+    ("en-US", "en"), ("de-CH", "de"), ("zh-Hant-MO", "zh-Hant-HK"),
+    ("zh-Hant-HK", "zh-Hant"), ("zh-Hant", ""), ("zh-Hans", "zh"),
+    ("zh-Hans-CN", "zh-Hans"), ("sr-Latn", ""),
+    ("sr-Latn-RS", "sr-Latn"), ("sr-Cyrl", "sr"), ("ja-Latn", ""),
+    ("nb", "no"), ("pt-AO", "pt-PT"), ("pt-PT", "pt"),
+    ("es-MX", "es-419"), ("es-419", "es"),
+    ("ca-ES-valencia", "ca-ES"), ("de-DE-u-co-phonebk", "de"),
+    ("en-XA", "en"), ("ar-XB", "ar"), ("", ""), ("C", "")]:
+    doAssert i18n.parent(tag) == expected, tag
+
+  doAssert i18n.match(@["zh-TW"], @["zh-Hans", "zh-Hant"]) == "zh-Hant"
+  doAssert i18n.match(@["zh-CN"], @["zh-Hant", "zh-Hans"]) == "zh-Hans"
+  doAssert i18n.match(@["zh-CN"], @["zh-Hant"]) == ""
+  doAssert i18n.match(@["pt-AO"], @["pt", "pt-PT"]) == "pt-PT"
 
 block regional_weekdays:
   doAssert i18n.firstWeekday("en-US") == dSun
