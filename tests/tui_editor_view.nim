@@ -394,6 +394,22 @@ editorState.select(3, 3)
 doAssert editorState.run(editor.Command.moveWordRight)
 doAssert editorState.cursor() == 4,
   "word navigation should stop at punctuation class boundaries"
+editorState.buffer.set("fooBar_baz qux")
+editorState.select(0, 0)
+doAssert editorState.run(editor.Command.moveSubwordRight)
+doAssert editorState.cursor() == 3
+doAssert editorState.run(editor.Command.moveSubwordRight)
+doAssert editorState.cursor() == 6
+doAssert editorState.run(editor.Command.moveSubwordRight)
+doAssert editorState.cursor() == 7
+doAssert editorState.run(editor.Command.moveWordRight)
+doAssert editorState.cursor() == 10
+editorState.select(10, 10)
+doAssert editorState.run(editor.Command.selectSubwordLeft)
+doAssert editorState.selectedText() == "baz"
+editorState.select(10, 10)
+doAssert editorState.run(editor.Command.deleteSubwordLeft)
+doAssert $editorState.buffer == "fooBar_ qux"
 editorState.buffer.set("first\nsecond")
 editorState.select("first\nsec".len, "first\nsec".len)
 doAssert editorState.run(editor.Command.moveLineStart)

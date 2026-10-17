@@ -1279,7 +1279,22 @@ proc wordCharClass(rune: Rune): int =
     return 0
   2
 
-proc wordMove(snapshot: Snapshot; runeOffset: int; direction: int): int =
+proc subwordBreakLeft(previous, current: Rune): bool =
+  (previous == Rune('_') and current != Rune('_')) or
+    (previous != Rune('_') and current == Rune('_')) or
+    (previous.isLower and current.isUpper)
+
+proc subwordBreakRight(previous, current: Rune; runes: openArray[Rune];
+                       afterCurrent: int): bool =
+  if (previous == Rune('_') and current != Rune('_')) or
+      (previous != Rune('_') and current == Rune('_')) or
+      (previous.isLower and current.isUpper):
+    return true
+  previous.isUpper and current.isUpper and afterCurrent < runes.len and
+    runes[afterCurrent].isLower
+
+proc wordMove(snapshot: Snapshot; runeOffset: int; direction: int;
+               subword = false): int =
   let document = snapshot.document
   let current = max(0, min(runeOffset, document.len()))
   let line = document.lineAt(current)
@@ -1298,8 +1313,12 @@ proc wordMove(snapshot: Snapshot; runeOffset: int; direction: int): int =
       dec target
     if target > 0:
       let charClass = wordCharClass(runes[target - 1])
+      var next = runes[target - 1]
       dec target
-      while target > 0 and wordCharClass(runes[target - 1]) == charClass:
+      while target > 0 and wordCharClass(runes[target - 1]) == charClass and
+          (not subword or charClass != 1 or
+          not subwordBreakLeft(runes[target - 1], next)):
+        next = runes[target - 1]
         dec target
     if target != local:
       return range.start + target
@@ -1313,9 +1332,13 @@ proc wordMove(snapshot: Snapshot; runeOffset: int; direction: int): int =
       inc target
     if target < runes.len:
       let charClass = wordCharClass(runes[target])
+      var previous = runes[target]
       inc target
       while target < runes.len and runes[target] != Rune('\n') and
-          wordCharClass(runes[target]) == charClass:
+          wordCharClass(runes[target]) == charClass and
+          (not subword or charClass != 1 or
+          not subwordBreakRight(previous, runes[target], runes, target + 1)):
+        previous = runes[target]
         inc target
     if target != local:
       return range.start + target
@@ -1336,12 +1359,14 @@ proc moveCaret(state: State; command: Command): bool =
   let selection = state.caretSelection
   let selecting = command in {
     Command.selectLeft, Command.selectRight, Command.selectWordLeft,
-    Command.selectWordRight, Command.selectLineStart, Command.selectLineEnd,
-    Command.selectDocStart, Command.selectDocEnd}
+    Command.selectWordRight, Command.selectSubwordLeft,
+    Command.selectSubwordRight, Command.selectLineStart,
+    Command.selectLineEnd, Command.selectDocStart, Command.selectDocEnd}
   let movingLeft = command in {
     Command.moveLeft, Command.selectLeft, Command.moveWordLeft,
-    Command.selectWordLeft, Command.moveLineStart, Command.selectLineStart,
-    Command.moveDocStart, Command.selectDocStart}
+    Command.selectWordLeft, Command.moveSubwordLeft,
+    Command.selectSubwordLeft, Command.moveLineStart,
+    Command.selectLineStart, Command.moveDocStart, Command.selectDocStart}
   var targetByte = selection.head
   if not selecting and not selection.empty() and
       command in {Command.moveLeft, Command.moveRight}:
@@ -1358,6 +1383,10 @@ proc moveCaret(state: State; command: Command): bool =
       targetRune = snapshot.wordMove(currentRune, -1)
     of Command.moveWordRight, Command.selectWordRight:
       targetRune = snapshot.wordMove(currentRune, 1)
+    of Command.moveSubwordLeft, Command.selectSubwordLeft:
+      targetRune = snapshot.wordMove(currentRune, -1, subword = true)
+    of Command.moveSubwordRight, Command.selectSubwordRight:
+      targetRune = snapshot.wordMove(currentRune, 1, subword = true)
     of Command.moveLineStart, Command.selectLineStart:
       targetRune = snapshot.smartHome(currentRune)
     of Command.moveLineEnd, Command.selectLineEnd:
@@ -1394,6 +1423,10 @@ proc deleteByCommand(state: State; command: Command): bool =
       firstRune = snapshot.wordMove(current, -1)
     of Command.deleteWordRight:
       pastRune = snapshot.wordMove(current, 1)
+    of Command.deleteSubwordLeft:
+      firstRune = snapshot.wordMove(current, -1, subword = true)
+    of Command.deleteSubwordRight:
+      pastRune = snapshot.wordMove(current, 1, subword = true)
     of Command.deleteToLineStart:
       let range = snapshot.document.lineRange(snapshot.document.lineAt(current))
       firstRune = if current == range.start:
@@ -1526,6 +1559,7 @@ proc run*(state: State; command: Command): bool =
   if state.readOnly and command in {
       Command.undo, Command.redo, Command.backspace, Command.delete,
       Command.deleteWordLeft, Command.deleteWordRight,
+      Command.deleteSubwordLeft, Command.deleteSubwordRight,
       Command.deleteToLineStart, Command.deleteToLineEnd, Command.deleteLine,
       Command.newline, Command.newlineAbove, Command.newlineBelow,
       Command.moveLinesUp, Command.moveLinesDown,
@@ -1547,12 +1581,15 @@ proc run*(state: State; command: Command): bool =
   of Command.moveLeft, Command.moveRight, Command.moveLineStart,
       Command.moveLineEnd, Command.moveDocStart, Command.moveDocEnd,
       Command.moveWordLeft, Command.moveWordRight,
+      Command.moveSubwordLeft, Command.moveSubwordRight,
       Command.selectLeft, Command.selectRight, Command.selectWordLeft,
-      Command.selectWordRight, Command.selectLineStart, Command.selectLineEnd,
-      Command.selectDocStart, Command.selectDocEnd:
+      Command.selectWordRight, Command.selectSubwordLeft,
+      Command.selectSubwordRight, Command.selectLineStart,
+      Command.selectLineEnd, Command.selectDocStart, Command.selectDocEnd:
     return state.moveCaret(command)
   of Command.backspace, Command.delete, Command.deleteWordLeft,
-      Command.deleteWordRight, Command.deleteToLineStart,
+      Command.deleteWordRight, Command.deleteSubwordLeft,
+      Command.deleteSubwordRight, Command.deleteToLineStart,
       Command.deleteToLineEnd:
     return state.deleteByCommand(command)
   else:
