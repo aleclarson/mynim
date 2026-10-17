@@ -61,6 +61,12 @@ var ipcMethods: Table[string, ref IpcMethod]
 var ipcEvents: seq[ref EventInfo]
 initLock(ipcMu)
 
+const pluginPrefix = "plugin:"
+
+var pluginMu: Lock
+var usedPlugins: Table[string, bool]
+initLock(pluginMu)
+
 ## bind exposes the methods of a service to the frontend. The generated
 ## TypeScript client (see `nim-xplat generate`) turns
 ##
@@ -96,6 +102,28 @@ proc `bind`*(name: string; methods: openArray[tuple[name: string,
     svc.methods.add mi
     ipcMethods[name & "." & m.name] = mi
   ipcServices.add svc
+
+proc registerPlugin(name: string; methods: openArray[tuple[name: string,
+    fn: BoundMethod]]) =
+  pluginMu.acquire()
+  defer: pluginMu.release()
+  if usedPlugins.getOrDefault(name):
+    raise newException(ValueError, "mynim: plugin " & name & " is already used")
+  if methods.len > 0:
+    try:
+      `bind`(pluginPrefix & name, methods, internal = true)
+    except CatchableError as error:
+      let detail = if error.msg.startsWith("mynim: "):
+        error.msg[7 .. ^1]
+        else: error.msg
+      raise newException(ValueError,
+        "mynim: plugin " & name & ": " & detail)
+  usedPlugins[name] = true
+
+proc pluginUsed(name: string): bool =
+  pluginMu.acquire()
+  defer: pluginMu.release()
+  usedPlugins.getOrDefault(name)
 
 ## bindChannelParam declares which parameters of methods are channels:
 ## their positions (after any leading context), in call order. The page
@@ -154,6 +182,18 @@ proc lookupMethod(name: string): ref IpcMethod =
   acquire(ipcMu)
   result = ipcMethods.getOrDefault(name)
   release(ipcMu)
+
+proc notBound(name: string): ref CatchableError =
+  if name.startsWith(pluginPrefix):
+    let rest = if name.len > pluginPrefix.len:
+      name[pluginPrefix.len .. ^1]
+      else: ""
+    let separator = rest.find('.')
+    let plugin = if separator >= 0: rest[0 ..< separator] else: rest
+    if not pluginUsed(plugin):
+      return newException(ValueError,
+        "the " & plugin & " plugin is not used: call mynim.use with it before app.run")
+  newException(ValueError, "method " & name & " is not bound")
 
 ## channelArg gives the method the channel the page passed as argument
 ## i, for methods bound with bindChannels.
@@ -369,7 +409,7 @@ proc handleCall(w: Window; ctx: CancelCtx; raw: string; trusted: bool) =
   else:
     let mi = lookupMethod(name)
     if mi == nil:
-      err = newException(ValueError, name & " is not bound")
+      err = notBound(name)
     else:
       (result, err) = ipcCall(mi, w, ctx, token, args)
   w.enqueue(encodeReply(id, token, result, err), false)

@@ -40,6 +40,7 @@ include mynim/core/dev
 include mynim/core/frontend
 include mynim/core/channel
 include mynim/core/ipc
+include mynim/core/plugin
 include mynim/core/tsgen
 include mynim/core/window
 include mynim/core/protocol
