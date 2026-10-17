@@ -1,6 +1,7 @@
 import std/[assertions, base64, json, os, osproc, streams, strutils, tempfiles]
 import ../src/cmd/update_artifacts
 import ../src/mynim/internal/update as updateRuntime
+import ../src/mynim/internal/update_delta
 
 proc hexBytes(value: string): string =
   doAssert value.len mod 2 == 0
@@ -46,6 +47,11 @@ when defined(posix):
       if progress != nil:
         progress(size, size)
 
+  proc putFile(root, relative, contents: string) =
+    let path = root / relative
+    createDir(path.parentDir())
+    writeFile(path, contents)
+
   proc testSignedInstall() =
     let openssl = findExe("openssl")
     let tar = findExe("tar")
@@ -76,6 +82,7 @@ when defined(posix):
     updates["publicKey"] = %encode(publicKey)
     updates["github"] = %"owner/app"
     updates["privateKey"] = %privatePath
+    updates["deltas"] = %0
     config["updates"] = updates
     let previousKey = getEnv("MYGO_UPDATER_PRIVATE_KEY")
     putEnv("MYGO_UPDATER_PRIVATE_KEY", "")
@@ -152,6 +159,91 @@ when defined(posix):
     doAssert readFile(installedBundle / "Contents" / "MacOS" / "sample-app") ==
       "current app"
 
+  proc testSignedDeltaInstallAndFallback() =
+    let openssl = findExe("openssl")
+    let tar = findExe("tar")
+    if openssl.len == 0 or tar.len == 0:
+      return
+    let publicKey = hexBytes(
+      "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a")
+    let privateKey = hexBytes(
+      "9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60") &
+      publicKey
+    let temporary = createTempDir("mynim-update-delta-install-", "")
+    defer: removeDir(temporary)
+    let target = when defined(macosx):
+      temporary / "installed" / "sample.app"
+    else:
+      temporary / "installed"
+    let newDir = when defined(macosx):
+      temporary / "stage" / "sample.app"
+    else:
+      temporary / "stage"
+    createDir(target)
+    createDir(newDir)
+    when defined(macosx):
+      let binaryRelative = "Contents/MacOS/sample"
+      putFile(target, binaryRelative, "old app image")
+      putFile(newDir, binaryRelative, "new app image with a small edit")
+    else:
+      let binaryRelative = "sample"
+      putFile(target, binaryRelative, "old app image")
+      putFile(newDir, binaryRelative, "new app image with a small edit")
+
+    let deltaPath = temporary / "sample.delta"
+    let deltaBytes = writeDelta("1.0.0", "2.0.0", target, newDir)
+    var deltaContents = newString(deltaBytes.len)
+    for i, value in deltaBytes:
+      deltaContents[i] = char(value)
+    writeFile(deltaPath, deltaContents)
+    let deltaSignature = signArchive(openssl, deltaPath, privateKey, temporary)
+
+    let fullArchive = temporary / "sample.tar.gz"
+    let packed = when defined(macosx):
+      run(tar, @["-czf", fullArchive, "-C", temporary / "stage", "sample.app"])
+    else:
+      run(tar, @["-czf", fullArchive, "-C", newDir, "sample"])
+    doAssert packed.code == 0, packed.output
+    let fullSignature = signArchive(openssl, fullArchive, privateKey, temporary)
+    let deltaUrl = "https://updates.example.test/sample.delta"
+    let fullUrl = "https://updates.example.test/sample.tar.gz"
+    var manifest = updateRuntime.Manifest(
+      version: "2.0.0", url: fullUrl, size: getFileSize(fullArchive),
+      signature: fullSignature,
+      deltas: @[updateRuntime.Delta(fromVersion: "1.0.0", url: deltaUrl,
+        size: getFileSize(deltaPath), signature: deltaSignature)])
+    var requested: seq[string]
+    let downloader: updateRuntime.FileDownloader = proc(url, path: string;
+        size: int64; progress: updateRuntime.UpdateProgress) =
+      requested.add url
+      let source = if url == deltaUrl: deltaPath
+        elif url == fullUrl: fullArchive
+        else: raise newException(ValueError, "unexpected fixture URL " & url)
+      doAssert size == getFileSize(source)
+      if progress != nil: progress(0, size)
+      copyFile(source, path)
+      if progress != nil: progress(size, size)
+
+    let deltaError = updateRuntime.installUpdate(manifest, encode(publicKey),
+      target, nil, downloader, "1.0.0")
+    doAssert deltaError.isNil,
+      (if deltaError.isNil: "" else: deltaError.msg)
+    doAssert requested == @[deltaUrl]
+    doAssert readFile(target / binaryRelative) == "new app image with a small edit"
+
+    putFile(target, binaryRelative, "old app image")
+    writeFile(deltaPath, "not a delta")
+    manifest.deltas[0].size = getFileSize(deltaPath)
+    manifest.deltas[0].signature =
+      signArchive(openssl, deltaPath, privateKey, temporary)
+    requested.setLen(0)
+    let fallbackError = updateRuntime.installUpdate(manifest,
+      encode(publicKey), target, nil, downloader, "1.0.0")
+    doAssert fallbackError.isNil,
+      (if fallbackError.isNil: "" else: fallbackError.msg)
+    doAssert requested == @[deltaUrl, fullUrl]
+    doAssert readFile(target / binaryRelative) == "new app image with a small edit"
+
   proc testDesktopEntryRefresh() =
     let temporary = createTempDir("mynim-desktop-refresh-", "")
     defer: removeDir(temporary)
@@ -194,4 +286,5 @@ when defined(posix):
       putEnv("XDG_DATA_HOME", previousDataHome)
 
   testSignedInstall()
+  testSignedDeltaInstallAndFallback()
   testDesktopEntryRefresh()

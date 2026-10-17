@@ -1,5 +1,6 @@
 import std/[assertions, base64, json, os, osproc, streams, strutils, tempfiles]
 import ../src/cmd/update_artifacts
+import ../src/mynim/internal/update as updateRuntime
 
 proc hexBytes(value: string): string =
   doAssert value.len mod 2 == 0
@@ -50,6 +51,7 @@ when defined(posix):
     updates["github"] = %"owner/app"
     updates["tagPrefix"] = %"desktop-v"
     updates["privateKey"] = %privatePath
+    updates["deltas"] = %0
     config["updates"] = updates
 
     let githubSettings = runtimeUpdateSettings(config, "darwin-arm64")
@@ -128,5 +130,135 @@ when defined(posix):
       "https://downloads.example.test/my-app/" &
       "sample-app-1.2.3-darwin-arm64.tar.gz"
 
+  proc testDeltaArtifacts() =
+    let openssl = findExe("openssl")
+    let tar = findExe("tar")
+    if openssl.len == 0 or tar.len == 0:
+      return
+
+    let publicKey = hexBytes(
+      "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a")
+    let privateKey = hexBytes(
+      "9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60") &
+      publicKey
+    let temporary = createTempDir("mynim-delta-artifacts-", "")
+    defer: removeDir(temporary)
+    let project = temporary / "project"
+    let baseStage = temporary / "base-stage"
+    createDir(project)
+    createDir(baseStage)
+
+    var oldContent = newString(96 * 1024)
+    var seed = 17
+    for index in 0 ..< oldContent.len:
+      seed = (seed * 48271) mod 2147483647
+      oldContent[index] = char((seed shr 8) and 0xff)
+    writeFile(baseStage / "sample.bin", oldContent)
+
+    let privatePath = temporary / "update.key"
+    writeFile(privatePath, encode(privateKey) & "\n")
+    var config = newJObject()
+    var updates = newJObject()
+    updates["publicKey"] = %encode(publicKey)
+    updates["privateKey"] = %privatePath
+    updates["url"] = %"https://downloads.example.test/my-app/"
+    updates["deltas"] = %0
+    config["updates"] = updates
+
+    let previousKey = getEnv("MYGO_UPDATER_PRIVATE_KEY")
+    putEnv("MYGO_UPDATER_PRIVATE_KEY", "")
+    defer: putEnv("MYGO_UPDATER_PRIVATE_KEY", previousKey)
+    let baseFiles = writeUpdateArtifacts(config, project, baseStage,
+      "Sample App", "1.0.0", "linux-amd64")
+    doAssert baseFiles.len == 2
+    let baseArchive = baseFiles[0]
+    let baseManifest = parseFile(baseFiles[1])
+    let baseManifestText = readFile(baseFiles[1])
+
+    let newStage = temporary / "new-stage"
+    createDir(newStage)
+    var newContent = oldContent
+    newContent[newContent.len div 2] = char(
+      ord(newContent[newContent.len div 2]) xor 1)
+    writeFile(newStage / "sample.bin", newContent)
+    updates["deltas"] = %3
+
+    var manifestRequests = 0
+    let getter: updateRuntime.HttpGetter = proc(url: string;
+        maxBytes: int): string =
+      doAssert url ==
+        "https://downloads.example.test/my-app/update-linux-amd64.json"
+      doAssert maxBytes >= baseManifestText.len
+      inc manifestRequests
+      baseManifestText
+    var archiveDownloads = 0
+    let downloader: updateRuntime.FileDownloader = proc(url, path: string;
+        size: int64; progress: updateRuntime.UpdateProgress) =
+      doAssert url == baseManifest["url"].getStr()
+      doAssert size == getFileSize(baseArchive)
+      inc archiveDownloads
+      copyFile(baseArchive, path)
+
+    let files = writeUpdateArtifacts(config, project, newStage, "Sample App",
+      "1.1.0", "linux-amd64", getter, downloader)
+    doAssert manifestRequests == 1
+    doAssert archiveDownloads == 1
+    doAssert files.len == 3
+    doAssert files[0].endsWith("sample-app-1.1.0-linux-amd64.tar.gz")
+    doAssert files[1].endsWith(
+      "sample-app-1.0.0-to-1.1.0-linux-amd64.delta")
+    let manifest = parseFile(files[2])
+    doAssert manifest["previous"].len == 1
+    doAssert manifest["previous"][0]["version"].getStr() == "1.0.0"
+    doAssert manifest["deltas"].len == 1
+    doAssert manifest["deltas"][0]["from"].getStr() == "1.0.0"
+    doAssert manifest["deltas"][0]["size"].getInt() <
+      manifest["size"].getInt()
+    doAssert decode(manifest["deltas"][0]["signature"].getStr()).len == 64
+
+    let verifyWork = createTempDir("mynim-delta-verify-", "")
+    defer: removeDir(verifyWork)
+    updateRuntime.verifyArchiveSignature(files[1], encode(publicKey),
+      manifest["deltas"][0]["signature"].getStr(), verifyWork)
+
+    let macBaseStage = temporary / "mac-base-stage"
+    let macBaseBundle = macBaseStage / "sample-app.app"
+    createDir(macBaseBundle / "Contents" / "MacOS")
+    writeFile(macBaseBundle / "Contents" / "MacOS" / "sample-app",
+      oldContent)
+    updates["deltas"] = %0
+    let macBaseFiles = writeUpdateArtifacts(config, project, macBaseStage,
+      "Sample App", "1.0.0", "darwin-arm64")
+    let macBaseArchive = macBaseFiles[0]
+    let macBaseManifest = parseFile(macBaseFiles[1])
+    let macBaseManifestText = readFile(macBaseFiles[1])
+
+    let macNewStage = temporary / "mac-new-stage"
+    let macNewBundle = macNewStage / "sample-app.app"
+    createDir(macNewBundle / "Contents" / "MacOS")
+    writeFile(macNewBundle / "Contents" / "MacOS" / "sample-app",
+      newContent)
+    updates["deltas"] = %3
+    let macGetter: updateRuntime.HttpGetter = proc(url: string;
+        maxBytes: int): string =
+      doAssert url ==
+        "https://downloads.example.test/my-app/update-darwin-arm64.json"
+      doAssert maxBytes >= macBaseManifestText.len
+      macBaseManifestText
+    let macDownloader: updateRuntime.FileDownloader = proc(url, path: string;
+        size: int64; progress: updateRuntime.UpdateProgress) =
+      doAssert url == macBaseManifest["url"].getStr()
+      doAssert size == getFileSize(macBaseArchive)
+      copyFile(macBaseArchive, path)
+    let macFiles = writeUpdateArtifacts(config, project, macNewStage,
+      "Sample App", "1.1.0", "darwin-arm64", macGetter, macDownloader)
+    doAssert macFiles.len == 3
+    let macManifest = parseFile(macFiles[2])
+    doAssert macManifest["deltas"].len == 1
+    doAssert macManifest["deltas"][0]["from"].getStr() == "1.0.0"
+    doAssert macManifest["deltas"][0]["size"].getInt() <
+      macManifest["size"].getInt()
+
 when defined(posix):
   testSignedUpdate()
+  testDeltaArtifacts()

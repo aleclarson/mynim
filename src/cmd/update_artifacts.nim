@@ -1,8 +1,10 @@
 ## Create signed update archives and manifests for a native build.
 
 import std/[algorithm, base64, json, os, osproc, streams, strutils, tempfiles,
-  times, uri]
+  sets, times, uri]
 import ./publish
+import ../mynim/internal/update as updateRuntime
+import ../mynim/internal/update_delta
 
 const ed25519PrivatePrefix: array[16, byte] = [
   0x30'u8, 0x2e, 0x02, 0x01, 0x00, 0x30, 0x05, 0x06,
@@ -239,8 +241,155 @@ proc archiveEntries(stage, name, target: string): seq[string] =
     raise newException(IOError,
       "nim-xplat build: no installed files for update archive")
 
+proc bytesToString(bytes: openArray[byte]): string =
+  result = newString(bytes.len)
+  for index, value in bytes:
+    result[index] = char(value)
+
+proc archiveJson(archive: updateRuntime.Archive): JsonNode =
+  result = newJObject()
+  result["version"] = %archive.version
+  result["url"] = %archive.url
+  result["size"] = %archive.size
+  result["signature"] = %archive.signature
+
+proc deltaJson(delta: updateRuntime.Delta): JsonNode =
+  result = newJObject()
+  result["from"] = %delta.fromVersion
+  result["url"] = %delta.url
+  result["size"] = %delta.size
+  result["signature"] = %delta.signature
+
+proc writeDeltas(config, updates: JsonNode; stage, name, version, target: string;
+    archiveSize: int64; key: string; entries: seq[string];
+    deltaCount: int; getter: updateRuntime.HttpGetter;
+    downloader: updateRuntime.FileDownloader):
+    tuple[files: seq[string], previous: seq[updateRuntime.Archive],
+      deltas: seq[updateRuntime.Delta]] =
+  if deltaCount <= 0:
+    return
+
+  let settings = runtimeUpdateSettings(config, target)
+  var getManifest: updateRuntime.HttpGetter
+  if getter.isNil:
+    getManifest = proc(url: string; maxBytes: int): string =
+      updateRuntime.httpGet(url, "mynim", maxBytes)
+  else:
+    getManifest = getter
+  var download: updateRuntime.FileDownloader
+  if downloader.isNil:
+    download = proc(url, path: string; size: int64;
+        progress: updateRuntime.UpdateProgress) =
+      updateRuntime.httpDownload(url, "mynim", path, size, progress)
+  else:
+    download = downloader
+
+  var published: updateRuntime.Manifest
+  try:
+    let manifestUrl = updateRuntime.resolveFeed(settings.feed, getManifest)
+    if manifestUrl.len == 0:
+      raise newException(IOError, "the update feed is empty")
+    published = updateRuntime.parseManifest(
+      getManifest(manifestUrl, updateRuntime.maxManifestSize))
+  except CatchableError as error:
+    stderr.writeLine("nim-xplat build: no delta updates for " & target &
+      ": could not read the published manifest: " & error.msg)
+    return
+
+  var bases: seq[updateRuntime.Archive]
+  var seen = initHashSet[string]()
+  let latest = updateRuntime.Archive(version: published.version,
+    url: published.url, size: published.size, signature: published.signature)
+  for base in @[latest] & published.previous:
+    if base.version.len > 0 and base.version notin seen and
+        updateRuntime.compareVersions(base.version, version) < 0:
+      bases.add base
+      seen.incl base.version
+  if bases.len == 0:
+    return
+  if bases.len > deltaCount:
+    bases.setLen(deltaCount)
+  let previousCount = min(bases.len, max(0, deltaCount - 1))
+  if previousCount > 0:
+    result.previous = bases[0 ..< previousCount]
+
+  let work = createTempDir("mynim-delta-", "")
+  defer:
+    if dirExists(work):
+      removeDir(work)
+  var newDir = stage
+  var newEntries = entries
+  if target.startsWith("darwin-"):
+    if entries.len != 1:
+      raise newException(ValueError,
+        "nim-xplat build: expected one app bundle for delta updates")
+    newDir = stage / entries[0]
+    newEntries = @[]
+
+  for index, base in bases:
+    var deltaPath = ""
+    try:
+      if base.url.len == 0 or base.signature.len == 0:
+        raise newException(ValueError, "the previous archive is incomplete")
+      if base.size <= 0 or base.size > updateRuntime.maxArchiveSize:
+        raise newException(ValueError,
+          "invalid previous archive size " & $base.size)
+      let baseWork = work / $index
+      createDir(baseWork)
+      let baseArchive = baseWork / "archive.tar.gz"
+      download(base.url, baseArchive, base.size, nil)
+      if not fileExists(baseArchive) or getFileSize(baseArchive) != base.size:
+        let received = if fileExists(baseArchive): getFileSize(baseArchive) else: 0
+        raise newException(IOError,
+          "downloaded " & $received & " bytes, want " & $base.size)
+      updateRuntime.verifyArchiveSignature(baseArchive, settings.publicKey,
+        base.signature, baseWork)
+      let unpacked = baseWork / "app"
+      updateRuntime.extractArchive(baseArchive, unpacked)
+      var oldDir = unpacked
+      if target.startsWith("darwin-"):
+        var bundles: seq[string]
+        var topLevelEntries = 0
+        for kind, path in walkDir(unpacked):
+          inc topLevelEntries
+          if kind == pcDir and path.endsWith(".app"):
+            bundles.add path
+        if topLevelEntries != 1 or bundles.len != 1:
+          raise newException(ValueError,
+            "the previous archive holds no single app bundle")
+        oldDir = bundles[0]
+
+      let deltaName = updateSlug(name) & "-" &
+        escapePathSegment(base.version) & "-to-" &
+        escapePathSegment(version) & "-" & target & ".delta"
+      deltaPath = stage / deltaName
+      let delta = updateDelta.writeDelta(base.version, version, oldDir,
+        newDir, newEntries)
+      writeFile(deltaPath, bytesToString(delta))
+      let deltaSize = getFileSize(deltaPath)
+      if deltaSize < archiveSize:
+        let signature = signArchive(deltaPath, key)
+        result.deltas.add updateRuntime.Delta(fromVersion: base.version,
+          url: updateFileUrl(updates, deltaName, version), size: deltaSize,
+          signature: signature)
+        result.files.add deltaPath
+      else:
+        removeFile(deltaPath)
+        stderr.writeLine("nim-xplat build: no delta update from " &
+          base.version & " for " & target &
+          ": it is not smaller than the archive")
+    except CatchableError as error:
+      if deltaPath.len > 0 and fileExists(deltaPath):
+        try:
+          removeFile(deltaPath)
+        except CatchableError:
+          discard
+      stderr.writeLine("nim-xplat build: no delta update from " &
+        base.version & " for " & target & ": " & error.msg)
+
 proc writeUpdateArtifacts*(config: JsonNode; projectDir, stage, name, version,
-    target: string): seq[string] =
+    target: string; getter: updateRuntime.HttpGetter = nil;
+    downloader: updateRuntime.FileDownloader = nil): seq[string] =
   if config.kind != JObject or not config.hasKey("updates") or
       config["updates"].kind == JNull:
     return
@@ -280,18 +429,15 @@ proc writeUpdateArtifacts*(config: JsonNode; projectDir, stage, name, version,
       "nim-xplat build: not signing an update; set MYGO_UPDATER_PRIVATE_KEY " &
       "or updates.privateKey")
     return
-  if deltaCount > 0:
-    stderr.writeLine("nim-xplat build: delta updates are not ported yet; " &
-      "the update manifest will contain only the full archive")
-
   let notes = updateNotes(updates, projectDir, version)
   let archive = stage / archiveName
   let tar = findExe("tar")
   if tar.len == 0:
     raise newException(IOError,
       "creating update archives needs tar on PATH")
+  let entries = archiveEntries(stage, name, target)
   var args = @["-czf", archive, "-C", stage]
-  args.add archiveEntries(stage, name, target)
+  args.add entries
   let archived = runTool(tar, args)
   if archived.code != 0:
     if fileExists(archive): removeFile(archive)
@@ -307,6 +453,18 @@ proc writeUpdateArtifacts*(config: JsonNode; projectDir, stage, name, version,
   manifest["url"] = %url
   manifest["size"] = %getFileSize(archive)
   manifest["signature"] = %signature
+  let deltas = writeDeltas(config, updates, stage, name, version, target,
+    getFileSize(archive), key, entries, deltaCount, getter, downloader)
+  if deltas.deltas.len > 0:
+    var deltaNodes = newJArray()
+    for delta in deltas.deltas:
+      deltaNodes.add deltaJson(delta)
+    manifest["deltas"] = deltaNodes
+  if deltas.previous.len > 0:
+    var previousNodes = newJArray()
+    for previous in deltas.previous:
+      previousNodes.add archiveJson(previous)
+    manifest["previous"] = previousNodes
   let manifestPath = stage / ("update-" & target & ".json")
   writeFile(manifestPath, manifest.pretty & "\n")
-  result = @[archive, manifestPath]
+  result = @[archive] & deltas.files & @[manifestPath]

@@ -139,7 +139,7 @@ when not defined(emscripten):
           size: int64; onProgress: updateRuntime.UpdateProgress) =
         updateRuntime.httpDownload(url, userAgent, path, size, onProgress)
       result = updateRuntime.installUpdate(up.manifest, up.key, target,
-        progress, download)
+        progress, download, up.current)
       when defined(linux):
         if result.isNil:
           let refreshError = updateRuntime.refreshDesktopEntry(target,

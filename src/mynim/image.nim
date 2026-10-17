@@ -392,16 +392,25 @@ proc pngEncode*(img: Image): seq[byte] =
 ## inflate decodes a zlib (RFC 1950) stream: the wrapper, the DEFLATE
 ## (RFC 1951) stream of stored, fixed-Huffman and dynamic-Huffman
 ## blocks.
-proc inflate*(data: openArray[byte]): seq[byte] =
+proc inflate*(data: openArray[byte]; maxOutput = high(int)): seq[byte] =
   if data.len < 6:
     raise newException(ValueError, "zlib: corrupt stream")
+  if maxOutput < 0:
+    raise newException(ValueError, "zlib: invalid output limit")
   ## The bit readers below are nested procs. Copy the borrowed input so
   ## their closure captures owned storage, not the openArray parameter.
   let input = @data
   var pos = 2 ## skip the zlib header
   var bit = 0
   var outb: seq[byte]
+  proc requireInput(additional: int) =
+    if additional < 0 or pos > input.len - additional:
+      raise newException(ValueError, "zlib: truncated stream")
+  proc checkOutput(additional: int) =
+    if additional < 0 or additional > maxOutput - outb.len:
+      raise newException(ValueError, "zlib: output exceeds its limit")
   proc bit1(): int =
+    requireInput(1)
     let v = (int(input[pos]) shr bit) and 1
     inc bit
     if bit == 8:
@@ -458,8 +467,11 @@ proc inflate*(data: openArray[byte]): seq[byte] =
       if bit != 0:
         bit = 0
         inc pos
+      requireInput(4)
       let n = int(input[pos]) or (int(input[pos + 1]) shl 8)
+      checkOutput(n)
       pos += 4 ## LEN and NLEN
+      requireInput(n)
       for i in 0 ..< n:
         outb.add input[pos + i]
       pos += n
@@ -498,13 +510,21 @@ proc inflate*(data: openArray[byte]): seq[byte] =
             inc i
           elif s == 16:
             let rep = bits(2) + 3
+            if i == 0 or rep > lens.len - i:
+              raise newException(ValueError, "zlib: bad code-length repeat")
             for j in 0 ..< rep:
               lens[i + j] = lens[i - 1]
             i += rep
           elif s == 17:
-            i += bits(3) + 3
+            let rep = bits(3) + 3
+            if rep > lens.len - i:
+              raise newException(ValueError, "zlib: bad code-length repeat")
+            i += rep
           else:
-            i += bits(7) + 11
+            let rep = bits(7) + 11
+            if rep > lens.len - i:
+              raise newException(ValueError, "zlib: bad code-length repeat")
+            i += rep
         let l = huffBuild(lens.toOpenArray(0, hlit - 1))
         litMax = l.maxLen
         litCodes = l.codes
@@ -516,6 +536,7 @@ proc inflate*(data: openArray[byte]): seq[byte] =
       while true:
         let s = huffDecode(litMax, litCodes)
         if s < 256:
+          checkOutput(1)
           outb.add byte(s)
         elif s == 256:
           break
@@ -525,7 +546,12 @@ proc inflate*(data: openArray[byte]): seq[byte] =
             raise newException(ValueError, "zlib: bad length")
           let n = lenBase[li] + bits(lenExtra[li])
           let ds = huffDecode(15, distCodes)
+          if ds >= distBase.len:
+            raise newException(ValueError, "zlib: bad distance code")
           let dist = distBase[ds] + bits(distExtra[ds])
+          if dist <= 0 or dist > outb.len:
+            raise newException(ValueError, "zlib: invalid distance")
+          checkOutput(n)
           for j in 0 ..< n:
             outb.add outb[outb.len - dist]
       let huffDone = true
@@ -586,9 +612,15 @@ proc pngDecode*(data: seq[byte]): tuple[img: NrgbaImage,
     of 4: 2
     of 2: 3
     else: 4
+  if w > (high(int) - 1) div channels:
+    return (nil, pngErr("image dimensions are too large"))
+  let rowSize = 1 + w * channels
+  if h > high(int) div rowSize:
+    return (nil, pngErr("image dimensions are too large"))
+  let expectedRawSize = h * rowSize
   var raw: seq[byte]
   try:
-    raw = inflate(idat)
+    raw = inflate(idat, expectedRawSize)
   except CatchableError as e:
     return (nil, e)
   let stride = w * channels

@@ -2,6 +2,7 @@
 
 import std/[base64, json, options, os, osproc, sets, streams, strutils,
   tempfiles, uri]
+import ./update_delta
 
 const
   maxManifestSize* = 1 shl 20
@@ -352,7 +353,7 @@ proc runTool(executable: string; args: openArray[string]):
   finally:
     process.close()
 
-proc verifyArchiveSignature(archive, publicKey, signature, work: string) =
+proc verifyArchiveSignature*(archive, publicKey, signature, work: string) =
   var publicBytes, signatureBytes: string
   try:
     publicBytes = decode(publicKey.strip())
@@ -424,7 +425,7 @@ proc linkStaysInArchive(root, path, target: string): bool =
       inc depth
   true
 
-proc extractArchive(archive, directory: string) =
+proc extractArchive*(archive, directory: string) =
   let tar = findExe("tar")
   if tar.len == 0:
     raise newException(IOError, "extracting updates needs tar on PATH")
@@ -606,14 +607,10 @@ proc swapFiles(directory, target: string) =
         discard
 
 proc installUpdate*(manifest: Manifest; publicKey, target: string;
-    progress: UpdateProgress; download: FileDownloader): ref CatchableError =
-  ## Downloads, verifies, extracts, and replaces an app from its full archive.
+    progress: UpdateProgress; download: FileDownloader;
+    currentVersion = ""): ref CatchableError =
+  ## Applies a matching signed delta when available, else installs the archive.
   try:
-    if manifest.size <= 0 or manifest.size > maxArchiveSize:
-      raise newException(ValueError, "invalid update archive size " &
-        $manifest.size)
-    if manifest.url.len == 0 or manifest.signature.len == 0:
-      raise newException(ValueError, "incomplete update manifest")
     if download.isNil:
       raise newException(ValueError, "no update downloader was provided")
     if not dirExists(parentDir(target)) or not pathExists(target):
@@ -626,6 +623,47 @@ proc installUpdate*(manifest: Manifest; publicKey, target: string;
           removeDir(work)
         except CatchableError:
           discard
+
+    for delta in manifest.deltas:
+      if delta.fromVersion == currentVersion:
+        var deltaOutput = work / "delta-app"
+        when defined(macosx):
+          deltaOutput = deltaOutput / target.lastPathPart()
+        try:
+          if delta.size <= 0 or delta.size > maxArchiveSize:
+            raise newException(ValueError,
+              "invalid update delta size " & $delta.size)
+          if delta.url.len == 0 or delta.signature.len == 0:
+            raise newException(ValueError, "incomplete update delta")
+          let deltaPath = work / "update.delta"
+          download(delta.url, deltaPath, delta.size, progress)
+          if not fileExists(deltaPath) or getFileSize(deltaPath) != delta.size:
+            let received = if fileExists(deltaPath): getFileSize(deltaPath) else: 0
+            raise newException(IOError,
+              "downloaded " & $received & " bytes, want " & $delta.size)
+          verifyArchiveSignature(deltaPath, publicKey, delta.signature, work)
+          let contents = readFile(deltaPath)
+          applyDelta(contents.toOpenArrayByte(0, contents.high),
+            delta.fromVersion, manifest.version, target, deltaOutput)
+          when defined(macosx):
+            swapBundle(work / "delta-app", target)
+          else:
+            swapFiles(deltaOutput, target)
+          return
+        except CatchableError as deltaError:
+          stderr.writeLine("mynim: downloading the full update because its " &
+            "delta failed: " & deltaError.msg)
+          if pathExists(work / "delta-app"):
+            try:
+              removePath(work / "delta-app")
+            except CatchableError:
+              discard
+
+    if manifest.size <= 0 or manifest.size > maxArchiveSize:
+      raise newException(ValueError, "invalid update archive size " &
+        $manifest.size)
+    if manifest.url.len == 0 or manifest.signature.len == 0:
+      raise newException(ValueError, "incomplete update manifest")
     let archive = work / "update.tar.gz"
     download(manifest.url, archive, manifest.size, progress)
     if not fileExists(archive) or getFileSize(archive) != manifest.size:
