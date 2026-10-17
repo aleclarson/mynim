@@ -1,9 +1,9 @@
-## Generate the typed TypeScript client of a MyNim application.
+## Generate the typed TypeScript client of a nim-xplat application.
 
 import std/[json, os, osproc, streams, strtabs, strutils, tempfiles]
 import ./i18n_generate
 
-const usageGenerate = """Usage: mynim generate [-o file] [dir]
+const usageGenerate = """Usage: nim-xplat generate [-o file] [dir]
 
 Write the TypeScript client for the services and events bound by the app, and
 `catalog_gen.nim` when i18n catalogs are configured. Web frontends also get a
@@ -63,7 +63,7 @@ proc runGenerate*(args: seq[string]): int =
       let equalAt = arg.find('=')
       let flag = if equalAt < 0: arg else: arg[0 ..< equalAt]
       if flag notin ["-o", "--output"]:
-        stderr.writeLine("mynim generate: unknown flag " & flag)
+        stderr.writeLine("nim-xplat generate: unknown flag " & flag)
         stderr.write(usageGenerate)
         return 2
       if equalAt >= 0:
@@ -72,18 +72,18 @@ proc runGenerate*(args: seq[string]): int =
       else:
         inc index
         if index >= args.len:
-          stderr.writeLine("mynim generate: missing value for " & flag)
+          stderr.writeLine("nim-xplat generate: missing value for " & flag)
           return 2
         outputOption = args[index]
       if outputOption.len == 0:
-        stderr.writeLine("mynim generate: missing value for " & flag)
+        stderr.writeLine("nim-xplat generate: missing value for " & flag)
         return 2
     else:
       paths.add arg
     inc index
 
   if paths.len > 1:
-    stderr.writeLine("mynim generate: expected at most one project directory")
+    stderr.writeLine("nim-xplat generate: expected at most one project directory")
     stderr.write(usageGenerate)
     return 2
 
@@ -92,12 +92,12 @@ proc runGenerate*(args: seq[string]): int =
       else: absolutePath(paths[0])
     if not dirExists(projectDir):
       raise newException(ValueError,
-        "mynim generate: " & projectDir & " is not a directory")
+        "nim-xplat generate: " & projectDir & " is not a directory")
     let source = if fileExists(projectDir / "src" / "main.nim"):
       projectDir / "src" / "main.nim" else: projectDir / "main.nim"
     if not fileExists(source):
       raise newException(ValueError,
-        "mynim generate: expected src/main.nim or main.nim in " & projectDir)
+        "nim-xplat generate: expected src/main.nim or main.nim in " & projectDir)
 
     var config: JsonNode
     let configPath = projectDir / "mygo.json"
@@ -105,7 +105,7 @@ proc runGenerate*(args: seq[string]): int =
       config = parseFile(configPath)
       if config.kind != JObject:
         raise newException(ValueError,
-          "mynim generate: mygo.json must contain a JSON object")
+          "nim-xplat generate: mygo.json must contain a JSON object")
 
     let catalogModules = generateCatalogModules(projectDir, source, config,
       generationOutput(projectDir, config))
@@ -116,13 +116,13 @@ proc runGenerate*(args: seq[string]): int =
     else:
       generationOutput(projectDir, config)
 
-    let tempDir = createTempDir("mygo-generate-", "")
+    let tempDir = createTempDir("nim-xplat-generate-", "")
     defer:
       if dirExists(tempDir):
         removeDir(tempDir)
     let generatedPath = if configuredOutput.len > 0: configuredOutput
       else: tempDir / "mygo.ts"
-    let executable = tempDir / ("mygo-generate" &
+    let executable = tempDir / ("nim-xplat-generate" &
       (when hostOS == "windows": ".exe" else: ""))
     let nimble = findExe("nimble")
     if nimble.len == 0:
@@ -132,17 +132,17 @@ proc runGenerate*(args: seq[string]): int =
       "c", "--nimcache:" & (tempDir / "nimcache"),
       "--out:" & executable, source], projectDir)
     if compile.code != 0:
-      stderr.writeLine("mynim generate: app compilation failed")
+      stderr.writeLine("nim-xplat generate: app compilation failed")
       stderr.write(compile.output)
       return 1
 
     var env = newStringTable(modeCaseSensitive)
     for key, value in envPairs():
       env[key] = value
-    env["MYNIM_GENERATE"] = generatedPath
+    env["NIM_XPLAT_GENERATE"] = generatedPath
     let app = processOutput(executable, @[], projectDir, env)
     if app.code != 0:
-      stderr.writeLine("mynim generate: app exited with status " & $app.code)
+      stderr.writeLine("nim-xplat generate: app exited with status " & $app.code)
       stderr.write(app.output)
       return 1
     if configuredOutput.len > 0 and fileExists(configuredOutput):
@@ -168,5 +168,5 @@ proc runGenerate*(args: seq[string]): int =
       stdout.writeLine("Generated " & shownPath)
     return 0
   except CatchableError as error:
-    stderr.writeLine("mynim generate: " & error.msg)
+    stderr.writeLine("nim-xplat generate: " & error.msg)
     return 1

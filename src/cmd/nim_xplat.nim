@@ -1,4 +1,4 @@
-## Command-line tool for MyNim applications.
+## Command-line tool for nim-xplat applications.
 
 import std/os
 import ./build
@@ -15,16 +15,16 @@ import ./vet
 
 const
   version = "0.1.0"
-  usage = """mynim is the command-line tool for MyNim applications.
+  usage = """nim-xplat is the command-line tool for nim-xplat applications.
 
 Usage:
 
-  mynim <command> [arguments]
+  nim-xplat <command> [arguments]
 
 Commands:
 
   init            create a native UI or web frontend project
-  install-skills  install the MyNim maintenance skill
+  install-skills  install the nim-xplat maintenance skill
   dev             build and run a native app with live reload
   build           compile a native project for this machine
   generate        write the typed client and Nim/TypeScript i18n accessors
@@ -34,7 +34,7 @@ Commands:
   keygen          create the key pair that signs updates
   migrate-ui      preview or apply the checked UI API migration
   doctor          check that the development environment is ready
-  version         print the MyNim version
+  version         print the nim-xplat version
   help            print this help
 
 """
@@ -46,7 +46,7 @@ proc run(args: seq[string]): int =
 
   case args[0]
   of "version", "-v", "--version":
-    stdout.writeLine("mynim " & version)
+    stdout.writeLine("nim-xplat " & version)
   of "help", "-h", "--help":
     stdout.write(usage)
   of "doctor":
@@ -92,7 +92,7 @@ proc run(args: seq[string]): int =
   of "test":
     return runTest(if args.len > 1: args[1 .. ^1] else: @[])
   else:
-    stderr.writeLine("mynim: unknown command \"" & args[0] & "\"")
+    stderr.writeLine("nim-xplat: unknown command \"" & args[0] & "\"")
     stderr.write("\n")
     stderr.write(usage)
     return 2

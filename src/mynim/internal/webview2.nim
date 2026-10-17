@@ -1,6 +1,6 @@
 ## internal/webview2 (internal/webview2/webview2.go): finds the
 ## Microsoft Edge WebView2 Runtime as WebView2Loader.dll does. The
-## Windows backend loads the runtime it finds, and `mynim doctor`
+## Windows backend loads the runtime it finds, and `nim-xplat doctor`
 ## reports it, so the two never disagree; it builds everywhere, and
 ## finds no installed runtime but on Windows.
 

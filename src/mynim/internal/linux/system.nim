@@ -348,7 +348,7 @@ proc updateLauncherEntry*(b: Backend) =
     discard gErr(gerr)
 
 ## desktopEntryID is the file name of the app's desktop entry: the one it
-## was launched from, else the one `mynim build` writes, named after the
+## was launched from, else the one `nim-xplat build` writes, named after the
 ## executable.
 proc desktopEntryID*(): string =
   for env in ["GIO_LAUNCHED_DESKTOP_FILE", "BAMF_DESKTOP_FILE_HINT"]:

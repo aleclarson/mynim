@@ -476,7 +476,7 @@ proc fileServer*(fsys: Fs): HttpHandler =
 proc frontendHandler(): HttpHandler =
   var fsys = frontendFs()
   if fsys == nil and isDev():
-    ## `mygo dev` without a dev server: the files on disk.
+    ## `nim-xplat dev` without a dev server: the files on disk.
     let dir = getEnv("MYGO_FRONTEND_DIST")
     if dir != "":
       fsys = dirFs(dir)
@@ -489,7 +489,7 @@ proc frontendHandler(): HttpHandler =
 <title>No frontend</title>
 <style>body{font:15px/1.5 system-ui,sans-serif;margin:3em;color:#444}code{font-size:90%}</style>
 <h1>No frontend</h1>
-<p>Run the app with <code>mygo dev</code>, which loads <code>devUrl</code> from mygo.config.ts,
-or build it with <code>mygo build</code>, which embeds <code>frontendDist</code>.</p>
+<p>Run the app with <code>nim-xplat dev</code>, which loads <code>devUrl</code> from mygo.config.ts,
+or build it with <code>nim-xplat build</code>, which embeds <code>frontendDist</code>.</p>
 """)
   fileServer(fsys)

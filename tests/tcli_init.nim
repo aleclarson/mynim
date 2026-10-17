@@ -19,14 +19,14 @@ proc testInit() =
     "--template", "native",
     "--name", "Ada \"Counter\"",
     "--package", "counter-app",
-    "--mygo", getCurrentDir(),
+    "--nim-xplat", getCurrentDir(),
     project]) == 0
 
   doAssert fileExists(project / "counter_app.nimble")
   doAssert fileExists(project / "mygo.json")
   doAssert fileExists(project / "config.nims")
   doAssert fileExists(project / "resources" / "icon.png")
-  doAssert fileExists(project / ".agents" / "skills" / "mynim-maintenance" /
+  doAssert fileExists(project / ".agents" / "skills" / "nim-xplat-maintenance" /
     "SKILL.md")
   doAssert getFileSize(project / "resources" / "icon.png") > 0
   doAssert readFile(project / "src" / "main.nim").contains("Ada \\\"Counter\\\"")
@@ -44,7 +44,7 @@ proc testInit() =
   doAssert runInit(@[
     "--template", "web",
     "--name", "Web <App>",
-    "--mygo", getCurrentDir(),
+    "--nim-xplat", getCurrentDir(),
     webProject]) == 0
   doAssert fileExists(webProject / "src" / "main.nim")
   doAssert fileExists(webProject / "src" / "main.ts")

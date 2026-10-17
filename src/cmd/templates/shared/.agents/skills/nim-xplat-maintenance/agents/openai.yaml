@@ -1,3 +1,3 @@
 interface:
-  display_name: "MyNim Maintenance"
+  display_name: "nim-xplat Maintenance"
   short_description: "Maintain Nim apps with safe native UI lifetimes"

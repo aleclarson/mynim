@@ -1,4 +1,4 @@
-## Create a MyNim application project.
+## Create a nim-xplat application project.
 
 import std/[json, math, os, strutils]
 import mynim/image as imagePackage
@@ -6,16 +6,16 @@ import ./skills
 
 const
   version = "0.1.0"
-  usageInit = """Usage: mynim init [flags] <dir>
+  usageInit = """Usage: nim-xplat init [flags] <dir>
 
-Create a new MyNim project with a native, GPU-rendered UI by default.
+Create a new nim-xplat project with a native, GPU-rendered UI by default.
 
 Flags:
   -name string       application name (defaults to the directory name)
   -package string    Nimble package name (defaults to a slug of the directory)
   -module string     alias for -package
   -template string   native (the default) or web
-  -mynim path        local MyNim checkout to use instead of a package dependency
+  -nim-xplat path    local checkout instead of a package dependency
   -h, --help         show this help
 """
   nativeMainTemplate = staticRead("templates/native/main.nim.tmpl")
@@ -86,13 +86,13 @@ proc defaultIcon(): seq[byte] =
 
 proc writeBytes(path: string; bytes: seq[byte]) =
   if bytes.len == 0:
-    raise newException(IOError, "mynim init: cannot write an empty icon")
+    raise newException(IOError, "nim-xplat init: cannot write an empty icon")
   var file: File
   if not open(file, path, fmWrite):
-    raise newException(IOError, "mynim init: cannot create " & path)
+    raise newException(IOError, "nim-xplat init: cannot create " & path)
   try:
     if file.writeBuffer(unsafeAddr bytes[0], bytes.len) != bytes.len:
-      raise newException(IOError, "mynim init: could not write " & path)
+      raise newException(IOError, "nim-xplat init: could not write " & path)
   finally:
     close(file)
 
@@ -100,23 +100,23 @@ proc writeText(path, content: string) =
   try:
     writeFile(path, content)
   except OSError as error:
-    raise newException(IOError, "mynim init: " & error.msg)
+    raise newException(IOError, "nim-xplat init: " & error.msg)
 
 proc checkProjectDir(path: string): tuple[dir, name: string] =
   if path.len == 0:
-    raise newException(ValueError, "mynim init: missing project directory")
+    raise newException(ValueError, "nim-xplat init: missing project directory")
   result.dir = absolutePath(path)
   result.name = splitPath(result.dir).tail
   if result.name.len == 0:
     raise newException(ValueError,
-      "mynim init: the project directory must have a name")
+      "nim-xplat init: the project directory must have a name")
   if fileExists(result.dir):
     raise newException(ValueError,
-      "mynim init: " & result.dir & " is not a directory")
+      "nim-xplat init: " & result.dir & " is not a directory")
   if dirExists(result.dir):
     for _ in walkDir(result.dir):
       raise newException(ValueError,
-        "mynim init: " & result.dir & " is not empty")
+        "nim-xplat init: " & result.dir & " is not empty")
 
 proc localSourcePath(path: string): string =
   if path.len == 0:
@@ -124,15 +124,15 @@ proc localSourcePath(path: string): string =
   result = absolutePath(path)
   if not dirExists(result) or not fileExists(result / "src" / "mynim.nim"):
     raise newException(ValueError,
-      "mynim init: " & result & " is not a MyNim checkout")
+      "nim-xplat init: " & result & " is not a nim-xplat checkout")
 
 proc nimbleFile(local: bool; web = false): string =
   result = """version       = "0.1.0"
-author        = "MyNim app"
+author        = "nim-xplat app"
 """
   result.add "description   = " &
-    (if web: "\"Web frontend application built with MyNim\"\n"
-    else: "\"Native UI application built with MyNim\"\n")
+    (if web: "\"Web frontend application built with nim-xplat\"\n"
+    else: "\"Native UI application built with nim-xplat\"\n")
   result.add """license       = "MIT"
 srcDir        = "src"
 bin           = @["main"]
@@ -140,7 +140,7 @@ bin           = @["main"]
 requires "nim >= 2.2.0"
 """
   if not local:
-    result.add "requires \"mynim >= " & version & "\"\n"
+    result.add "requires \"nim-xplat >= " & version & "\"\n"
   result.add """
 
 task run, "Run the application":
@@ -170,15 +170,15 @@ proc writeWebFiles(dir, appName: string) =
 
 proc writePackageJson(dir, appName: string; web: bool; npmPackage: string) =
   var scripts = newJObject()
-  scripts["dev"] = %"mynim dev"
-  scripts["build"] = %"mynim build"
-  scripts["generate"] = %"mynim generate"
-  scripts["test"] = %"mynim test"
-  scripts["vet"] = %"mynim vet"
+  scripts["dev"] = %"nim-xplat dev"
+  scripts["build"] = %"nim-xplat build"
+  scripts["generate"] = %"nim-xplat generate"
+  scripts["test"] = %"nim-xplat test"
+  scripts["vet"] = %"nim-xplat vet"
   var dependencies = newJObject()
   var devDependencies = newJObject()
   if npmPackage.len > 0:
-    devDependencies[npmPackage] = %getEnv("MYNIM_PACKAGE_VERSION", version)
+    devDependencies[npmPackage] = %getEnv("NIM_XPLAT_PACKAGE_VERSION", version)
   if web:
     scripts["dev:web"] = %"vite"
     scripts["build:web"] = %"tsc --noEmit && vite build"
@@ -240,9 +240,9 @@ import std/os
 
 let installed = currentSourcePath().parentDir() / "node_modules" / {{PACKAGE_NAME}}
 let packageRoot = if dirExists(installed): installed
-  else: getEnv("MYNIM_PACKAGE_ROOT")
+  else: getEnv("NIM_XPLAT_PACKAGE_ROOT")
 if packageRoot.len == 0:
-  quit("MyNim is missing. Run npm install, then use npm run build or npm test.")
+  quit("nim-xplat is missing. Run npm install, then use npm run build or npm test.")
 switch("path", packageRoot / "src")
 """.replace("{{PACKAGE_NAME}}", npmPackage.escape()))
   writeBytes(dir / "resources" / "icon.png", defaultIcon())
@@ -277,17 +277,17 @@ proc runInit*(args: seq[string]): int =
       else:
         inc index
         if index >= args.len:
-          stderr.writeLine("mynim init: missing value for -" & flag)
+          stderr.writeLine("nim-xplat init: missing value for -" & flag)
           stderr.write(usageInit)
           return 2
         value = args[index]
       case flag
       of "name": appName = value
       of "package", "module": packageOption = value
-      of "mynim", "mygo": localOption = value
+      of "nim-xplat": localOption = value
       of "template": projectTemplate = value
       else:
-        stderr.writeLine("mynim init: unknown flag -" & flag)
+        stderr.writeLine("nim-xplat init: unknown flag -" & flag)
         stderr.write(usageInit)
         return 2
     else:
@@ -295,11 +295,11 @@ proc runInit*(args: seq[string]): int =
     inc index
 
   if projectTemplate notin ["native", "web"]:
-    stderr.writeLine("mynim init: unknown template " & projectTemplate &
+    stderr.writeLine("nim-xplat init: unknown template " & projectTemplate &
       "; want native or web")
     return 1
   if paths.len != 1:
-    stderr.writeLine("mynim init: expected one project directory")
+    stderr.writeLine("nim-xplat init: expected one project directory")
     stderr.write(usageInit)
     return 2
 
@@ -310,8 +310,8 @@ proc runInit*(args: seq[string]): int =
       splitPath(packageOption).tail else: directoryName
     let packageName = slugify(packageBase).replace("-", "_")
     let local = localSourcePath(localOption)
-    let npm = local.len == 0 and getEnv("MYNIM_PACKAGE_ROOT").len > 0
-    let npmPackage = if npm: getEnv("MYNIM_PACKAGE_NAME", "mynim") else: ""
+    let npm = local.len == 0 and getEnv("NIM_XPLAT_PACKAGE_ROOT").len > 0
+    let npmPackage = if npm: getEnv("NIM_XPLAT_PACKAGE_NAME", "nim-xplat") else: ""
     writeProject(dir, name, packageName, local, projectTemplate, npmPackage)
     let shownPath = displayPath(dir)
     stdout.writeLine("Created " & name & " at " & shownPath & ".")

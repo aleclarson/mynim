@@ -7,7 +7,7 @@ import { fileURLToPath } from 'node:url';
 import { getToolchain } from 'nim-toolchain';
 
 const root = fileURLToPath(new URL('../..', import.meta.url));
-const temporary = await mkdtemp(join(tmpdir(), 'mynim-cli-tests-'));
+const temporary = await mkdtemp(join(tmpdir(), 'nim-xplat-cli-tests-'));
 try {
   const toolchain = await getToolchain();
   const tests = (await readdir(join(root, 'tests'))).filter(name => /^tcli_.*\.nim$/.test(name));

@@ -1,9 +1,9 @@
-## Run the test task of a MyNim application with the active toolchain.
+## Run the test task of a nim-xplat application with the active toolchain.
 
 import std/[os, osproc, strutils]
 
 const usageTest = """
-Usage: mynim test [dir]
+Usage: nim-xplat test [dir]
 
 Run the project's Nimble test task.
 """
@@ -27,5 +27,5 @@ proc runTest*(args: seq[string]): int =
     finally:
       process.close()
   except CatchableError as error:
-    stderr.writeLine("mynim test: " & error.msg)
+    stderr.writeLine("nim-xplat test: " & error.msg)
     return 1

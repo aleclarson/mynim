@@ -91,7 +91,7 @@ proc testBuild() =
   let project = temporary / "project with spaces"
   doAssert runInit(@[
     "--name", "Ada & Counter",
-    "--mygo", getCurrentDir(),
+    "--nim-xplat", getCurrentDir(),
     project]) == 0
 
   createDir(project / "resources")
@@ -114,7 +114,7 @@ writeFile("build-step-ran.txt", "yes")
   writeFile(project / "src" / "main.nim", """import std/os
 import mynim
 
-if getEnv("MYNIM_GENERATE").len > 0:
+if getEnv("NIM_XPLAT_GENERATE").len > 0:
   writeFile("client-generation-ran.txt", "yes")
 
 if getEnv("MYNIM_PACKAGE_TEST") == "1":

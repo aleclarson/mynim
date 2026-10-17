@@ -21,14 +21,14 @@
     "x64"
   ],
   "bin": {
-    "mynim": "npm/bin/mynim.js"
+    "nim-xplat": "npm/bin/nim-xplat.js"
   },
   "files": [
     "npm/bin/",
     "npm/lib/",
     "src/",
     "nim.cfg",
-    "mynim.nimble",
+    "nim-xplat.nimble",
     "licenses/"
   ],
   "dependencies": {

@@ -9,7 +9,8 @@ const root = fileURLToPath(new URL('../..', import.meta.url));
 const npm = process.env.npm_execpath;
 assert.ok(npm, 'Run this test with npm run test:smoke.');
 const metadata = JSON.parse(await readFile(join(root, 'package.json')));
-const temporary = await mkdtemp(join(tmpdir(), 'mynim-npm-smoke-'));
+assert.deepEqual(metadata.bin, { 'nim-xplat': 'npm/bin/nim-xplat.js' });
+const temporary = await mkdtemp(join(tmpdir(), 'nim-xplat-npm-smoke-'));
 const env = {
   ...process.env,
   NIM_TOOLCHAIN_CACHE: join(temporary, 'toolchains'),
@@ -29,7 +30,7 @@ try {
   await writeFile(join(consumer, 'package.json'), JSON.stringify({ name: 'consumer', private: true }));
   const [packed] = JSON.parse(run(['pack', '--json', '--pack-destination', temporary], root).stdout);
   assert.ok(packed.files.some(file => file.path === 'src/mynim.nim'));
-  assert.ok(packed.files.some(file => file.path === 'src/cmd/mynim.nim'));
+  assert.ok(packed.files.some(file => file.path === 'src/cmd/nim_xplat.nim'));
   assert.ok(!packed.files.some(file => file.path.startsWith('packages/') || file.path.startsWith('.agents/')));
   const archive = join(temporary, packed.filename);
   run(['install', '--ignore-scripts', '--no-audit', '--no-fund', archive], consumer);
@@ -39,21 +40,20 @@ try {
     env.PATH = [dirname(process.execPath), '/usr/bin', '/bin', '/usr/sbin', '/sbin'].join(delimiter);
   }
   console.log('Building the CLI from a packed install with the published toolchain...');
-  const version = run(['exec', '--offline', '--', 'mynim', '--version'], consumer);
-  assert.equal(version.stdout.trim(), `mynim ${metadata.version}`);
-  assert.ok(!version.stdout.includes('mygo'));
-  const cached = run(['exec', '--offline', '--', 'mynim', '--version'], consumer);
-  assert.ok(!cached.stderr.includes('Preparing the mynim CLI'));
+  const version = run(['exec', '--offline', '--', 'nim-xplat', '--version'], consumer);
+  assert.equal(version.stdout.trim(), `nim-xplat ${metadata.version}`);
+  const cached = run(['exec', '--offline', '--', 'nim-xplat', '--version'], consumer);
+  assert.ok(!cached.stderr.includes('Preparing the nim-xplat CLI'));
 
   for (const template of ['native', 'web']) {
     const project = join(consumer, `${template} app`);
-    run(['exec', '--offline', '--', 'mynim', 'init', '--template', template, project], consumer);
+    run(['exec', '--offline', '--', 'nim-xplat', 'init', '--template', template, project], consumer);
     const manifest = JSON.parse(await readFile(join(project, 'package.json')));
     assert.equal(manifest.devDependencies[metadata.name], metadata.version);
-    assert.equal(manifest.scripts.build, 'mynim build');
-    assert.equal(manifest.scripts.test, 'mynim test');
+    assert.equal(manifest.scripts.build, 'nim-xplat build');
+    assert.equal(manifest.scripts.test, 'nim-xplat test');
     const nimbleName = (await readdir(project)).find(name => name.endsWith('.nimble'));
-    assert.ok(!(await readFile(join(project, nimbleName), 'utf8')).includes('requires "mynim'));
+    assert.ok(!(await readFile(join(project, nimbleName), 'utf8')).includes('requires "nim-xplat'));
     // Install the candidate tarball until its version is available on npm.
     manifest.devDependencies[metadata.name] = 'file:' + archive;
     await writeFile(join(project, 'package.json'), JSON.stringify(manifest));
@@ -75,8 +75,8 @@ try {
     config.devCommand = '';
     config.frontendDist = '';
     await writeFile(configPath, JSON.stringify(config));
-    await writeFile(join(moved, 'src', 'main.nim'), `import std/os\nimport mynim\nif getEnv("MYNIM_GENERATE").len == 0:\n  echo "managed dev toolchain"\n`);
-    const dev = run(['exec', '--offline', '--', 'mynim', 'dev', '-skip-dev-command', moved], moved);
+    await writeFile(join(moved, 'src', 'main.nim'), `import std/os\nimport mynim\nif getEnv("NIM_XPLAT_GENERATE").len == 0:\n  echo "managed dev toolchain"\n`);
+    const dev = run(['exec', '--offline', '--', 'nim-xplat', 'dev', '-skip-dev-command', moved], moved);
     assert.ok(dev.stdout.includes('managed dev toolchain'));
     await writeFile(join(moved, 'tests', 'test_app.nim'), 'quit(7)\n');
     const failed = spawnSync(process.execPath, [npm, 'test'], { cwd: moved, env, encoding: 'utf8', timeout: 120_000 });

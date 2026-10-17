@@ -54,7 +54,7 @@ proc prepareGitHubRelease*(config: JsonNode; projectDir, version: string):
   let updates = config["updates"]
   if updates.hasKey("s3") and updates["s3"].kind != JNull:
     raise newException(ValueError,
-      "mygo build: S3 uploads are not ported yet")
+      "nim-xplat build: S3 uploads are not ported yet")
   let publicKey = configString(updates, "publicKey", "").strip()
   var decodedKey: string
   try:

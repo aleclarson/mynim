@@ -485,7 +485,7 @@ proc onRightClick*(t: Tray; fn: proc() {.closure.}): proc() {.closure.} =
 
 proc notificationsSupported*(): bool =
   ## Whether desktop notifications can be shown. On macOS they require
-  ## a packaged app, which `mynim dev` and `mynim build` produce.
+  ## a packaged app, which `nim-xplat dev` and `nim-xplat build` produce.
   needsApp("notificationsSupported")
   onMainValue(proc(): bool = backend().notificationsSupported())
 

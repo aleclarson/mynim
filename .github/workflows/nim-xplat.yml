@@ -1,4 +1,4 @@
-name: MyNim npm package
+name: nim-xplat npm package
 
 on:
   push:

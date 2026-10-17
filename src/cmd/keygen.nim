@@ -1,11 +1,11 @@
-## Generate the Ed25519 key pair used to sign MyGo updates.
+## Generate the Ed25519 key pair used to sign app updates.
 
 import std/[base64, os, osproc, strutils]
 
 when defined(posix):
   import std/posix as posix
 
-const usageKeygen = """Usage: mygo keygen [flags]
+const usageKeygen = """Usage: nim-xplat keygen [flags]
 
 Create the Ed25519 key pair that signs updates. Put the contents of
 mygo-update.pub in updates.publicKey and keep mygo-update.key private.
@@ -112,24 +112,24 @@ proc runKeygen*(args: seq[string]): int =
     elif arg.startsWith("-force=") or arg.startsWith("--force="):
       let value = arg.split('=', maxsplit = 1)[1]
       if value notin ["true", "false"]:
-        stderr.writeLine("mygo keygen: invalid boolean value for -force: " & value)
+        stderr.writeLine("nim-xplat keygen: invalid boolean value for -force: " & value)
         return 2
       force = value == "true"
     elif arg == "-o" or arg == "--output":
       inc i
       if i >= args.len:
-        stderr.writeLine("mygo keygen: missing value for " & arg)
+        stderr.writeLine("nim-xplat keygen: missing value for " & arg)
         stderr.write(usageKeygen)
         return 2
       outputDir = args[i]
     elif arg.startsWith("-o=") or arg.startsWith("--output="):
       outputDir = arg.split('=', maxsplit = 1)[1]
       if outputDir.len == 0:
-        stderr.writeLine("mygo keygen: missing value for -o")
+        stderr.writeLine("nim-xplat keygen: missing value for -o")
         stderr.write(usageKeygen)
         return 2
     elif arg.startsWith('-'):
-      stderr.writeLine("mygo keygen: unknown flag " & arg)
+      stderr.writeLine("nim-xplat keygen: unknown flag " & arg)
       stderr.write(usageKeygen)
       return 2
     else:
@@ -137,17 +137,17 @@ proc runKeygen*(args: seq[string]): int =
     inc i
 
   if positional.len > 0:
-    stderr.writeLine("mygo keygen: does not accept positional arguments")
+    stderr.writeLine("nim-xplat keygen: does not accept positional arguments")
     stderr.write(usageKeygen)
     return 2
   if outputDir.len == 0:
-    stderr.writeLine("mygo keygen: output directory cannot be empty")
+    stderr.writeLine("nim-xplat keygen: output directory cannot be empty")
     return 2
 
   let secretPath = outputDir / "mygo-update.key"
   let publicPath = outputDir / "mygo-update.pub"
   if not force and (fileExists(secretPath) or fileExists(publicPath)):
-    stderr.writeLine("mygo keygen: " & outputDir &
+    stderr.writeLine("nim-xplat keygen: " & outputDir &
       " already holds keys; pass -force to replace them")
     return 1
 
@@ -171,5 +171,5 @@ proc runKeygen*(args: seq[string]): int =
       "  }\n")
     return 0
   except CatchableError as error:
-    stderr.writeLine("mygo keygen: " & error.msg)
+    stderr.writeLine("nim-xplat keygen: " & error.msg)
     return 1

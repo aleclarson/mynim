@@ -62,7 +62,7 @@ var ipcEvents: seq[ref EventInfo]
 initLock(ipcMu)
 
 ## bind exposes the methods of a service to the frontend. The generated
-## TypeScript client (see `mynim generate`) turns
+## TypeScript client (see `nim-xplat generate`) turns
 ##
 ##   proc greet*(g: Greeter; name: string): tuple[v: JsonNode, err: ...]
 ##
@@ -377,7 +377,7 @@ proc handleCall(w: Window; ctx: CancelCtx; raw: string; trusted: bool) =
 ## --- Event[T] ---
 
 ## Event is a typed event the app sends to pages. Declare events at
-## module level so `mynim generate` includes them in the TypeScript
+## module level so `nim-xplat generate` includes them in the TypeScript
 ## client:
 ##
 ##   var Progress* = newEvent[JsonNode]("progress")

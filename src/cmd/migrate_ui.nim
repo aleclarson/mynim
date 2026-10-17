@@ -4,7 +4,7 @@ import std/[algorithm, os, strutils, tables]
 
 const
   uiImportPath = "github.com/egoist/mygo/ui"
-  usageMigrateUi* = """Usage: mygo migrate-ui [-write] [dir]
+  usageMigrateUi* = """Usage: nim-xplat migrate-ui [-write] [dir]
 
 Preview changed Go files by default. Use -write to apply the migration.
 """
@@ -1008,17 +1008,17 @@ proc runMigrateUI*(args: seq[string]): int =
       elif value in ["0", "f", "false"]:
         write = false
       else:
-        stderr.writeLine("mygo migrate-ui: invalid boolean value " & value)
+        stderr.writeLine("nim-xplat migrate-ui: invalid boolean value " & value)
         stderr.write(usageMigrateUi)
         return 2
     elif not positional and arg.startsWith("-"):
-      stderr.writeLine("mygo migrate-ui: unknown flag " & arg)
+      stderr.writeLine("nim-xplat migrate-ui: unknown flag " & arg)
       stderr.write(usageMigrateUi)
       return 2
     else:
       paths.add arg
   if paths.len > 1:
-    stderr.writeLine("mygo migrate-ui: accepts one directory")
+    stderr.writeLine("nim-xplat migrate-ui: accepts one directory")
     stderr.write(usageMigrateUi)
     return 2
 
@@ -1045,5 +1045,5 @@ proc runMigrateUI*(args: seq[string]): int =
         setFilePermissions(name, permissions[name])
       stdout.writeLine(name)
   except CatchableError as error:
-    stderr.writeLine("mygo migrate-ui: " & error.msg)
+    stderr.writeLine("nim-xplat migrate-ui: " & error.msg)
     return 1

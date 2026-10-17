@@ -1,4 +1,4 @@
-## Compile a native MyNim project for the host and package its resources.
+## Compile a native nim-xplat project for the host and package its resources.
 
 import std/[algorithm, json, os, osproc, streams, strutils, tempfiles]
 import ./resources as projectResources
@@ -9,7 +9,7 @@ when hostOS == "macosx":
   import ./dmg as dmgPackager
   import ./codesign as macCodeSign
 
-const usageBuild = """Usage: mynim build [flags] [dir]
+const usageBuild = """Usage: nim-xplat build [flags] [dir]
 
 Build a native project for this machine.
 
@@ -54,7 +54,7 @@ proc addStringDefine(args: var seq[string]; name, value: string) =
   for ch in value:
     if ord(ch) < 32 or ord(ch) == 127:
       raise newException(ValueError,
-        "mygo build: " & name & " cannot contain control characters")
+        "nim-xplat build: " & name & " cannot contain control characters")
   args.add("-d:" & name & "=" & value)
 
 proc compileApp(projectDir, source, output, cache: string; debug,
@@ -129,13 +129,13 @@ proc collectFrontendFiles(dir: string; files: var seq[string]) =
 proc writeEmbeddedMain(path, source, frontendDir: string) =
   if not dirExists(frontendDir):
     raise newException(IOError,
-      "mynim build: frontendDist is not a directory: " & frontendDir)
+      "nim-xplat build: frontendDist is not a directory: " & frontendDir)
   var files: seq[string]
   collectFrontendFiles(frontendDir, files)
   files.sort()
   if files.len == 0:
     raise newException(IOError,
-      "mynim build: frontendDist contains no files: " & frontendDir)
+      "nim-xplat build: frontendDist contains no files: " & frontendDir)
 
   var code = """import std/tables
 import mynim
@@ -234,7 +234,7 @@ proc replaceBuildDir(stage, target, parent: string) =
     moveDir(target, backup)
   try:
     moveDir(stage, target)
-    writeFile(marker, "mynim native build output\n")
+    writeFile(marker, "nim-xplat native build output\n")
   except CatchableError:
     if dirExists(target) and not dirExists(stage):
       moveDir(target, stage)
@@ -245,7 +245,7 @@ proc replaceBuildDir(stage, target, parent: string) =
     try:
       removeDir(backup)
     except CatchableError as error:
-      stderr.writeLine("mynim build: could not remove previous output: " &
+      stderr.writeLine("nim-xplat build: could not remove previous output: " &
         error.msg)
 
 proc runBuild*(args: seq[string]): int =
@@ -280,7 +280,7 @@ proc runBuild*(args: seq[string]): int =
     elif arg.startsWith("-upload=") or arg.startsWith("--upload="):
       let value = arg.split('=', maxsplit = 1)[1]
       if value notin ["true", "false"]:
-        stderr.writeLine("mygo build: invalid boolean value for -upload: " &
+        stderr.writeLine("nim-xplat build: invalid boolean value for -upload: " &
           value)
         return 2
       upload = value == "true"
@@ -294,18 +294,18 @@ proc runBuild*(args: seq[string]): int =
       else:
         inc index
         if index >= args.len:
-          stderr.writeLine("mynim build: missing value for " & flag)
+          stderr.writeLine("nim-xplat build: missing value for " & flag)
           return 2
         value = args[index]
       if value.len == 0:
-        stderr.writeLine("mynim build: missing value for " & flag)
+        stderr.writeLine("nim-xplat build: missing value for " & flag)
         return 2
       case flag
       of "-o", "--output": outputOption = value
       of "-platform", "--platform": platformOption = value
       of "-sign", "--sign": signingIdentity = value
       else:
-        stderr.writeLine("mynim build: unknown flag " & flag)
+        stderr.writeLine("nim-xplat build: unknown flag " & flag)
         stderr.write(usageBuild)
         return 2
     else:
@@ -313,13 +313,13 @@ proc runBuild*(args: seq[string]): int =
     inc index
 
   if paths.len > 1:
-    stderr.writeLine("mynim build: expected at most one project directory")
+    stderr.writeLine("nim-xplat build: expected at most one project directory")
     stderr.write(usageBuild)
     return 2
 
   let (targetOs, targetArch, hostPlatform) = hostTarget()
   if platformOption.len > 0 and platformOption notin [hostPlatform, "host"]:
-    stderr.writeLine("mynim build: only the host platform is supported (" &
+    stderr.writeLine("nim-xplat build: only the host platform is supported (" &
       hostPlatform & ")")
     return 1
 
@@ -328,11 +328,11 @@ proc runBuild*(args: seq[string]): int =
       else: absolutePath(paths[0])
     if not dirExists(projectDir):
       raise newException(ValueError,
-        "mynim build: " & projectDir & " is not a directory")
+        "nim-xplat build: " & projectDir & " is not a directory")
     let configPath = projectDir / "mygo.json"
     if not fileExists(configPath):
       raise newException(ValueError,
-        "mynim build: expected mygo.json in " & projectDir)
+        "nim-xplat build: expected mygo.json in " & projectDir)
     let config = parseFile(configPath)
     if config.kind != JObject:
       raise newException(ValueError, "mygo.json must contain a JSON object")
@@ -390,7 +390,7 @@ proc runBuild*(args: seq[string]): int =
       projectDir / "src" / "main.nim" else: projectDir / "main.nim"
     if not fileExists(source):
       raise newException(ValueError,
-        "mynim build: expected src/main.nim or main.nim in " & projectDir)
+        "nim-xplat build: expected src/main.nim or main.nim in " & projectDir)
     if needsClientGeneration(projectDir, config) and
         runGenerate(@[projectDir]) != 0:
       return 1
@@ -398,7 +398,7 @@ proc runBuild*(args: seq[string]): int =
       stdout.writeLine("Running buildCommand")
       let code = runBuildCommand(buildCommand, projectDir)
       if code != 0:
-        stderr.writeLine("mynim build: buildCommand exited with status " & $code)
+        stderr.writeLine("nim-xplat build: buildCommand exited with status " & $code)
         return 1
 
     createDir(outputRoot)
@@ -478,7 +478,7 @@ proc runBuild*(args: seq[string]): int =
       releasePublisher.publishGitHub(githubRelease, artifacts)
     return 0
   except CatchableError as error:
-    let message = if error.msg.startsWith("mynim build:"): error.msg
-      else: "mynim build: " & error.msg
+    let message = if error.msg.startsWith("nim-xplat build:"): error.msg
+      else: "nim-xplat build: " & error.msg
     stderr.writeLine(message)
     return 1

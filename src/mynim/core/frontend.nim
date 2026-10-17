@@ -4,10 +4,10 @@
 ## Windows load it with URLs without a scheme, such as "/" or
 ## "/settings" (see WindowOptions.url), which resolve against:
 ##
-##   - the dev server at devUrl (mygo.config.ts) while `mygo dev`
+##   - the dev server at devUrl (mygo.config.ts) while `nim-xplat dev`
 ##     runs the app;
 ##   - otherwise mygo://localhost/, which serves the frontendDist
-##     files `mygo build` embeds into the app (see setFrontend).
+##     files `nim-xplat build` embeds into the app (see setFrontend).
 ##
 ## The mygo scheme serves the frontend unless the app handles it
 ## itself with protocol.handle.
@@ -26,7 +26,7 @@ proc setFrontend*(fsys: Fs) =
   ## without a file extension that match no file serve index.html, for
   ## client-side routing.
   ##
-  ## `mygo build` calls it with the frontendDist files it embeds into
+  ## `nim-xplat build` calls it with the frontendDist files it embeds into
   ## the app, so apps rarely need to. Call it to ship a frontend
   ## without the mynim CLI, e.g. from vfs.mapFs.
   acquire(frontend.mu)

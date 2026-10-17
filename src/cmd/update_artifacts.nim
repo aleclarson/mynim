@@ -81,7 +81,7 @@ proc runtimeUpdateSettings*(config: JsonNode; target: string):
   result.publicKey = configString(updates, "publicKey", "").strip()
   if result.publicKey.len == 0:
     raise newException(ValueError,
-      "mygo.json: updates needs the publicKey of mygo keygen")
+      "mygo.json: updates needs the publicKey of nim-xplat keygen")
   var decodedPublic: string
   try:
     decodedPublic = decode(result.publicKey)
@@ -171,7 +171,7 @@ proc signArchive(archive: string; privateKey: string): string =
   if openssl.len == 0:
     raise newException(IOError,
       "signing updates needs OpenSSL 1.1.1 or later on PATH")
-  let temporary = createTempDir("mynim-update-sign-", "")
+  let temporary = createTempDir("nim-xplat-update-sign-", "")
   defer:
     if dirExists(temporary):
       removeDir(temporary)
@@ -229,7 +229,7 @@ proc archiveEntries(stage, name, target: string): seq[string] =
     let bundle = updateSlug(name) & ".app"
     if not dirExists(stage / bundle):
       raise newException(IOError,
-        "mygo build: missing app bundle for update archive: " & bundle)
+        "nim-xplat build: missing app bundle for update archive: " & bundle)
     return @[bundle]
   for kind, path in walkDir(stage):
     if kind in {pcDir, pcFile, pcLinkToDir, pcLinkToFile}:
@@ -237,7 +237,7 @@ proc archiveEntries(stage, name, target: string): seq[string] =
   result.sort()
   if result.len == 0:
     raise newException(IOError,
-      "mygo build: no installed files for update archive")
+      "nim-xplat build: no installed files for update archive")
 
 proc writeUpdateArtifacts*(config: JsonNode; projectDir, stage, name, version,
     target: string): seq[string] =
@@ -259,7 +259,7 @@ proc writeUpdateArtifacts*(config: JsonNode; projectDir, stage, name, version,
   let publicKey = configString(updates, "publicKey", "").strip()
   if publicKey.len == 0:
     raise newException(ValueError,
-      "mygo.json: updates needs the publicKey of mygo keygen")
+      "mygo.json: updates needs the publicKey of nim-xplat keygen")
   var decodedPublic: string
   try:
     decodedPublic = decode(publicKey)
@@ -277,11 +277,11 @@ proc writeUpdateArtifacts*(config: JsonNode; projectDir, stage, name, version,
   let key = signingKey(updates, projectDir, publicKey)
   if key.len == 0:
     stderr.writeLine(
-      "mygo build: not signing an update; set MYGO_UPDATER_PRIVATE_KEY " &
+      "nim-xplat build: not signing an update; set MYGO_UPDATER_PRIVATE_KEY " &
       "or updates.privateKey")
     return
   if deltaCount > 0:
-    stderr.writeLine("mygo build: delta updates are not ported yet; " &
+    stderr.writeLine("nim-xplat build: delta updates are not ported yet; " &
       "the update manifest will contain only the full archive")
 
   let notes = updateNotes(updates, projectDir, version)

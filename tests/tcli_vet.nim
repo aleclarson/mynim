@@ -8,7 +8,7 @@ proc testVetTypechecksNativeProject() =
     if dirExists(temporary):
       removeDir(temporary)
   let project = temporary / "project with spaces"
-  doAssert runInit(@["--mygo", getCurrentDir(), project]) == 0
+  doAssert runInit(@["--nim-xplat", getCurrentDir(), project]) == 0
   doAssert runVet(@[project]) == 0
 
   writeFile(project / "src" / "main.nim", """import mynim

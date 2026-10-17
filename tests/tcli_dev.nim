@@ -31,7 +31,7 @@ proc testDevRebuildsAndRestartsNativeApp() =
     if dirExists(temporary):
       removeDir(temporary)
   let project = temporary / "project with spaces"
-  doAssert runInit(@["--mygo", getCurrentDir(), project]) == 0
+  doAssert runInit(@["--nim-xplat", getCurrentDir(), project]) == 0
   let marker = temporary / "runs.txt"
   let sourcePath = project / "src" / "main.nim"
   writeFile(sourcePath, """import std/[os, strutils]
@@ -40,7 +40,7 @@ import mynim
 app.setName("Dev integration")
 echo app.name()
 echo getEnv("MYNIM_LOCALE")
-if getEnv("MYNIM_GENERATE").len == 0:
+if getEnv("NIM_XPLAT_GENERATE").len == 0:
   let marker = getEnv("MYNIM_DEV_TEST_MARKER")
   let count = if fileExists(marker): parseInt(readFile(marker).strip()) else: 0
   writeFile(marker, $(count + 1))
@@ -51,9 +51,9 @@ if getEnv("MYNIM_GENERATE").len == 0:
 
   let nimble = findExe("nimble")
   doAssert nimble.len > 0, "nimble was not found on PATH"
-  let cli = temporary / "mynim"
+  let cli = temporary / "nim-xplat"
   let builtCli = run(nimble, @[
-    "c", "--out:" & cli, getCurrentDir() / "src" / "cmd" / "mynim.nim"],
+    "c", "--out:" & cli, getCurrentDir() / "src" / "cmd" / "nim_xplat.nim"],
     getCurrentDir())
   doAssert builtCli.code == 0, builtCli.output
 
@@ -61,7 +61,7 @@ if getEnv("MYNIM_GENERATE").len == 0:
   for key, value in envPairs():
     env[key] = value
   env["MYNIM_DEV_TEST_MARKER"] = marker
-  env.del("MYNIM_GENERATE")
+  env.del("NIM_XPLAT_GENERATE")
   let process = startProcess(cli, args = @["dev", "-lang", "en-XA", project],
     workingDir = project, env = env, options = {poUsePath, poStdErrToStdOut})
   try:

@@ -145,7 +145,7 @@ proc registerClasses*() =
     return
   wndProcCallback = cast[pointer](wndProc)
   let cursor = procLoadCursorW(0, idcArrow)
-  ## the icon resource `mygo build` embeds
+  ## the icon resource `nim-xplat build` embeds
   let icon = procLoadIconW(instance(), 1)
   for name in [appClass, windowClass, captionClass, flyoutShadowClass]:
     var style = 0x0003'u32 ## CS_HREDRAW | CS_VREDRAW
@@ -365,7 +365,7 @@ method showAboutPanel*(a: appController, o: AboutPanelOptions) =
     title: title, message: o.applicationName, detail: detail,
     buttons: @[tx.ok]))
 
-## package reads the version resource `mygo build` embeds in the
+## package reads the version resource `nim-xplat build` embeds in the
 ## executable.
 method `package`*(a: appController): tuple[info: PackageInfo,
     ok: bool] =
@@ -405,7 +405,7 @@ method `package`*(a: appController): tuple[info: PackageInfo,
     version: query("ProductVersion"),
     identifier: query("MyGoIdentifier"))
   if info.identifier == "":
-    ## not built by mygo build
+    ## not built by nim-xplat build
     return (PackageInfo(), false)
   (info, true)
 

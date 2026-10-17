@@ -1,4 +1,4 @@
-/cmd/mynim
+/cmd/nim-xplat
 /config.nims
 /nimble.paths
 /nimble.develop

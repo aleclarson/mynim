@@ -69,7 +69,7 @@ proc setVersion*(a: Application; v: string) =
 
 proc isPackaged*(a: Application): bool =
   ## Whether the application runs from an app bundle (created by
-  ## `mynim dev` and `mynim build`) rather than a plain executable.
+  ## `nim-xplat dev` and `nim-xplat build`) rather than a plain executable.
   let (_, ok) = packageInfo()
   ok
 
@@ -265,12 +265,13 @@ proc handleReady(a: Application) =
 ## SIGINT and SIGTERM quit the application like quit; a second signal
 ## exits immediately.
 ##
-## When the MYNIM_GENERATE environment variable is set (see
-## `mynim generate`), run writes the TypeScript client for the bound
+## When the NIM_XPLAT_GENERATE environment variable is set (see
+## `nim-xplat generate`), run writes the TypeScript client for the bound
 ## services to that path, or nothing when the app binds none, and
 ## returns without starting the event loop.
 proc run*(a: Application) =
-  let genEnv = getEnv("MYNIM_GENERATE", getEnv("MYGO_GENERATE"))
+  let genEnv = getEnv("NIM_XPLAT_GENERATE",
+    getEnv("MYNIM_GENERATE", getEnv("MYGO_GENERATE")))
   if genEnv != "":
     writeTypeScript(genEnv)
     return
@@ -460,7 +461,7 @@ proc appID(): string =
   app.name()
 
 ## devRelaunchCode is the exit code with which a development build asks
-## `mynim dev` to start it again (relaunch).
+## `nim-xplat dev` to start it again (relaunch).
 const devRelaunchCode = 75
 
 proc setOpenAtLogin*(a: Application; open: bool) =
@@ -498,8 +499,8 @@ proc relaunch*(a: Application) =
   ## Quits the app like quit, then starts it again with the same
   ## arguments, e.g. after changing a setting that needs a restart.
   ## Nothing happens when onBeforeQuit, onWillQuit or a window cancels
-  ## the quit. Under `mynim dev` the build exits once it has quit and
-  ## mynim dev starts it again.
+  ## the quit. Under `nim-xplat dev` the build exits once it has quit and
+  ## nim-xplat dev starts it again.
   discard postMain(proc() =
     a.relaunch = true
     if a.prepareQuit():

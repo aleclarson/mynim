@@ -19,7 +19,7 @@ type
     ## Selects whether the web inspector is available.
     devToolsAuto
       ## enables the inspector unless the app was built for production
-      ## with `mynim build`.
+      ## with `nim-xplat build`.
     devToolsEnabled
     devToolsDisabled
 
@@ -233,8 +233,8 @@ type
       ## The directory of the files the app ships with: the contents of
       ## the project's resources directory, with those of its
       ## directories for the app's platform merged in, and the
-      ## resources listed in mynim.config.ts, which `mynim dev` and
-      ## `mynim build` copy there.
+      ## resources listed in mynim.config.ts, which `nim-xplat dev` and
+      ## `nim-xplat build` copy there.
     pathTemp
     pathExe
     pathDesktop

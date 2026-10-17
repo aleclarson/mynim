@@ -814,7 +814,7 @@ var errDestroyed = newException(ValueError,
 proc loadURL*(p: Page; rawURL: string): ref CatchableError =
   ## Navigates the page to url. A URL without a scheme, such as "/" or
   ## "/settings?tab=1", is a page of the app's frontend: the dev
-  ## server at devUrl during `mynim dev`, the frontend built into the
+  ## server at devUrl during `nim-xplat dev`, the frontend built into the
   ## app otherwise (see setFrontend). Besides http(s) URLs, schemes
   ## registered with protocol.handle can be used.
   if p.w.content != nil:
@@ -2776,7 +2776,7 @@ proc setLocale*(a: Application; tag: string) =
   ## language in its defaults, which System Settings shows and
   ## AppKit and WebKit say their own texts in from the next launch,
   ## in browsers in localStorage, elsewhere in a file in
-  ## pathUserData. The MYNIM_LOCALE environment variable (`mynim dev
+  ## pathUserData. The MYNIM_LOCALE environment variable (`nim-xplat dev
   ## -lang`) chooses the language for one run and keeps nothing.
   ##
   ## The pseudo locales en-XA and ar-XB are always shown, to test
@@ -2899,7 +2899,7 @@ proc startLocale(a: Application) =
     stderr.writeLine("mynim: the app is written in " & missing[0] &
       ", but MyNim's own strings are in English there: import " &
       "mynim/locales/" & missing[1] &
-      ", as the code mynim generate writes for an app's catalogs " &
+      ", as the code nim-xplat generate writes for an app's catalogs " &
       "does, or translate them with keys \"mynim.<key>\" in the " &
       "app's catalog")
 

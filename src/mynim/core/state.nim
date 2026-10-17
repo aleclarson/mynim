@@ -50,11 +50,11 @@ var notifications* = block:
   n.mu.initLock()
   n
 
-## production is "1" when `mynim build` sets -d:production.
+## production is "1" when `nim-xplat build` sets -d:production.
 const isProduction* = defined(production) or defined(release)
 
-## devLaunched tells that `mynim dev` launched the app, which it does
-## with MYNIM_DEV=1: app.relaunch then has mynim dev start it again.
+## devLaunched tells that `nim-xplat dev` launched the app, which it does
+## with MYNIM_DEV=1: app.relaunch then has nim-xplat dev start it again.
 var devLaunched* = block:
   let set = getEnv("MYNIM_DEV", getEnv("MYGO_DEV")) == "1"
   delEnv("MYNIM_DEV")

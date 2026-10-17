@@ -1,11 +1,11 @@
 ---
-name: mynim-maintenance
-description: Maintain MyNim apps: native UI, lifetimes, state, tests, and platform behavior.
+name: nim-xplat-maintenance
+description: Maintain nim-xplat apps: native UI, lifetimes, state, tests, and platform behavior.
 ---
 
-# MyNim app maintenance
+# nim-xplat app maintenance
 
-Check the app's `mynim` dependency and nearby conventions before changing an
+Check the app's `nim-xplat` dependency and nearby conventions before changing an
 API. Read its package documentation and the comments beside the relevant API.
 Confirm that an API exists in the version pinned by the app's Nimble package.
 

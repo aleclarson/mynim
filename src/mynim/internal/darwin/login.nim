@@ -22,7 +22,7 @@ proc bundlePath(): string =
   if not path.endsWith(".app"):
     raise newException(ValueError,
       "mynim: starting at login needs an app bundle; run the app with " &
-      "mynim dev or build it with mynim build")
+      "nim-xplat dev or build it with nim-xplat build")
   path
 
 proc launchAgentPath(appID: string): string =

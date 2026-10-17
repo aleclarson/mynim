@@ -6,7 +6,7 @@ proc testInstallSkills() =
   defer: removeDir(temporary)
 
   let project = temporary / "project"
-  let skillDir = project / ".agents" / "skills" / "mynim-maintenance"
+  let skillDir = project / ".agents" / "skills" / "nim-xplat-maintenance"
   createDir(skillDir / "agents")
   writeFile(skillDir / "SKILL.md", "old bundled skill")
   writeFile(skillDir / "custom.md", "keep this file")
@@ -16,7 +16,7 @@ proc testInstallSkills() =
 
   doAssert runInstallSkills(@[project]) == 0
   let installed = readFile(skillDir / "SKILL.md")
-  doAssert installed.contains("name: mynim-maintenance")
+  doAssert installed.contains("name: nim-xplat-maintenance")
   doAssert installed.contains("ui.newTester")
   doAssert readFile(skillDir / "custom.md") == "keep this file"
   doAssert readFile(project / ".agents" / "skills" / "my-custom-skill" /

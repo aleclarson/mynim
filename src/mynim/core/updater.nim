@@ -61,7 +61,7 @@ when not defined(emscripten):
   type
     UpdaterModule* = object
       ## The singleton app updater. Apps receive a configured feed and key from
-      ## `mygo build` when `updates` is set in mygo.json.
+      ## `nim-xplat build` when `updates` is set in mygo.json.
 
     Update* = object
       ## A newer signed release found by `Updater.check`.

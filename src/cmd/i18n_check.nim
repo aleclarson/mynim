@@ -1,4 +1,4 @@
-## Check the ARB-style message catalogs configured by a MyNim project.
+## Check the ARB-style message catalogs configured by a nim-xplat project.
 
 import std/[algorithm, json, os, parsejson, sequtils, streams, strutils,
   tables]
@@ -29,7 +29,7 @@ type
     path, message: string
     warning: bool
 
-const usageI18n = """Usage: mynim i18n check [dir]
+const usageI18n = """Usage: nim-xplat i18n check [dir]
 
 Check the catalogs configured by i18n in mygo.json.
 Errors exit with status 1; missing translations are warnings.
@@ -470,23 +470,23 @@ proc checkProject(projectDir: string): int =
   var diagnostics: seq[Diagnostic]
   let configPath = projectDir / "mygo.json"
   if not fileExists(configPath):
-    stderr.writeLine("mynim i18n: expected mygo.json in " & projectDir)
+    stderr.writeLine("nim-xplat i18n: expected mygo.json in " & projectDir)
     return 1
 
   var config: JsonNode
   try:
     config = parseFile(configPath)
   except JsonParsingError as error:
-    stderr.writeLine("mynim i18n: " & error.msg)
+    stderr.writeLine("nim-xplat i18n: " & error.msg)
     return 1
   if config.kind != JObject:
-    stderr.writeLine("mynim i18n: mygo.json must contain a JSON object")
+    stderr.writeLine("nim-xplat i18n: mygo.json must contain a JSON object")
     return 1
   if not config.hasKey("i18n") or config["i18n"].kind == JNull:
-    stderr.writeLine("mynim i18n: the project has no catalogs; set i18n in mygo.json")
+    stderr.writeLine("nim-xplat i18n: the project has no catalogs; set i18n in mygo.json")
     return 1
   if config["i18n"].kind != JObject:
-    stderr.writeLine("mynim i18n: mygo.json: i18n must be an object")
+    stderr.writeLine("nim-xplat i18n: mygo.json: i18n must be an object")
     return 1
 
   try:
@@ -562,25 +562,25 @@ proc checkProject(projectDir: string): int =
 
     let errors = printDiagnostics(diagnostics)
     if errors > 0:
-      stderr.writeLine("mynim i18n: " & $errors & " error" &
+      stderr.writeLine("nim-xplat i18n: " & $errors & " error" &
         (if errors == 1: "" else: "s") & " in the catalogs")
       return 1
     stdout.writeLine($source.order.len & " messages in " & tags.join(", "))
     return 0
   except CatchableError as error:
-    stderr.writeLine("mynim i18n: " & error.msg)
+    stderr.writeLine("nim-xplat i18n: " & error.msg)
     return 1
 
 proc runI18n*(args: seq[string]): int =
   if args.len == 0:
     stderr.write(usageI18n)
-    stderr.writeLine("mynim i18n: unknown subcommand; want check")
+    stderr.writeLine("nim-xplat i18n: unknown subcommand; want check")
     return 1
   if args[0] in ["-h", "--help", "help"]:
     stdout.write(usageI18n)
     return 0
   if args[0] != "check":
-    stderr.writeLine("mynim i18n: unknown subcommand; want check")
+    stderr.writeLine("nim-xplat i18n: unknown subcommand; want check")
     stderr.write(usageI18n)
     return 2
   var paths: seq[string]
@@ -594,18 +594,18 @@ proc runI18n*(args: seq[string]): int =
       stdout.write(usageI18n)
       return 0
     if args[i].startsWith("-"):
-      stderr.writeLine("mynim i18n check: unknown flag " & args[i])
+      stderr.writeLine("nim-xplat i18n check: unknown flag " & args[i])
       stderr.write(usageI18n)
       return 2
     paths.add args[i]
     inc i
   if paths.len > 1:
-    stderr.writeLine("mynim i18n check: expected at most one project directory")
+    stderr.writeLine("nim-xplat i18n check: expected at most one project directory")
     stderr.write(usageI18n)
     return 2
   let projectDir = if paths.len == 0: getCurrentDir()
     else: absolutePath(paths[0])
   if not dirExists(projectDir):
-    stderr.writeLine("mynim i18n: " & projectDir & " is not a directory")
+    stderr.writeLine("nim-xplat i18n: " & projectDir & " is not a directory")
     return 1
   checkProject(projectDir)

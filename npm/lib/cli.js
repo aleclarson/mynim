@@ -37,22 +37,22 @@ async function fileExists(path) {
 
 async function cliExecutable(toolchain) {
   const hash = await sourceHash();
-  const cache = join(dirname(toolchain.directory), 'mynim');
+  const cache = join(dirname(toolchain.directory), 'nim-xplat');
   const directory = join(cache, `${toolchain.version}-${process.platform}-${process.arch}-${hash}`);
-  const name = process.platform === 'win32' ? 'mynim.exe' : 'mynim';
+  const name = process.platform === 'win32' ? 'nim-xplat.exe' : 'nim-xplat';
   const executable = join(directory, name);
   if (await fileExists(executable)) return executable;
   await mkdir(cache, { recursive: true });
   const temporary = await mkdtemp(join(cache, '.build-'));
   try {
-    console.error('Preparing the mynim CLI...');
+    console.error('Preparing the nim-xplat CLI...');
     const code = await runProcess(toolchain.nim, [
       'c', '-d:release', '--checks:on', '--threads:on', '-d:ssl', '--hints:off',
       '--skipUserCfg:on', '--skipParentCfg:on',
       '--path:' + join(packageRoot, 'src'),
       '--nimcache:' + join(temporary, 'nimcache'),
       '--out:' + join(temporary, name),
-      join(packageRoot, 'src', 'cmd', 'mynim.nim'),
+      join(packageRoot, 'src', 'cmd', 'nim_xplat.nim'),
     ], { cwd: packageRoot, env: toolchain.env });
     if (code !== 0) throw new Error('Could not compile the CLI. Check that a C compiler and platform SDK are installed.');
     await rm(join(temporary, 'nimcache'), { recursive: true, force: true });
@@ -75,13 +75,13 @@ export async function runCli(args) {
     process.exitCode = await runProcess(executable, args, {
       env: {
         ...toolchain.env,
-        MYNIM_PACKAGE_ROOT: packageRoot,
-        MYNIM_PACKAGE_NAME: metadata.name,
-        MYNIM_PACKAGE_VERSION: metadata.version,
+        NIM_XPLAT_PACKAGE_ROOT: packageRoot,
+        NIM_XPLAT_PACKAGE_NAME: metadata.name,
+        NIM_XPLAT_PACKAGE_VERSION: metadata.version,
       },
     });
   } catch (error) {
-    console.error(`mynim: ${error.message}`);
+    console.error(`nim-xplat: ${error.message}`);
     process.exitCode = 1;
   }
 }

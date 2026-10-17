@@ -1,16 +1,16 @@
-# MyNim
+# nim-xplat
 
 Build desktop applications in Nim with a native UI or a web frontend. The
-`mynim` command creates projects, runs development builds with live reload,
+`nim-xplat` command creates projects, runs development builds with live reload,
 generates typed TypeScript clients, and packages apps for the current machine.
 
-MyNim is a Nim port of [MyGo](https://github.com/egoist/mygo). This is an early
-release; building for another operating system and code signing are not yet
+This project is inspired by [MyGo](https://github.com/egoist/mygo). This is an
+early release; building for another operating system and code signing are not yet
 supported by the CLI.
 
 ## Create an application
 
-The npm package is `nim-xplat`; its command is `mynim`.
+The npm package and command are both `nim-xplat`.
 
 The npm release targets macOS and Linux on arm64 and x64. It requires Node.js
 22 or later and a native C compiler with the platform SDK:
@@ -57,7 +57,7 @@ the Nim service before development and production builds.
 The CLI compiles itself on first use and caches the executable by source
 content, platform, and Nim version. npm install scripts are not required:
 `npm install --ignore-scripts` is supported. Generated projects pin their
-`mynim` dependency and compile against its bundled framework sources, so a
+`nim-xplat` dependency and compile against its bundled framework sources, so a
 separate Nimble registration or global Nim installation is unnecessary.
 
 ## Build and check
@@ -71,17 +71,18 @@ npm run build
 
 Build output goes to `build/<os>-<arch>/`, including an `.app` bundle on macOS.
 The existing `mygo.json` project configuration and `mygo-runtime` web package
-are supported. The CLI command is `mynim`.
+are supported. The CLI command is `nim-xplat`.
 
-Other commands include `mynim generate`, `mynim i18n check`,
-`mynim install-skills`, and `mynim doctor`. Run `mynim help` or a command's
-`--help` for arguments. Under npm, use `npx mynim` to invoke the local command.
+Other commands include `nim-xplat generate`, `nim-xplat i18n check`,
+`nim-xplat install-skills`, and `nim-xplat doctor`. Run `nim-xplat help` or a
+command's `--help` for arguments. Under npm, use `npx nim-xplat` to invoke the
+local command.
 
 ## Develop this repository
 
 ```sh
 npm ci --ignore-scripts
-node npm/bin/mynim.js --version
+node npm/bin/nim-xplat.js --version
 npm test
 npm pack --dry-run
 ```
@@ -97,7 +98,7 @@ To use a local checkout as a standalone Nim dependency:
 
 ```sh
 nimble compilecli
-./cmd/mynim init --mynim . example
+./cmd/nim-xplat init --nim-xplat . example
 ```
 
 The starter's `config.nims` then points to this checkout. npm-created projects
