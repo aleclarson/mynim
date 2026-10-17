@@ -2,7 +2,7 @@
 
 import std/[os, osproc, strutils]
 
-const usageVet = """Usage: mygo vet [dir]
+const usageVet = """Usage: mynim vet [dir]
 
 Typecheck a native project with the Nim compiler.
 
@@ -17,13 +17,13 @@ proc runVet*(args: seq[string]): int =
       stdout.write(usageVet)
       return 0
     if arg.startsWith("-"):
-      stderr.writeLine("mygo vet: unknown flag " & arg)
+      stderr.writeLine("mynim vet: unknown flag " & arg)
       stderr.write(usageVet)
       return 2
     paths.add arg
 
   if paths.len > 1:
-    stderr.writeLine("mygo vet: expected at most one project directory")
+    stderr.writeLine("mynim vet: expected at most one project directory")
     stderr.write(usageVet)
     return 2
 
@@ -32,12 +32,12 @@ proc runVet*(args: seq[string]): int =
       else: absolutePath(paths[0])
     if not dirExists(projectDir):
       raise newException(ValueError,
-        "mygo vet: " & projectDir & " is not a directory")
+        "mynim vet: " & projectDir & " is not a directory")
     let source = if fileExists(projectDir / "src" / "main.nim"):
       projectDir / "src" / "main.nim" else: projectDir / "main.nim"
     if not fileExists(source):
       raise newException(ValueError,
-        "mygo vet: expected src/main.nim or main.nim in " & projectDir)
+        "mynim vet: expected src/main.nim or main.nim in " & projectDir)
     let nim = findExe("nim")
     if nim.len == 0:
       raise newException(IOError, "nim was not found on PATH")
@@ -48,5 +48,5 @@ proc runVet*(args: seq[string]): int =
     finally:
       process.close()
   except CatchableError as error:
-    stderr.writeLine("mygo vet: " & error.msg)
+    stderr.writeLine("mynim vet: " & error.msg)
     return 1

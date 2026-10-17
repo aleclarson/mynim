@@ -51,9 +51,9 @@ if getEnv("MYNIM_GENERATE").len == 0:
 
   let nimble = findExe("nimble")
   doAssert nimble.len > 0, "nimble was not found on PATH"
-  let cli = temporary / "mygo"
+  let cli = temporary / "mynim"
   let builtCli = run(nimble, @[
-    "c", "--out:" & cli, getCurrentDir() / "src" / "cmd" / "mygo.nim"],
+    "c", "--out:" & cli, getCurrentDir() / "src" / "cmd" / "mynim.nim"],
     getCurrentDir())
   doAssert builtCli.code == 0, builtCli.output
 

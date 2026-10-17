@@ -1,4 +1,4 @@
-## Environment diagnostics for the MyGo development tool.
+## Environment diagnostics for the MyNim development tool.
 
 import std/[os, osproc, streams, strutils]
 
@@ -65,12 +65,12 @@ proc windowsSignTool(): string =
 
 proc runDoctor*(args: seq[string]): int =
   if args.len == 1 and args[0] in ["-h", "--help"]:
-    stderr.writeLine("Usage: mygo doctor")
-    stderr.writeLine("Checks the tools and system libraries MyGo needs.")
+    stderr.writeLine("Usage: mynim doctor")
+    stderr.writeLine("Checks the tools and system libraries MyNim needs.")
     return 0
   if args.len > 0:
-    stderr.writeLine("mygo doctor: unexpected argument: " & args[0])
-    stderr.writeLine("Usage: mygo doctor")
+    stderr.writeLine("mynim doctor: unexpected argument: " & args[0])
+    stderr.writeLine("Usage: mynim doctor")
     return 2
 
   var ok = true
@@ -120,7 +120,7 @@ proc runDoctor*(args: seq[string]): int =
     let (dir, _, err) = webview2.find()
     check("webview2", err.isNil, if err.isNil: dir else: err.msg)
   else:
-    check(hostOS, false, "no MyGo backend for this platform yet")
+    check(hostOS, false, "no MyNim backend for this platform yet")
 
   let nsis = nsisCompiler()
   if nsis.len > 0 or not defined(windows):
@@ -131,7 +131,7 @@ proc runDoctor*(args: seq[string]): int =
         " not found (optional: the Windows installer, https://nsis.sourceforge.io)")
   else:
     stdout.writeLine("- " & "makensis".alignLeft(10) &
-      " not found (mygo build downloads NSIS " & nsisVersion & " for the Windows installer)")
+      " not found (mynim build downloads NSIS " & nsisVersion & " for the Windows installer)")
 
   when defined(windows):
     let signTool = windowsSignTool()
@@ -153,7 +153,7 @@ proc runDoctor*(args: seq[string]): int =
     stdout.writeLine("\x1b[32m✓\x1b[0m " & "gh".alignLeft(10) & " " & gh)
   else:
     stdout.writeLine("- " & "gh".alignLeft(10) &
-      " not found (optional: mygo build -upload to GitHub releases, https://cli.github.com)")
+      " not found (optional: mynim build -upload to GitHub releases, https://cli.github.com)")
 
   when defined(macosx):
     let (identities, _) = commandOutput("security", @[

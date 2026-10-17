@@ -6,7 +6,7 @@ import ./skills
 
 const
   version = "0.1.0"
-  usageInit = """Usage: mygo init [flags] <dir>
+  usageInit = """Usage: mynim init [flags] <dir>
 
 Create a new MyNim project with a native, GPU-rendered UI by default.
 
@@ -15,7 +15,7 @@ Flags:
   -package string    Nimble package name (defaults to a slug of the directory)
   -module string     alias for -package
   -template string   native (the default) or web
-  -mygo path         local MyNim checkout to use instead of a package dependency
+  -mynim path        local MyNim checkout to use instead of a package dependency
   -h, --help         show this help
 """
   nativeMainTemplate = staticRead("templates/native/main.nim.tmpl")
@@ -86,13 +86,13 @@ proc defaultIcon(): seq[byte] =
 
 proc writeBytes(path: string; bytes: seq[byte]) =
   if bytes.len == 0:
-    raise newException(IOError, "mygo init: cannot write an empty icon")
+    raise newException(IOError, "mynim init: cannot write an empty icon")
   var file: File
   if not open(file, path, fmWrite):
-    raise newException(IOError, "mygo init: cannot create " & path)
+    raise newException(IOError, "mynim init: cannot create " & path)
   try:
     if file.writeBuffer(unsafeAddr bytes[0], bytes.len) != bytes.len:
-      raise newException(IOError, "mygo init: could not write " & path)
+      raise newException(IOError, "mynim init: could not write " & path)
   finally:
     close(file)
 
@@ -100,23 +100,23 @@ proc writeText(path, content: string) =
   try:
     writeFile(path, content)
   except OSError as error:
-    raise newException(IOError, "mygo init: " & error.msg)
+    raise newException(IOError, "mynim init: " & error.msg)
 
 proc checkProjectDir(path: string): tuple[dir, name: string] =
   if path.len == 0:
-    raise newException(ValueError, "mygo init: missing project directory")
+    raise newException(ValueError, "mynim init: missing project directory")
   result.dir = absolutePath(path)
   result.name = splitPath(result.dir).tail
   if result.name.len == 0:
     raise newException(ValueError,
-      "mygo init: the project directory must have a name")
+      "mynim init: the project directory must have a name")
   if fileExists(result.dir):
     raise newException(ValueError,
-      "mygo init: " & result.dir & " is not a directory")
+      "mynim init: " & result.dir & " is not a directory")
   if dirExists(result.dir):
     for _ in walkDir(result.dir):
       raise newException(ValueError,
-        "mygo init: " & result.dir & " is not empty")
+        "mynim init: " & result.dir & " is not empty")
 
 proc localSourcePath(path: string): string =
   if path.len == 0:
@@ -124,7 +124,7 @@ proc localSourcePath(path: string): string =
   result = absolutePath(path)
   if not dirExists(result) or not fileExists(result / "src" / "mynim.nim"):
     raise newException(ValueError,
-      "mygo init: " & result & " is not a MyNim checkout")
+      "mynim init: " & result & " is not a MyNim checkout")
 
 proc nimbleFile(local: bool; web = false): string =
   result = """version       = "0.1.0"
@@ -168,18 +168,24 @@ proc writeWebFiles(dir, appName: string) =
   writeText(dir / "tsconfig.json", webTsconfigTemplate)
   writeText(dir / "vite.config.ts", webViteTemplate)
 
+proc writePackageJson(dir, appName: string; web, npm: bool) =
   var scripts = newJObject()
-  scripts["dev"] = %"mygo dev"
-  scripts["build"] = %"mygo build"
-  scripts["generate"] = %"mygo generate"
-  scripts["dev:web"] = %"vite"
-  scripts["build:web"] = %"tsc --noEmit && vite build"
-  scripts["typecheck"] = %"tsc --noEmit"
+  scripts["dev"] = %"mynim dev"
+  scripts["build"] = %"mynim build"
+  scripts["generate"] = %"mynim generate"
+  scripts["test"] = %"mynim test"
+  scripts["vet"] = %"mynim vet"
   var dependencies = newJObject()
-  dependencies["mygo-runtime"] = %webRuntimeVersion
   var devDependencies = newJObject()
-  devDependencies["typescript"] = %"^7"
-  devDependencies["vite"] = %"^8"
+  if npm:
+    devDependencies["mynim"] = %version
+  if web:
+    scripts["dev:web"] = %"vite"
+    scripts["build:web"] = %"tsc --noEmit && vite build"
+    scripts["typecheck"] = %"tsc --noEmit"
+    dependencies["mygo-runtime"] = %webRuntimeVersion
+    devDependencies["typescript"] = %"^7"
+    devDependencies["vite"] = %"^8"
   var packageJson = newJObject()
   packageJson["name"] = %slugify(appName)
   packageJson["private"] = %true
@@ -190,7 +196,7 @@ proc writeWebFiles(dir, appName: string) =
   writeText(dir / "package.json", packageJson.pretty & "\n")
 
 proc writeProject(dir, appName, packageName, local: string;
-    projectTemplate: string) =
+    projectTemplate: string; npm: bool) =
   createDir(dir)
   createDir(dir / "src")
   createDir(dir / "tests")
@@ -204,9 +210,9 @@ proc writeProject(dir, appName, packageName, local: string;
   writeText(dir / "src" / "main.nim", main)
   writeText(dir / "tests" / "test_app.nim", test)
   writeText(dir / (packageName & ".nimble"),
-    nimbleFile(local.len > 0, web))
+    nimbleFile(local.len > 0 or npm, web))
   var gitignore = "/build/\n/dist/\n/.mygo/\n/main\n/main.exe\n"
-  if web:
+  if web or npm:
     gitignore.add "/node_modules/\n"
   writeText(dir / ".gitignore", gitignore)
 
@@ -227,10 +233,23 @@ proc writeProject(dir, appName, packageName, local: string;
   if local.len > 0:
     writeText(dir / "config.nims",
       "switch(\"path\", " & (local / "src").escape() & ")\n")
+  elif npm:
+    writeText(dir / "config.nims", """
+import std/os
+
+let installed = currentSourcePath().parentDir() / "node_modules" / "mynim"
+let packageRoot = if dirExists(installed): installed
+  else: getEnv("MYNIM_PACKAGE_ROOT")
+if packageRoot.len == 0:
+  quit("MyNim is missing. Run npm install, then use npm run build or npm test.")
+switch("path", packageRoot / "src")
+""")
   writeBytes(dir / "resources" / "icon.png", defaultIcon())
   installBundledSkills(dir)
   if web:
     writeWebFiles(dir, appName)
+  if web or npm:
+    writePackageJson(dir, appName, web, npm)
 
 proc runInit*(args: seq[string]): int =
   var appName, packageOption, localOption = ""
@@ -257,7 +276,7 @@ proc runInit*(args: seq[string]): int =
       else:
         inc index
         if index >= args.len:
-          stderr.writeLine("mygo init: missing value for -" & flag)
+          stderr.writeLine("mynim init: missing value for -" & flag)
           stderr.write(usageInit)
           return 2
         value = args[index]
@@ -267,7 +286,7 @@ proc runInit*(args: seq[string]): int =
       of "mynim", "mygo": localOption = value
       of "template": projectTemplate = value
       else:
-        stderr.writeLine("mygo init: unknown flag -" & flag)
+        stderr.writeLine("mynim init: unknown flag -" & flag)
         stderr.write(usageInit)
         return 2
     else:
@@ -275,11 +294,11 @@ proc runInit*(args: seq[string]): int =
     inc index
 
   if projectTemplate notin ["native", "web"]:
-    stderr.writeLine("mygo init: unknown template " & projectTemplate &
+    stderr.writeLine("mynim init: unknown template " & projectTemplate &
       "; want native or web")
     return 1
   if paths.len != 1:
-    stderr.writeLine("mygo init: expected one project directory")
+    stderr.writeLine("mynim init: expected one project directory")
     stderr.write(usageInit)
     return 2
 
@@ -290,13 +309,15 @@ proc runInit*(args: seq[string]): int =
       splitPath(packageOption).tail else: directoryName
     let packageName = slugify(packageBase).replace("-", "_")
     let local = localSourcePath(localOption)
-    writeProject(dir, name, packageName, local, projectTemplate)
+    let npm = local.len == 0 and getEnv("MYNIM_PACKAGE_ROOT").len > 0
+    writeProject(dir, name, packageName, local, projectTemplate, npm)
     let shownPath = displayPath(dir)
     stdout.writeLine("Created " & name & " at " & shownPath & ".")
     stdout.writeLine("Next steps:")
     stdout.writeLine("  cd " & shownPath)
-    if projectTemplate == "web":
+    if projectTemplate == "web" or npm:
       stdout.writeLine("  npm install")
+      stdout.writeLine("  npm test")
       stdout.writeLine("  npm run dev")
       stdout.writeLine("  npm run build")
     else:

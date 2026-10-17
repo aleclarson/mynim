@@ -9,7 +9,7 @@ when hostOS == "macosx":
   import ./dmg as dmgPackager
   import ./codesign as macCodeSign
 
-const usageBuild = """Usage: mygo build [flags] [dir]
+const usageBuild = """Usage: mynim build [flags] [dir]
 
 Build a native project for this machine.
 
@@ -129,13 +129,13 @@ proc collectFrontendFiles(dir: string; files: var seq[string]) =
 proc writeEmbeddedMain(path, source, frontendDir: string) =
   if not dirExists(frontendDir):
     raise newException(IOError,
-      "mygo build: frontendDist is not a directory: " & frontendDir)
+      "mynim build: frontendDist is not a directory: " & frontendDir)
   var files: seq[string]
   collectFrontendFiles(frontendDir, files)
   files.sort()
   if files.len == 0:
     raise newException(IOError,
-      "mygo build: frontendDist contains no files: " & frontendDir)
+      "mynim build: frontendDist contains no files: " & frontendDir)
 
   var code = """import std/tables
 import mynim
@@ -234,7 +234,7 @@ proc replaceBuildDir(stage, target, parent: string) =
     moveDir(target, backup)
   try:
     moveDir(stage, target)
-    writeFile(marker, "mygo native build output\n")
+    writeFile(marker, "mynim native build output\n")
   except CatchableError:
     if dirExists(target) and not dirExists(stage):
       moveDir(target, stage)
@@ -245,7 +245,7 @@ proc replaceBuildDir(stage, target, parent: string) =
     try:
       removeDir(backup)
     except CatchableError as error:
-      stderr.writeLine("mygo build: could not remove previous output: " &
+      stderr.writeLine("mynim build: could not remove previous output: " &
         error.msg)
 
 proc runBuild*(args: seq[string]): int =
@@ -294,18 +294,18 @@ proc runBuild*(args: seq[string]): int =
       else:
         inc index
         if index >= args.len:
-          stderr.writeLine("mygo build: missing value for " & flag)
+          stderr.writeLine("mynim build: missing value for " & flag)
           return 2
         value = args[index]
       if value.len == 0:
-        stderr.writeLine("mygo build: missing value for " & flag)
+        stderr.writeLine("mynim build: missing value for " & flag)
         return 2
       case flag
       of "-o", "--output": outputOption = value
       of "-platform", "--platform": platformOption = value
       of "-sign", "--sign": signingIdentity = value
       else:
-        stderr.writeLine("mygo build: unknown flag " & flag)
+        stderr.writeLine("mynim build: unknown flag " & flag)
         stderr.write(usageBuild)
         return 2
     else:
@@ -313,13 +313,13 @@ proc runBuild*(args: seq[string]): int =
     inc index
 
   if paths.len > 1:
-    stderr.writeLine("mygo build: expected at most one project directory")
+    stderr.writeLine("mynim build: expected at most one project directory")
     stderr.write(usageBuild)
     return 2
 
   let (targetOs, targetArch, hostPlatform) = hostTarget()
   if platformOption.len > 0 and platformOption notin [hostPlatform, "host"]:
-    stderr.writeLine("mygo build: only the host platform is supported (" &
+    stderr.writeLine("mynim build: only the host platform is supported (" &
       hostPlatform & ")")
     return 1
 
@@ -328,11 +328,11 @@ proc runBuild*(args: seq[string]): int =
       else: absolutePath(paths[0])
     if not dirExists(projectDir):
       raise newException(ValueError,
-        "mygo build: " & projectDir & " is not a directory")
+        "mynim build: " & projectDir & " is not a directory")
     let configPath = projectDir / "mygo.json"
     if not fileExists(configPath):
       raise newException(ValueError,
-        "mygo build: expected mygo.json in " & projectDir)
+        "mynim build: expected mygo.json in " & projectDir)
     let config = parseFile(configPath)
     if config.kind != JObject:
       raise newException(ValueError, "mygo.json must contain a JSON object")
@@ -390,7 +390,7 @@ proc runBuild*(args: seq[string]): int =
       projectDir / "src" / "main.nim" else: projectDir / "main.nim"
     if not fileExists(source):
       raise newException(ValueError,
-        "mygo build: expected src/main.nim or main.nim in " & projectDir)
+        "mynim build: expected src/main.nim or main.nim in " & projectDir)
     if needsClientGeneration(projectDir, config) and
         runGenerate(@[projectDir]) != 0:
       return 1
@@ -398,7 +398,7 @@ proc runBuild*(args: seq[string]): int =
       stdout.writeLine("Running buildCommand")
       let code = runBuildCommand(buildCommand, projectDir)
       if code != 0:
-        stderr.writeLine("mygo build: buildCommand exited with status " & $code)
+        stderr.writeLine("mynim build: buildCommand exited with status " & $code)
         return 1
 
     createDir(outputRoot)
@@ -478,7 +478,7 @@ proc runBuild*(args: seq[string]): int =
       releasePublisher.publishGitHub(githubRelease, artifacts)
     return 0
   except CatchableError as error:
-    let message = if error.msg.startsWith("mygo build:"): error.msg
-      else: "mygo build: " & error.msg
+    let message = if error.msg.startsWith("mynim build:"): error.msg
+      else: "mynim build: " & error.msg
     stderr.writeLine(message)
     return 1

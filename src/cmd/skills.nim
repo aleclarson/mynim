@@ -3,7 +3,7 @@
 import std/os
 
 const
-  usageSkills = "Usage: mygo install-skills [dir]\n" &
+  usageSkills = "Usage: mynim install-skills [dir]\n" &
     "Install or refresh the bundled MyNim maintenance skill.\n"
   maintenanceSkill = staticRead(
     "templates/shared/.agents/skills/mynim-maintenance/SKILL.md")
@@ -21,18 +21,18 @@ proc runInstallSkills*(args: seq[string]): int =
     stdout.write(usageSkills)
     return 0
   if args.len > 1:
-    stderr.writeLine("mygo install-skills: expected at most one project directory")
+    stderr.writeLine("mynim install-skills: expected at most one project directory")
     stderr.write(usageSkills)
     return 2
 
   let dir = if args.len == 0: getCurrentDir() else: absolutePath(args[0])
   if not dirExists(dir):
-    stderr.writeLine("mygo install-skills: " & dir & " is not a directory")
+    stderr.writeLine("mynim install-skills: " & dir & " is not a directory")
     return 1
   try:
     installBundledSkills(dir)
     stdout.writeLine("Installed skills in " & (dir / ".agents" / "skills"))
     return 0
   except CatchableError as error:
-    stderr.writeLine("mygo install-skills: " & error.msg)
+    stderr.writeLine("mynim install-skills: " & error.msg)
     return 1

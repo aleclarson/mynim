@@ -3,7 +3,7 @@
 import std/[json, os, osproc, streams, strtabs, strutils, tempfiles]
 import ./i18n_generate
 
-const usageGenerate = """Usage: mygo generate [-o file] [dir]
+const usageGenerate = """Usage: mynim generate [-o file] [dir]
 
 Write the TypeScript client for the services and events bound by the app, and
 `catalog_gen.nim` when i18n catalogs are configured. Web frontends also get a
@@ -63,7 +63,7 @@ proc runGenerate*(args: seq[string]): int =
       let equalAt = arg.find('=')
       let flag = if equalAt < 0: arg else: arg[0 ..< equalAt]
       if flag notin ["-o", "--output"]:
-        stderr.writeLine("mygo generate: unknown flag " & flag)
+        stderr.writeLine("mynim generate: unknown flag " & flag)
         stderr.write(usageGenerate)
         return 2
       if equalAt >= 0:
@@ -72,18 +72,18 @@ proc runGenerate*(args: seq[string]): int =
       else:
         inc index
         if index >= args.len:
-          stderr.writeLine("mygo generate: missing value for " & flag)
+          stderr.writeLine("mynim generate: missing value for " & flag)
           return 2
         outputOption = args[index]
       if outputOption.len == 0:
-        stderr.writeLine("mygo generate: missing value for " & flag)
+        stderr.writeLine("mynim generate: missing value for " & flag)
         return 2
     else:
       paths.add arg
     inc index
 
   if paths.len > 1:
-    stderr.writeLine("mygo generate: expected at most one project directory")
+    stderr.writeLine("mynim generate: expected at most one project directory")
     stderr.write(usageGenerate)
     return 2
 
@@ -92,12 +92,12 @@ proc runGenerate*(args: seq[string]): int =
       else: absolutePath(paths[0])
     if not dirExists(projectDir):
       raise newException(ValueError,
-        "mygo generate: " & projectDir & " is not a directory")
+        "mynim generate: " & projectDir & " is not a directory")
     let source = if fileExists(projectDir / "src" / "main.nim"):
       projectDir / "src" / "main.nim" else: projectDir / "main.nim"
     if not fileExists(source):
       raise newException(ValueError,
-        "mygo generate: expected src/main.nim or main.nim in " & projectDir)
+        "mynim generate: expected src/main.nim or main.nim in " & projectDir)
 
     var config: JsonNode
     let configPath = projectDir / "mygo.json"
@@ -105,7 +105,7 @@ proc runGenerate*(args: seq[string]): int =
       config = parseFile(configPath)
       if config.kind != JObject:
         raise newException(ValueError,
-          "mygo generate: mygo.json must contain a JSON object")
+          "mynim generate: mygo.json must contain a JSON object")
 
     let catalogModules = generateCatalogModules(projectDir, source, config,
       generationOutput(projectDir, config))
@@ -132,7 +132,7 @@ proc runGenerate*(args: seq[string]): int =
       "c", "--nimcache:" & (tempDir / "nimcache"),
       "--out:" & executable, source], projectDir)
     if compile.code != 0:
-      stderr.writeLine("mygo generate: app compilation failed")
+      stderr.writeLine("mynim generate: app compilation failed")
       stderr.write(compile.output)
       return 1
 
@@ -142,7 +142,7 @@ proc runGenerate*(args: seq[string]): int =
     env["MYNIM_GENERATE"] = generatedPath
     let app = processOutput(executable, @[], projectDir, env)
     if app.code != 0:
-      stderr.writeLine("mygo generate: app exited with status " & $app.code)
+      stderr.writeLine("mynim generate: app exited with status " & $app.code)
       stderr.write(app.output)
       return 1
     if configuredOutput.len > 0 and fileExists(configuredOutput):
@@ -168,5 +168,5 @@ proc runGenerate*(args: seq[string]): int =
       stdout.writeLine("Generated " & shownPath)
     return 0
   except CatchableError as error:
-    stderr.writeLine("mygo generate: " & error.msg)
+    stderr.writeLine("mynim generate: " & error.msg)
     return 1

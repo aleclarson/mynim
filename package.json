@@ -1,0 +1,37 @@
+{
+  "name": "mynim",
+  "version": "0.1.0",
+  "description": "Build desktop apps with native UI or a web frontend in Nim",
+  "type": "module",
+  "license": "MIT",
+  "author": "Alec Larson",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/aleclarson/mynim.git"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "os": ["darwin", "linux"],
+  "cpu": ["arm64", "x64"],
+  "bin": {
+    "mynim": "npm/bin/mynim.js"
+  },
+  "files": [
+    "npm/bin/",
+    "npm/lib/",
+    "src/",
+    "nim.cfg",
+    "mynim.nimble",
+    "licenses/"
+  ],
+  "dependencies": {
+    "nim-toolchain": "0.1.0"
+  },
+  "scripts": {
+    "test": "npm run test:cli && npm run test:smoke",
+    "test:cli": "node npm/test/cli.js",
+    "test:smoke": "node npm/test/smoke.js",
+    "prepublishOnly": "npm test"
+  }
+}

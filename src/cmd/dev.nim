@@ -10,7 +10,7 @@ type DevSnapshot = Table[string, string]
 type DevSettings = tuple[name, identifier, version, devCommand, devUrl,
   frontendDist: string]
 
-const usageDev = """Usage: mygo dev [flags] [dir]
+const usageDev = """Usage: mynim dev [flags] [dir]
 
 Build and run a native project, rebuilding it when Nim source, resources,
 catalogs, or project configuration changes.
@@ -274,7 +274,7 @@ proc runDev*(args: seq[string]): int =
       let equalAt = arg.find('=')
       let flag = if equalAt < 0: arg else: arg[0 ..< equalAt]
       if flag notin ["-lang", "--lang", "-sign", "--sign"]:
-        stderr.writeLine("mygo dev: unknown flag " & flag)
+        stderr.writeLine("mynim dev: unknown flag " & flag)
         stderr.write(usageDev)
         return 2
       var value = ""
@@ -286,7 +286,7 @@ proc runDev*(args: seq[string]): int =
         if index < args.len:
           value = args[index]
       if value.len == 0:
-        stderr.writeLine("mygo dev: missing value for " & flag)
+        stderr.writeLine("mynim dev: missing value for " & flag)
         return 2
       if flag in ["-lang", "--lang"]: lang = value
       else: sign = value
@@ -295,14 +295,14 @@ proc runDev*(args: seq[string]): int =
     inc index
 
   if paths.len > 1:
-    stderr.writeLine("mygo dev: expected at most one project directory")
+    stderr.writeLine("mynim dev: expected at most one project directory")
     stderr.write(usageDev)
     return 2
   if web:
-    stderr.writeLine("mygo dev: browser development is not ported yet")
+    stderr.writeLine("mynim dev: browser development is not ported yet")
     return 1
   if sign.len > 0 and sign != "-":
-    stderr.writeLine("mygo dev: code signing is not ported yet")
+    stderr.writeLine("mynim dev: code signing is not ported yet")
     return 1
 
   var app: Process
@@ -313,11 +313,11 @@ proc runDev*(args: seq[string]): int =
       else: absolutePath(paths[0])
     if not dirExists(projectDir):
       raise newException(ValueError,
-        "mygo dev: " & projectDir & " is not a directory")
+        "mynim dev: " & projectDir & " is not a directory")
     let configPath = projectDir / "mygo.json"
     if not fileExists(configPath):
       raise newException(ValueError,
-        "mygo dev: expected mygo.json in " & projectDir)
+        "mynim dev: expected mygo.json in " & projectDir)
     var config = parseFile(configPath)
     if config.kind != JObject:
       raise newException(ValueError, "mygo.json must contain a JSON object")
@@ -326,7 +326,7 @@ proc runDev*(args: seq[string]): int =
       projectDir / "src" / "main.nim" else: projectDir / "main.nim"
     if not fileExists(source):
       raise newException(ValueError,
-        "mygo dev: expected src/main.nim or main.nim in " & projectDir)
+        "mynim dev: expected src/main.nim or main.nim in " & projectDir)
     var watched = fileSnapshot(projectDir)
 
     if runGenerate(@[projectDir]) != 0:
@@ -345,7 +345,7 @@ proc runDev*(args: seq[string]): int =
     var built = buildDevApp(projectDir, source, devDir, settings.name,
       settings.identifier, settings.version, config)
     if built.code != 0:
-      stderr.writeLine("mygo dev: app compilation failed")
+      stderr.writeLine("mynim dev: app compilation failed")
       stderr.writeLine(built.log)
       return 1
     currentStage = built.stage
@@ -365,7 +365,7 @@ proc runDev*(args: seq[string]): int =
           continue
         if code == 0:
           return 0
-        stderr.writeLine("mygo dev: app exited with status " & $code &
+        stderr.writeLine("mynim dev: app exited with status " & $code &
           "; waiting for a source change")
 
       let (nextSnapshot, changed) = stableChanges(projectDir, watched)
@@ -382,16 +382,16 @@ proc runDev*(args: seq[string]): int =
             "mygo.json must contain a JSON object")
         nextSettings = projectSettings(projectDir, nextConfig)
       except CatchableError as error:
-        stderr.writeLine("mygo dev: invalid configuration; keeping the current app: " &
+        stderr.writeLine("mynim dev: invalid configuration; keeping the current app: " &
           error.msg)
         continue
       if runGenerate(@[projectDir]) != 0:
-        stderr.writeLine("mygo dev: keeping the current app after generation failed")
+        stderr.writeLine("mynim dev: keeping the current app after generation failed")
         continue
       let next = buildDevApp(projectDir, source, devDir, nextSettings.name,
         nextSettings.identifier, nextSettings.version, nextConfig)
       if next.code != 0:
-        stderr.writeLine("mygo dev: app compilation failed; keeping the current app")
+        stderr.writeLine("mynim dev: app compilation failed; keeping the current app")
         stderr.writeLine(next.log)
         continue
       stopProcess(app)
@@ -423,7 +423,7 @@ proc runDev*(args: seq[string]): int =
       settings = nextSettings
       stdout.writeLine("Running updated " & settings.name & " Dev")
   except CatchableError as error:
-    stderr.writeLine("mygo dev: " & error.msg)
+    stderr.writeLine("mynim dev: " & error.msg)
     return 1
   finally:
     stopProcess(app)

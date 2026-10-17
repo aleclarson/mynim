@@ -1,5 +1,7 @@
-/cmd/mygo
+/cmd/mynim
 /config.nims
 /nimble.paths
 /nimble.develop
 /nimbledeps
+/node_modules/
+/*.tgz

@@ -1,4 +1,4 @@
-## Command-line entry point for the Nim port of MyGo.
+## Command-line tool for MyNim applications.
 
 import std/os
 import ./build
@@ -10,15 +10,16 @@ import ./i18n_check
 import ./keygen
 import ./migrate_ui
 import ./skills
+import ./testing
 import ./vet
 
 const
   version = "0.1.0"
-  usage = """mygo is the command-line tool for MyGo applications.
+  usage = """mynim is the command-line tool for MyNim applications.
 
 Usage:
 
-  mygo <command> [arguments]
+  mynim <command> [arguments]
 
 Commands:
 
@@ -28,11 +29,12 @@ Commands:
   build           compile a native project for this machine
   generate        write the typed client and Nim/TypeScript i18n accessors
   vet             typecheck a native Nim project
+  test            run the project's test task
   i18n            check message catalogs
   keygen          create the key pair that signs updates
   migrate-ui      preview or apply the checked UI API migration
   doctor          check that the development environment is ready
-  version         print the MyGo version
+  version         print the MyNim version
   help            print this help
 
 """
@@ -44,7 +46,7 @@ proc run(args: seq[string]): int =
 
   case args[0]
   of "version", "-v", "--version":
-    stdout.writeLine("mygo " & version)
+    stdout.writeLine("mynim " & version)
   of "help", "-h", "--help":
     stdout.write(usage)
   of "doctor":
@@ -87,8 +89,10 @@ proc run(args: seq[string]): int =
     if args.len > 1:
       return runMigrateUI(args[1 .. ^1])
     return runMigrateUI(@[])
+  of "test":
+    return runTest(if args.len > 1: args[1 .. ^1] else: @[])
   else:
-    stderr.writeLine("mygo: unknown command \"" & args[0] & "\"")
+    stderr.writeLine("mynim: unknown command \"" & args[0] & "\"")
     stderr.write("\n")
     stderr.write(usage)
     return 2
