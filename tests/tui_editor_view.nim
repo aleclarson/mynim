@@ -312,6 +312,14 @@ doAssert $editorState.buffer == "  x"
 doAssert lineKey("    x", 3, 3, platform.keyBracketLeft,
   deleteModifier) == "  x"
 doAssert editorState.cursor() == 1
+doAssert lineKey(lines, 5, 5, platform.keyL, deleteModifier) == lines
+doAssert editorState.selection() == editor.Selection(anchor: 4, head: 8)
+doAssert editorState.selectedText() == "two\n"
+doAssert native.send(platform.SurfaceEvent(kind: platform.keyPressed,
+  key: platform.keyL, mods: deleteModifier))
+doAssert native.frame()
+doAssert editorState.selection() == editor.Selection(anchor: 4, head: 13)
+doAssert editorState.selectedText() == "two\nthree"
 
 win.destroy()
 loop.shutdown()

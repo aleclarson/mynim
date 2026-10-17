@@ -987,6 +987,17 @@ proc insertLineAround(state: State; above: bool) =
   let afterSelection = Selection(anchor: caret, head: caret)
   state.applyEditorEdits(snapshot, selection, afterSelection, @[edit])
 
+proc selectCurrentLines(state: State) =
+  state.ensureState()
+  let snapshot = state.buffer.snapshot()
+  let selection = state.caretSelection
+  let firstLine = snapshot.pos(selection.start()).line
+  let lastLine = snapshot.pos(selection.pastLast()).line
+  let start = snapshot.lineStart(firstLine)
+  let pastLast = if lastLine + 1 >= snapshot.lineCount(): snapshot.len
+    else: snapshot.lineStart(lastLine + 1)
+  state.select(start, pastLast)
+
 proc indentSelection(state: State; outdent: bool; wholeLine = false) =
   state.ensureState()
   if state.readOnly:
@@ -1268,6 +1279,9 @@ proc view*(c: ui.Context; state: State): ui.Element =
       return true
     if key.key == platform.keyJ and key.mods == platform.modCtrl:
       state.joinSelectedLines()
+      return true
+    if key.key == platform.keyL and key.mods == commandModifier:
+      state.selectCurrentLines()
       return true
     if key.key == platform.keyEnter and
         (key.mods == commandModifier or
