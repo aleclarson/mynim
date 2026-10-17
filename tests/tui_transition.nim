@@ -3,6 +3,13 @@ import std/[assertions, options, os, times]
 import mynim/internal/scene as scene
 import mynim/ui as ui
 
+proc findFill(frame: scene.Scene; color: scene.Color):
+    tuple[op: scene.Op, found: bool] =
+  for op in frame.ops:
+    if op.kind == scene.opFill and op.color.r == color.r and
+        op.color.g == color.g and op.color.b == color.b:
+      return (op, true)
+
 block keyed_siblings_move_from_their_previous_positions:
   var order = @["A", "B"]
   var transitioningDuringBuild = false
@@ -219,6 +226,164 @@ block transitioning_includes_pose_motion:
   pose = ui.Pose(x: 30)
   tester.frame()
   doAssert reportsMoving
+
+block exit_fade_retains_a_paint_only_subtree_until_finished:
+  var present = true
+  let red = ui.rgb(255, 0, 0)
+  let motion = ui.ElementTransition(
+    duration: initDuration(milliseconds = 200), ease: ui.linear,
+    position: true, exit: some(ui.Motion(opacity: 0)))
+  let context = ui.newContext()
+  let view = proc(ctx: ui.Context) =
+    let parent = ctx.column().size(100, 60)
+    discard parent.children(proc() =
+      if present:
+        let removed = ctx.box().size(30, 20).background(red)
+          .label("exiting subtree")
+        discard removed.transition(motion)
+        discard removed.children(proc() =
+          discard ctx.box().size(40, 10).background(ui.rgb(0, 255, 0))
+        )
+    )
+
+  context.build(view)
+  discard context.layout(100, 60)
+  present = false
+  context.build(view)
+  let started = context.layout(100, 60).paintScene()
+  let (startingFill, foundStartingFill) = findFill(started,
+    scene.Color(r: 255, g: 0, b: 0, a: 255))
+  doAssert foundStartingFill
+  doAssert startingFill.opacity == 0 or startingFill.opacity > 0.9
+
+  sleep(70)
+  context.build(view)
+  let moving = context.layout(100, 60).paintScene()
+  let (movingFill, foundMovingFill) = findFill(moving,
+    scene.Color(r: 255, g: 0, b: 0, a: 255))
+  let (childFill, foundChildFill) = findFill(moving,
+    scene.Color(r: 0, g: 255, b: 0, a: 255))
+  doAssert foundMovingFill and movingFill.opacity > 0 and
+    movingFill.opacity < 1
+  doAssert foundChildFill and abs(childFill.rect.w - 40) < 0.01
+
+  sleep(170)
+  context.build(view)
+  let finished = context.layout(100, 60).paintScene()
+  let (_, foundFinishedFill) = findFill(finished,
+    scene.Color(r: 255, g: 0, b: 0, a: 255))
+  doAssert not foundFinishedFill
+  context.close()
+
+block exit_collapse_keeps_siblings_out_of_flow:
+  var present = true
+  let red = ui.rgb(255, 0, 0)
+  let blue = ui.rgb(0, 0, 255)
+  let motion = ui.ElementTransition(
+    duration: initDuration(milliseconds = 240), ease: ui.linear,
+    position: true, exit: some(ui.Motion(collapse: true)))
+  let context = ui.newContext()
+  let view = proc(ctx: ui.Context) =
+    let parent = ctx.row().size(100, 30)
+    discard parent.children(proc() =
+      if present:
+        let removed = ctx.box().key("exit").size(30, 20).background(red)
+        discard removed.transition(motion)
+      discard ctx.box().key("survivor").size(20, 20).background(blue)
+    )
+
+  context.build(view)
+  let before = context.layout(100, 30).paintScene()
+  let (beforeBlue, foundBeforeBlue) = findFill(before,
+    scene.Color(r: 0, g: 0, b: 255, a: 255))
+  doAssert foundBeforeBlue and abs(beforeBlue.rect.x - 30) < 0.01
+
+  present = false
+  context.build(view)
+  let started = context.layout(100, 30).paintScene()
+  let (startBlue, foundStartBlue) = findFill(started,
+    scene.Color(r: 0, g: 0, b: 255, a: 255))
+  doAssert foundStartBlue and abs(startBlue.rect.x) < 0.01
+  sleep(70)
+  context.build(view)
+  let moving = context.layout(100, 30).paintScene()
+  let (movingRed, foundMovingRed) = findFill(moving,
+    scene.Color(r: 255, g: 0, b: 0, a: 255))
+  let (movingBlue, foundMovingBlue) = findFill(moving,
+    scene.Color(r: 0, g: 0, b: 255, a: 255))
+  doAssert foundMovingRed and movingRed.rect.w > 0 and
+    movingRed.rect.w < 30
+  doAssert foundMovingBlue and abs(movingBlue.rect.x) < 0.01
+  context.close()
+
+block reappearing_elements_return_from_their_exit_state:
+  var present = true
+  let red = ui.rgb(255, 0, 0)
+  let motion = ui.ElementTransition(
+    duration: initDuration(milliseconds = 240), ease: ui.linear,
+    position: true, exit: some(ui.Motion(opacity: 0)))
+  let context = ui.newContext()
+  let view = proc(ctx: ui.Context) =
+    let parent = ctx.column().size(80, 40)
+    discard parent.children(proc() =
+      if present:
+        let element = ctx.box().size(30, 20).background(red)
+        discard element.transition(motion)
+    )
+
+  context.build(view)
+  discard context.layout(80, 40)
+  present = false
+  context.build(view)
+  discard context.layout(80, 40)
+  sleep(70)
+  context.build(view)
+  let leaving = context.layout(80, 40).paintScene()
+  let (leavingFill, foundLeavingFill) = findFill(leaving,
+    scene.Color(r: 255, g: 0, b: 0, a: 255))
+  doAssert foundLeavingFill and leavingFill.opacity > 0 and
+    leavingFill.opacity < 1
+
+  present = true
+  context.build(view)
+  let returning = context.layout(80, 40).paintScene()
+  let (returningFill, foundReturningFill) = findFill(returning,
+    scene.Color(r: 255, g: 0, b: 0, a: 255))
+  doAssert foundReturningFill and returningFill.opacity > 0 and
+    returningFill.opacity < 1
+  sleep(70)
+  context.build(view)
+  let returned = context.layout(80, 40).paintScene()
+  let (returnedFill, foundReturnedFill) = findFill(returned,
+    scene.Color(r: 255, g: 0, b: 0, a: 255))
+  doAssert foundReturnedFill and returnedFill.opacity > returningFill.opacity and
+    returnedFill.opacity < 1
+  context.close()
+
+block exit_is_dropped_when_its_parent_disappears:
+  var parentPresent = true
+  let red = ui.rgb(255, 0, 0)
+  let motion = ui.ElementTransition(
+    duration: initDuration(milliseconds = 200), ease: ui.linear,
+    position: true, exit: some(ui.Motion(opacity: 0)))
+  let context = ui.newContext()
+  let view = proc(ctx: ui.Context) =
+    if parentPresent:
+      let parent = ctx.box().size(80, 40)
+      discard parent.children(proc() =
+        let removed = ctx.box().size(20, 20).background(red)
+        discard removed.transition(motion)
+      )
+
+  context.build(view)
+  discard context.layout(100, 60)
+  parentPresent = false
+  context.build(view)
+  let frame = context.layout(100, 60).paintScene()
+  let (_, foundRed) = findFill(frame,
+    scene.Color(r: 255, g: 0, b: 0, a: 255))
+  doAssert not foundRed
+  context.close()
 
 block new_children_enter_from_their_motion:
   var showChild = false

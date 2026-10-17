@@ -126,6 +126,10 @@ type
     generation, restedGeneration: uint32
     initialized, moving, curve, pending, jumped: bool
 
+  TransitionReentry = object
+    transition: ElementTransition
+    animation: Animation
+
   ScalarSequence = object
     frames: seq[Keyframe]
     options: KeyframeOptions
@@ -269,6 +273,7 @@ type
     pendingTextSubmitCallbacks: Table[uint64, seq[proc() {.closure.}]]
     textInputClients: Table[uint64, platform.TextInputClient]
     animations: Table[uint64, Table[string, ScalarAnimation]]
+    transitionReentries: Table[uint64, TransitionReentry]
     draggableStates: Table[uint64, DraggableState]
     draggableGesture: DraggableGesture
     colorMotions: Table[uint64, Table[string, ColorMotion]]
@@ -293,6 +298,7 @@ type
     transitionBounds: Rect
     hasTransitionBounds: bool
     transitionSeen: HashSet[uint64]
+    nextTransitionGhostIdentity: uint64
     committedRects: seq[Rect]
     committedTransforms: seq[scene.Affine]
     visibleIdentities: HashSet[uint64]
@@ -468,7 +474,16 @@ type
     transformOriginX, transformOriginY: float32
     transformOriginSet: bool
     poseSet, transitionSet: bool
-    transitionFresh, transitionParentPresent: bool
+    transitionFresh, transitionParentPresent, transitionReappeared: bool
+    elementTransitionAnimation: Animation
+    transitionGhostBaseTransform: Transform
+    transitionGhostExit: Motion
+    transitionGhostExitAnimation: Animation
+    transitionGhostSourceIdentity: uint64
+    transitionGhostX, transitionGhostY, transitionGhostW,
+      transitionGhostH, transitionGhostBaseOpacity: float32
+    transitionGhost, transitionGhostRoot, transitionGhostFresh,
+      transitionGhostActive: bool
     label: string
     accessDescription: string
     accessValue: string
@@ -599,6 +614,14 @@ const
   identityKindGrid = 7'u8
   identityKindTextInput = 8'u8
   identityKindIcon = 9'u8
+  transitionGhostChannels = [
+    ("\x00mynim.transition.exit.x", "\x00mynim.transition.enter.x"),
+    ("\x00mynim.transition.exit.y", "\x00mynim.transition.enter.y"),
+    ("\x00mynim.transition.exit.width", "\x00mynim.transition.enter.width"),
+    ("\x00mynim.transition.exit.height", "\x00mynim.transition.enter.height"),
+    ("\x00mynim.transition.exit.opacity", "\x00mynim.transition.enter.opacity"),
+    ("\x00mynim.transition.exit.scale", "\x00mynim.transition.enter.scale"),
+    ("\x00mynim.transition.exit.rotate", "\x00mynim.transition.enter.rotate")]
   logPadStart = 1'u8 shl 0
   logPadEnd = 1'u8 shl 1
   logMarginStart = 1'u8 shl 2
@@ -705,6 +728,8 @@ proc newContext*(): Context =
     initTable[uint64, platform.TextInputClient]()
   result.owner.animations =
     initTable[uint64, Table[string, ScalarAnimation]]()
+  result.owner.transitionReentries =
+    initTable[uint64, TransitionReentry]()
   result.owner.draggableStates = initTable[uint64, DraggableState]()
   result.owner.colorMotions =
     initTable[uint64, Table[string, ColorMotion]]()
@@ -1459,6 +1484,279 @@ proc children*(e: Element; build: proc() {.closure.}): Element =
 proc buildTooltips(c: Context)
 proc buildToasts(c: Context)
 
+proc allocateTransitionGhostIdentity(owner: ElementOwner): uint64 =
+  if owner.nextTransitionGhostIdentity == 0:
+    owner.nextTransitionGhostIdentity = high(uint64)
+  while owner.nextTransitionGhostIdentity == 0 or
+      owner.idSlots.hasKey(owner.nextTransitionGhostIdentity):
+    dec owner.nextTransitionGhostIdentity
+  result = owner.nextTransitionGhostIdentity
+  dec owner.nextTransitionGhostIdentity
+
+proc appendExitGhostNode(owner: ElementOwner;
+                         previousNodes: seq[ElementNode];
+                         previousRects: seq[Rect]; oldSlot, parentSlot: int;
+                         sourceIdentity: uint64; exit: Motion;
+                         animation: Animation; continued, root: bool): int =
+  var node = previousNodes[oldSlot]
+  let previousIdentity = node.identity
+  node.identity = if continued and
+      not owner.idSlots.hasKey(previousIdentity):
+      previousIdentity
+    else:
+      owner.allocateTransitionGhostIdentity()
+  node.parent = int32(parentSlot)
+  node.firstChild = -1
+  node.lastChild = -1
+  node.nextSibling = -1
+  node.childCount = 0
+  node.absolute = true
+  node.inert = true
+  node.accessHidden = true
+  node.modal = false
+  node.autoFocus = false
+  node.modalScopeIdentity = 0
+  node.overlayOwnerIdentity = 0
+  node.overlayAnchorIdentity = 0
+  node.dialogState = nil
+  node.hasFollowScroll = false
+  node.followScrollSlot = -1
+  node.tooltipEnabled = false
+  node.tooltipOverlay = false
+  node.tooltipBuild = nil
+  node.popoverAnchor = false
+  node.popoverState = nil
+  node.comboBoxState = nil
+  if previousNodes[oldSlot].scrollState != nil:
+    var scroll: ScrollState
+    new(scroll)
+    scroll[] = previousNodes[oldSlot].scrollState[]
+    scroll.motion = ScrollMotion()
+    scroll.scrollbarDragging = false
+    node.scrollState = scroll
+  else:
+    node.scrollState = nil
+  node.listState = nil
+  node.tableState = nil
+  node.gridViewState = nil
+  node.gridCellState = nil
+  node.toolbarState = nil
+  node.textClient = nil
+  node.textAreaOwner = nil
+  node.clickHandler = nil
+  node.keyHandler = nil
+  node.treeAccessAction = nil
+  node.treeAccessFocus = nil
+  node.accessStepHandler = nil
+  node.textInputHandler = nil
+  node.menuBuilder = nil
+  node.contextMenuBuilder = nil
+  node.dragDataProvider = nil
+  node.dragValueProvider = nil
+  node.valueAccepts = nil
+  node.draggable = false
+  node.dropDataTarget = false
+  node.fileDropTarget = false
+  node.routeRouterIdentity = 0
+  node.routeViewIdentity = 0
+  node.routePageIdentity = 0
+  node.activeDescendantIdentity = 0
+  node.transitionSet = false
+  node.transitionFresh = false
+  node.transitionParentPresent = false
+  node.poseSet = false
+  node.transitionGhost = true
+  node.transitionGhostRoot = root
+  node.transitionGhostActive = true
+  node.transitionGhostFresh = root and not continued
+  node.transitionGhostBaseTransform = if continued:
+      node.transitionGhostBaseTransform
+    else:
+      node.transitionTransform
+  node.transitionTransform = Transform()
+  if root and not continued:
+    node.transitionGhostSourceIdentity = sourceIdentity
+    node.transitionGhostExit = exit
+    node.transitionGhostExitAnimation = animation
+    node.transitionGhostBaseOpacity =
+      if node.opacitySet: node.opacity else: 1'f32
+  if root:
+    node.opacity = node.transitionGhostBaseOpacity
+    node.opacitySet = true
+  if not continued:
+    let oldParent = int(previousNodes[oldSlot].parent)
+    let parentRect = if oldParent >= 0 and oldParent < previousRects.len:
+        previousRects[oldParent]
+      else:
+        Rect()
+    let rect = previousRects[oldSlot]
+    node.transitionGhostX = rect.x - parentRect.x
+    node.transitionGhostY = rect.y - parentRect.y
+    node.transitionGhostW = rect.w
+    node.transitionGhostH = rect.h
+  node.width = UiLength(value: node.transitionGhostW,
+    kind: lengthPixels)
+  node.height = UiLength(value: node.transitionGhostH,
+    kind: lengthPixels)
+  node.labelTargetSlot = -1
+  node.fieldLabelSlot = -1
+  node.fieldContentSlot = -1
+  node.fieldControlSlot = -1
+  node.focusTargetSlot = -1
+  node.cols = @previousNodes[oldSlot].cols
+  node.rows = @previousNodes[oldSlot].rows
+  node.shadows = @previousNodes[oldSlot].shadows
+  node.textSpans = @previousNodes[oldSlot].textSpans
+  node.textOwnSpans = @previousNodes[oldSlot].textOwnSpans
+  node.textSpanEnds = @previousNodes[oldSlot].textSpanEnds
+  node.textInlineRects = @previousNodes[oldSlot].textInlineRects
+  let slot = owner.nodes.len
+  owner.nodes.add(node)
+  owner.idSlots[node.identity] = slot
+  if owner.nodes[parentSlot].lastChild >= 0:
+    owner.nodes[int(owner.nodes[parentSlot].lastChild)].nextSibling =
+      int32(slot)
+  else:
+    owner.nodes[parentSlot].firstChild = int32(slot)
+  owner.nodes[parentSlot].lastChild = int32(slot)
+  inc owner.nodes[parentSlot].childCount
+
+  var child = int(previousNodes[oldSlot].firstChild)
+  while child >= 0:
+    let nextChild = int(previousNodes[child].nextSibling)
+    if not previousNodes[child].transitionGhostRoot:
+      discard owner.appendExitGhostNode(previousNodes, previousRects, child,
+        slot, sourceIdentity, exit, animation, continued, false)
+    child = nextChild
+  result = slot
+
+proc appendExitGhosts(owner: ElementOwner;
+                      previousNodes: seq[ElementNode];
+                      previousRects: seq[Rect]) =
+  if owner == nil or previousNodes.len == 0 or
+      previousRects.len != previousNodes.len:
+    return
+  var currentIdentities = initHashSet[uint64]()
+  for node in owner.nodes:
+    currentIdentities.incl(node.identity)
+
+  for slot, previous in previousNodes:
+    if previous.transitionGhostRoot:
+      if not previous.transitionGhostActive or
+          previous.transitionGhostSourceIdentity in currentIdentities:
+        continue
+      let parentIdentity = if previous.parent >= 0:
+          previousNodes[int(previous.parent)].identity
+        else:
+          0'u64
+      let parentSlot = owner.idSlots.getOrDefault(parentIdentity, -1)
+      if parentSlot < 0:
+        continue
+      discard owner.appendExitGhostNode(previousNodes, previousRects, slot,
+        parentSlot, previous.transitionGhostSourceIdentity,
+        previous.transitionGhostExit,
+        previous.transitionGhostExitAnimation, true, true)
+      continue
+    if slot == 0 or previous.transitionGhost or not previous.transitionSet or
+        previous.elementTransition.exit.isNone or
+        previous.identity in currentIdentities:
+      continue
+    let oldParent = int(previous.parent)
+    if oldParent < 0 or oldParent >= previousNodes.len:
+      continue
+    let parentIdentity = previousNodes[oldParent].identity
+    let parentSlot = owner.idSlots.getOrDefault(parentIdentity, -1)
+    if parentSlot < 0:
+      continue
+    let motion = previous.elementTransition.exit.get
+    let moves = motion.x != 0 or motion.y != 0 or motion.opacity < 1 or
+      motion.collapse or (motion.scale != 0 and motion.scale != 1) or
+      motion.rotate != 0
+    if not moves:
+      continue
+    let fadeOnly = motion.opacity < 1 and not motion.collapse
+    if owner.reduceMotion and not fadeOnly:
+      continue
+    discard owner.appendExitGhostNode(previousNodes, previousRects, slot,
+      parentSlot, previous.identity, motion,
+      previous.elementTransitionAnimation, false, true)
+
+proc restoreExitGhosts(owner: ElementOwner;
+                       previousNodes: seq[ElementNode]) =
+  if owner == nil or previousNodes.len == 0:
+    return
+  for ghost in previousNodes:
+    if not ghost.transitionGhostRoot or not ghost.transitionGhostActive:
+      continue
+    let slot = owner.idSlots.getOrDefault(
+      ghost.transitionGhostSourceIdentity, -1)
+    if slot <= 0 or slot >= owner.nodes.len:
+      continue
+    var node = addr owner.nodes[slot]
+    var transition = if node[].transitionSet:
+        node[].elementTransition
+      else:
+        ghost.elementTransition
+    let animation = if node[].transitionSet:
+        node[].elementTransitionAnimation
+      else:
+        ghost.transitionGhostExitAnimation
+    let ghostChannels = owner.animations.getOrDefault(ghost.identity)
+    var nodeChannels = owner.animations.mgetOrPut(node[].identity,
+      initTable[string, ScalarAnimation]())
+    for (exitKey, enterKey) in transitionGhostChannels:
+      let channel = ghostChannels.getOrDefault(exitKey)
+      if channel.initialized:
+        nodeChannels[enterKey] = channel
+    owner.animations[node[].identity] = nodeChannels
+    var enter = if transition.enter.isSome: transition.enter.get else: Motion()
+    let opacity = ghostChannels.getOrDefault(
+      "\x00mynim.transition.exit.opacity")
+    let scale = ghostChannels.getOrDefault(
+      "\x00mynim.transition.exit.scale")
+    let rotate = ghostChannels.getOrDefault(
+      "\x00mynim.transition.exit.rotate")
+    let x = ghostChannels.getOrDefault("\x00mynim.transition.exit.x")
+    let y = ghostChannels.getOrDefault("\x00mynim.transition.exit.y")
+    enter.opacity = float32(if opacity.initialized: opacity.value else: 1)
+    enter.scale = float32(if scale.initialized: scale.value else: 1)
+    enter.rotate = float32(if rotate.initialized: rotate.value else: 0)
+    enter.x = float32(if x.initialized: x.value else: 0)
+    enter.y = float32(if y.initialized: y.value else: 0)
+    enter.collapse = ghost.transitionGhostExit.collapse
+    transition.enter = some(enter)
+    owner.transitionReentries[node[].identity] = TransitionReentry(
+      transition: transition, animation: animation)
+
+proc applyTransitionReentries(owner: ElementOwner) =
+  if owner == nil or owner.transitionReentries.len == 0:
+    return
+  var stale: seq[uint64]
+  for identity in owner.transitionReentries.keys:
+    let slot = owner.idSlots.getOrDefault(identity, -1)
+    if slot <= 0 or slot >= owner.nodes.len:
+      stale.add(identity)
+      continue
+    var node = addr owner.nodes[slot]
+    let reentry = owner.transitionReentries[identity]
+    var transition = if node[].transitionSet:
+        node[].elementTransition
+      else:
+        reentry.transition
+    let animation = if node[].transitionSet:
+        node[].elementTransitionAnimation
+      else:
+        reentry.animation
+    transition.enter = reentry.transition.enter
+    node[].elementTransition = transition
+    node[].elementTransitionAnimation = animation
+    node[].transitionSet = true
+    node[].transitionReappeared = true
+    owner.transitionReentries[identity] = TransitionReentry(
+      transition: transition, animation: animation)
+  for identity in stale:
+    owner.transitionReentries.del(identity)
+
 proc retainRouterPageState(owner: ElementOwner; routerIdentity, viewIdentity,
                            pageIdentity: uint64) =
   if owner != nil and routerIdentity != 0 and viewIdentity != 0 and
@@ -1473,6 +1771,8 @@ proc updateRouterPageState(owner: ElementOwner) =
     return
   var current = initTable[RouterPageKey, HashSet[uint64]]()
   for index in 1..<owner.nodes.len:
+    if owner.nodes[index].transitionGhost:
+      continue
     var ancestor = index
     while ancestor > 0 and ancestor < owner.nodes.len:
       let node = owner.nodes[ancestor]
@@ -1550,6 +1850,8 @@ proc build*(c: Context; view: proc(c: Context) {.closure.}) =
       initTable[uint64, platform.TextInputClient]()
     c.owner.animations =
       initTable[uint64, Table[string, ScalarAnimation]]()
+    c.owner.transitionReentries =
+      initTable[uint64, TransitionReentry]()
     c.owner.draggableStates = initTable[uint64, DraggableState]()
     c.owner.colorMotions =
       initTable[uint64, Table[string, ColorMotion]]()
@@ -1567,6 +1869,21 @@ proc build*(c: Context; view: proc(c: Context) {.closure.}) =
     c.owner.pendingFileDrops = initTable[uint64, seq[string]]()
     c.accordion = nil
     c.accordionHeaders.clear()
+  var previousTransitionNodes: seq[ElementNode]
+  var previousTransitionRects: seq[Rect]
+  if c.owner.visibleGeneration == c.owner.generation and
+      c.owner.committedRects.len == c.owner.nodes.len:
+    var needsSnapshot = false
+    for node in c.owner.nodes:
+      if node.transitionGhostRoot and node.transitionGhostActive or
+          (node.transitionSet and node.elementTransition.exit.isSome):
+        needsSnapshot = true
+        break
+    if needsSnapshot:
+      previousTransitionNodes = move(c.owner.nodes)
+      c.owner.nodes = newSeqOfCap[ElementNode](previousTransitionNodes.len)
+      previousTransitionRects = move(c.owner.committedRects)
+      c.owner.committedRects = @[]
   inc c.owner.generation
   c.owner.frameNow = getMonoTime()
   c.owner.animating = false
@@ -1617,6 +1934,10 @@ proc build*(c: Context; view: proc(c: Context) {.closure.}) =
         c.owner.actions[index].handle = nil
     for slot, node in c.owner.nodes:
       c.owner.idSlots[node.identity] = slot
+    c.owner.restoreExitGhosts(previousTransitionNodes)
+    c.owner.applyTransitionReentries()
+    c.owner.appendExitGhosts(previousTransitionNodes,
+      previousTransitionRects)
     if c.owner.dataOverIdentity != 0:
       let slot = c.owner.idSlots.getOrDefault(c.owner.dataOverIdentity, -1)
       if slot <= 0 or slot >= c.owner.nodes.len or
@@ -1635,7 +1956,10 @@ proc build*(c: Context; view: proc(c: Context) {.closure.}) =
           c.owner.nodes[int(node.parent)].identity
     for slot in 0..<c.owner.nodes.len:
       var node = addr c.owner.nodes[slot]
-      node[].transitionFresh = node[].identity notin c.owner.transitionSeen
+      if node[].transitionGhost:
+        continue
+      node[].transitionFresh = not node[].transitionReappeared and
+        node[].identity notin c.owner.transitionSeen
       node[].transitionParentPresent = false
       let parent = int(node[].parent)
       if parent >= 0 and parent < c.owner.nodes.len:
@@ -1786,7 +2110,8 @@ proc build*(c: Context; view: proc(c: Context) {.closure.}) =
       c.owner.localStates.del(identity)
     c.owner.transitionSeen.clear()
     for node in c.owner.nodes:
-      c.owner.transitionSeen.incl(node.identity)
+      if not node.transitionGhost:
+        c.owner.transitionSeen.incl(node.identity)
     built = true
   finally:
     c.owner.themeSnapshot = c.theme

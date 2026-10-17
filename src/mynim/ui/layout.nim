@@ -19,6 +19,13 @@ const
   transitionEnterOpacityKey = "\x00mynim.transition.enter.opacity"
   transitionEnterScaleKey = "\x00mynim.transition.enter.scale"
   transitionEnterRotateKey = "\x00mynim.transition.enter.rotate"
+  transitionExitXKey = "\x00mynim.transition.exit.x"
+  transitionExitYKey = "\x00mynim.transition.exit.y"
+  transitionExitWidthKey = "\x00mynim.transition.exit.width"
+  transitionExitHeightKey = "\x00mynim.transition.exit.height"
+  transitionExitOpacityKey = "\x00mynim.transition.exit.opacity"
+  transitionExitScaleKey = "\x00mynim.transition.exit.scale"
+  transitionExitRotateKey = "\x00mynim.transition.exit.rotate"
 
 proc pixels(value: float32): UiLength =
   UiLength(value: value, kind: lengthPixels)
@@ -2307,18 +2314,26 @@ proc transitionEnterMoving(channels: Table[string, ScalarAnimation]): bool =
     if channel.moving or channel.pending:
       return true
 
+proc transitionExitMoving(channels: Table[string, ScalarAnimation]): bool =
+  for key in [transitionExitXKey, transitionExitYKey,
+      transitionExitWidthKey, transitionExitHeightKey,
+      transitionExitOpacityKey, transitionExitScaleKey,
+      transitionExitRotateKey]:
+    let channel = channels.getOrDefault(key)
+    if channel.moving or channel.pending:
+      return true
+
 proc transition*(element: Element;
                  value: ElementTransition): Element =
-  ## Animates layout changes and optionally moves new elements in from `enter`.
+  ## Animates layout changes, entering elements, and removed subtrees.
   ## Size changes reflow descendants at the sampled bounds. Elements need a
   ## stable key or sibling position between builds.
   result = element
   let node = element.node
   if node == nil:
     return
-  discard value.transitionAnimation()
-  if value.enter.isSome:
-    let motion = value.enter.get
+  let animation = value.transitionAnimation()
+  template validateMotion(motion: Motion) =
     if not finiteMotion(float64(motion.x)) or
         not finiteMotion(float64(motion.y)) or
         not finiteMotion(float64(motion.opacity)) or
@@ -2326,7 +2341,12 @@ proc transition*(element: Element;
         not finiteMotion(float64(motion.rotate)):
       raise newException(ValueError,
         "ui: transition motion values must be finite")
+  if value.enter.isSome:
+    validateMotion(value.enter.get)
+  if value.exit.isSome:
+    validateMotion(value.exit.get)
   node[].elementTransition = value
+  node[].elementTransitionAnimation = animation
   node[].transitionSet = true
 
 proc transitioning*(element: Element): bool =
@@ -2348,6 +2368,14 @@ proc transitioning*(element: Element): bool =
           transitionEnterWidthKey, transitionEnterHeightKey,
           transitionEnterOpacityKey, transitionEnterScaleKey,
           transitionEnterRotateKey]:
+        let channel = channels.getOrDefault(key)
+        if channel.moving or channel.pending:
+          return true
+    if value.exit.isSome:
+      for key in [transitionExitXKey, transitionExitYKey,
+          transitionExitWidthKey, transitionExitHeightKey,
+          transitionExitOpacityKey, transitionExitScaleKey,
+          transitionExitRotateKey]:
         let channel = channels.getOrDefault(key)
         if channel.moving or channel.pending:
           return true
@@ -3079,6 +3107,9 @@ proc layoutAt(c: Context; bounds: Rect; now: MonoTime;
      result.root.h != c.owner.transitionBounds.h)
   for slot in 1..<c.owner.nodes.len:
     var node = addr c.owner.nodes[slot]
+    if node[].transitionGhost:
+      node[].transitionTransform = node[].transitionGhostBaseTransform
+      continue
     node[].transitionTransform = Transform()
     if not node[].transitionSet:
       continue
@@ -3268,6 +3299,156 @@ proc layoutAt(c: Context; bounds: Rect; now: MonoTime;
         if enterTransform.set:
           node[].transitionTransform = enterTransform.then(
             node[].transitionTransform)
+    if node[].transitionReappeared and
+        not c.owner.animations.getOrDefault(
+          node[].identity).transitionEnterMoving:
+      c.owner.transitionReentries.del(node[].identity)
+      node[].transitionReappeared = false
+  for slot in 1..<c.owner.nodes.len:
+    var node = addr c.owner.nodes[slot]
+    if not node[].transitionGhost:
+      continue
+    let parent = int(node[].parent)
+    if parent < 0 or parent >= result.rects.len:
+      node[].transitionGhostActive = false
+      node[].opacity = 0
+      node[].opacitySet = true
+      continue
+    let before = result.rects[slot]
+    let parentRect = result.rects[parent]
+    result.rects[slot] = Rect(
+      x: parentRect.x + node[].transitionGhostX,
+      y: parentRect.y + node[].transitionGhostY,
+      w: node[].transitionGhostW,
+      h: node[].transitionGhostH)
+    let deltaX = result.rects[slot].x - before.x
+    let deltaY = result.rects[slot].y - before.y
+    if deltaX != 0 or deltaY != 0:
+      for rect in mitems(node[].textInlineRects):
+        rect.x += deltaX
+        rect.y += deltaY
+    if not node[].transitionGhostRoot:
+      continue
+    let wasActive = node[].transitionGhostActive
+    if not wasActive:
+      node[].opacity = 0
+      node[].opacitySet = true
+      continue
+    if transitionResized:
+      node[].transitionGhostActive = false
+      node[].opacity = 0
+      node[].opacitySet = true
+      continue
+    let motion = node[].transitionGhostExit
+    let animation = node[].transitionGhostExitAnimation
+    let fadeOnly = reduceMotion and motion.opacity < 1 and
+      not motion.collapse
+    var collapseAxis = 0'i8
+    if motion.collapse and not reduceMotion:
+      let parentNode = c.owner.nodes[parent]
+      collapseAxis = if parentNode.row and parentNode.listState == nil and
+          not parentNode.grid and parentNode.gridViewState == nil and
+          parentNode.gridCellState == nil:
+          1'i8
+        else:
+          2'i8
+    var channels = c.owner.animations.mgetOrPut(node[].identity,
+      initTable[string, ScalarAnimation]())
+    let baseWidth = float64(node[].transitionGhostW)
+    let baseHeight = float64(node[].transitionGhostH)
+    var shownX, shownY, shownWidth, shownHeight: float32
+    var shownOpacity, shownScale, shownRotate: float32
+    if node[].transitionGhostFresh:
+      let animateMotion = not reduceMotion
+      shownX = c.owner.startTransitionChannel(channels,
+        transitionExitXKey, 0.0,
+        if animateMotion: float64(motion.x) else: 0.0,
+        animation, animateMotion)
+      shownY = c.owner.startTransitionChannel(channels,
+        transitionExitYKey, 0.0,
+        if animateMotion: float64(motion.y) else: 0.0,
+        animation, animateMotion)
+      shownWidth = c.owner.startTransitionChannel(channels,
+        transitionExitWidthKey, baseWidth,
+        if collapseAxis == 1: 0.0 else: baseWidth,
+        animation, animateMotion and collapseAxis == 1)
+      shownHeight = c.owner.startTransitionChannel(channels,
+        transitionExitHeightKey, baseHeight,
+        if collapseAxis == 2: 0.0 else: baseHeight,
+        animation, animateMotion and collapseAxis == 2)
+      shownOpacity = c.owner.startTransitionChannel(channels,
+        transitionExitOpacityKey, 1,
+        if animateMotion or fadeOnly:
+          float64(min(max(motion.opacity, 0'f32), 1'f32))
+        else:
+          1,
+        animation, animateMotion or fadeOnly)
+      shownScale = c.owner.startTransitionChannel(channels,
+        transitionExitScaleKey, 1,
+        if animateMotion and motion.scale != 0:
+          float64(motion.scale)
+        else:
+          1,
+        animation, animateMotion)
+      shownRotate = c.owner.startTransitionChannel(channels,
+        transitionExitRotateKey, 0,
+        if animateMotion: float64(motion.rotate) else: 0,
+        animation, animateMotion)
+      node[].transitionGhostFresh = false
+    else:
+      shownX = c.owner.sampleTransitionChannel(channels,
+        transitionExitXKey,
+        if reduceMotion: 0.0 else: float64(motion.x), animation,
+        reduceMotion, forceSnap = false)
+      shownY = c.owner.sampleTransitionChannel(channels,
+        transitionExitYKey,
+        if reduceMotion: 0.0 else: float64(motion.y), animation,
+        reduceMotion, forceSnap = false)
+      shownWidth = c.owner.sampleTransitionChannel(channels,
+        transitionExitWidthKey,
+        if collapseAxis == 1: 0.0 else: baseWidth, animation,
+        reduceMotion, forceSnap = false)
+      shownHeight = c.owner.sampleTransitionChannel(channels,
+        transitionExitHeightKey,
+        if collapseAxis == 2: 0.0 else: baseHeight, animation,
+        reduceMotion, forceSnap = false)
+      shownOpacity = c.owner.sampleTransitionChannel(channels,
+        transitionExitOpacityKey,
+        float64(min(max(motion.opacity, 0'f32), 1'f32)), animation,
+        reduceMotion and not fadeOnly, forceSnap = false)
+      shownScale = c.owner.sampleTransitionChannel(channels,
+        transitionExitScaleKey,
+        if reduceMotion or motion.scale == 0: 1.0 else: float64(motion.scale),
+        animation, reduceMotion, forceSnap = false)
+      shownRotate = c.owner.sampleTransitionChannel(channels,
+        transitionExitRotateKey,
+        if reduceMotion: 0.0 else: float64(motion.rotate), animation,
+        reduceMotion, forceSnap = false)
+    c.owner.animations[node[].identity] = channels
+    node[].transitionGhostActive = channels.transitionExitMoving
+    if node[].transitionGhostActive or wasActive:
+      let baseOpacity = node[].transitionGhostBaseOpacity
+      node[].opacity = baseOpacity * max(shownOpacity, 0'f32)
+      node[].opacitySet = true
+      if collapseAxis == 1:
+        result.rects[slot].w = max(shownWidth, 0'f32)
+        node[].clipX = true
+      elif collapseAxis == 2:
+        result.rects[slot].h = max(shownHeight, 0'f32)
+        node[].clipY = true
+      var exitTransform = Transform()
+      if shownScale != 1:
+        exitTransform = exitTransform.then(scaling(shownScale, shownScale))
+      if shownRotate != 0:
+        exitTransform = exitTransform.then(rotation(shownRotate))
+      if shownX != 0 or shownY != 0:
+        exitTransform = exitTransform.then(translation(shownX, shownY))
+      if exitTransform.set:
+        node[].transitionTransform = exitTransform.then(
+          node[].transitionTransform)
+    else:
+      node[].opacity = 0
+      node[].opacitySet = true
   result.animating = result.animating or c.owner.animating
   c.owner.draggableOffsetScratch.setLen(c.owner.nodes.len)
   if c.owner.nodes.len > 0:
