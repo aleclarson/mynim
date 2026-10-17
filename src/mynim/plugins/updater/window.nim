@@ -5,6 +5,7 @@ import std/[locks, math, sequtils]
 import mynim as app
 import mynim/plugins/updater/frontend as frontend
 import mynim/plugins/updater/notes as notes
+import mynim/image as sourceImage
 import mynim/ui as ui
 
 type
@@ -22,18 +23,26 @@ type
     checkedPrompt, answeredPrompt: int
     onRespond: Respond
     onClose: proc() {.closure.}
+    icon: ui.Bitmap
     notesState: notes.NotesState
     notesScroll: ui.ScrollState
     window: MainWindow
 
 proc newUpdaterWindow*(texts: frontend.Texts; initial: frontend.View;
                        onRespond: Respond; user = true;
-                       onClose: proc() {.closure.} = nil): UpdaterWindow =
+                       onClose: proc() {.closure.} = nil;
+                       iconPng: seq[byte] = @[]): UpdaterWindow =
   ## Creates a native updater window controller before opening its window.
+  var icon: ui.Bitmap
+  if iconPng.len > 0:
+    let decoded = sourceImage.pngDecode(iconPng)
+    if decoded.err == nil:
+      icon = ui.newBitmap(decoded.img)
   result = UpdaterWindow(texts: texts, current: initial, user: user,
     checked: initial.checked, checkedPrompt: initial.prompt,
     answeredPrompt: -1, onRespond: onRespond, onClose: onClose,
-    notesState: notes.newNotesState(), notesScroll: ui.newScrollState())
+    icon: icon, notesState: notes.newNotesState(),
+    notesScroll: ui.newScrollState())
   initLock(result.guard)
 
 proc currentView(state: UpdaterWindow): frontend.View =
@@ -172,6 +181,8 @@ proc build*(state: UpdaterWindow; c: ui.Context): ui.Element =
     let top = row(c, state.texts.rtl).grow().gap(18).alignItems(
       if view.release: ui.Align.Stretch else: ui.Align.Start)
     discard top.children(proc() =
+      if state.icon != nil:
+        discard c.image(state.icon).size(44, 44).fit(ui.Fit.Contain)
       discard c.column().grow().children(proc() =
         state.buildBody(c, theme, view)
       )

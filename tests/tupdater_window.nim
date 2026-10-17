@@ -3,10 +3,14 @@ import std/assertions
 import mynim/plugins/updater/frontend
 import mynim/plugins/updater/markdown
 import mynim/plugins/updater/window as updaterWindow
+import mynim/image as sourceImage
 import mynim/ui as ui
 
 block release_window:
   var answers: seq[(int, Action, bool)]
+  let pixels = sourceImage.newRgba(sourceImage.rect(0, 0, 2, 2))
+  pixels.set(0, 0, sourceImage.Rgba(r: 255, g: 0, b: 0, a: 255))
+  let icon = sourceImage.pngEncode(pixels)
   let
     view = frontend.View(prompt: 1, release: true, title: "Update available",
       message: "Version 2.0 is ready.", notes: parse("## Changes\n\n- Fixed a bug"),
@@ -19,7 +23,7 @@ block release_window:
       automaticDownloads: "Install updates automatically", lang: "en")
     state = updaterWindow.newUpdaterWindow(texts, view,
       proc(prompt: int; action: Action; automaticDownloads: bool) =
-        answers.add((prompt, action, automaticDownloads)))
+        answers.add((prompt, action, automaticDownloads)), iconPng = icon)
     tester = ui.newTester(proc(c: ui.Context) = discard state.build(c), 620, 440)
   defer: tester.close()
 

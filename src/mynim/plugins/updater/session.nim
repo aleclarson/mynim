@@ -19,11 +19,13 @@ type
     response: Response
     responseReady: bool
     texts: frontend.Texts
+    iconPng: seq[byte]
     window: window.UpdaterWindow
 
-proc newSession*(texts: frontend.Texts; user: bool): Session =
+proc newSession*(texts: frontend.Texts; user: bool;
+                 iconPng: seq[byte] = @[]): Session =
   ## Creates an update session before it has a view or window.
-  result = Session(texts: texts, user: user)
+  result = Session(texts: texts, user: user, iconPng: iconPng)
   initLock(result.guard)
   initCond(result.changed)
 
@@ -156,7 +158,7 @@ proc show*(state: Session) =
       state.window = window.newUpdaterWindow(state.texts, state.current,
         proc(prompt: int; action: frontend.Action; automaticDownloads: bool) =
           state.respond(prompt, action, automaticDownloads), foreground,
-        proc() = state.cancel())
+        proc() = state.cancel(), state.iconPng)
     let nativeWindow = state.window
     let current = state.current
     state.shown = true

@@ -109,6 +109,15 @@ proc newUpdater*(options: Options; hooks = Hooks()): Updater =
   var options = options
   if options.interval.inNanoseconds <= 0:
     options.interval = initDuration(nanoseconds = defaultInterval)
+  if options.icon.len == 0:
+    try:
+      let path = core.app.path(core.pathResources) / "icon.png"
+      if fileExists(path):
+        let data = readFile(path)
+        for ch in data:
+          options.icon.add(byte(ord(ch)))
+    except CatchableError:
+      discard
   var hooks = hooks
   let defaults = defaultHooks()
   if hooks.enabled == nil: hooks.enabled = defaults.enabled
@@ -372,7 +381,7 @@ proc beginSession(value: Updater; user: bool) =
     if user:
       current.promote()
     return
-  current = session.newSession(frontendTexts, user)
+  current = session.newSession(frontendTexts, user, value.options.icon)
   value.currentSession = current
   value.starting = false
   value.deadline = none(Time)
