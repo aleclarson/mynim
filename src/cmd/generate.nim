@@ -6,9 +6,10 @@ import ./i18n_generate
 const usageGenerate = """Usage: mygo generate [-o file] [dir]
 
 Write the TypeScript client for the services and events bound by the app, and
-`catalog_gen.nim` when i18n catalogs are configured. The client output defaults
-to bindings in mygo.json, or the conventional path for a project with a
-frontend. Apps without a frontend produce no client by default.
+`catalog_gen.nim` when i18n catalogs are configured. Web frontends also get a
+typed TypeScript module for their catalogs next to the client. The client
+output defaults to bindings in mygo.json, or the conventional path for a
+project with a frontend. Apps without a frontend produce no client by default.
 
 Flags:
   -o, --output file  output file (overrides mygo.json)
@@ -106,7 +107,8 @@ proc runGenerate*(args: seq[string]): int =
         raise newException(ValueError,
           "mygo generate: mygo.json must contain a JSON object")
 
-    let catalogModule = generateCatalogModule(projectDir, source, config)
+    let catalogModules = generateCatalogModules(projectDir, source, config,
+      generationOutput(projectDir, config))
 
     let configuredOutput = if outputOption.len > 0:
       absolutePath(if isAbsolute(outputOption): outputOption
@@ -150,10 +152,17 @@ proc runGenerate*(args: seq[string]): int =
       except ValueError:
         discard
       stdout.writeLine("Generated " & shownPath)
-    if catalogModule.len > 0:
-      var shownPath = catalogModule
+    if catalogModules.nimModule.len > 0:
+      var shownPath = catalogModules.nimModule
       try:
-        shownPath = relativePath(catalogModule, projectDir)
+        shownPath = relativePath(catalogModules.nimModule, projectDir)
+      except ValueError:
+        discard
+      stdout.writeLine("Generated " & shownPath)
+    if catalogModules.typescriptModule.len > 0:
+      var shownPath = catalogModules.typescriptModule
+      try:
+        shownPath = relativePath(catalogModules.typescriptModule, projectDir)
       except ValueError:
         discard
       stdout.writeLine("Generated " & shownPath)

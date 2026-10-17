@@ -24,7 +24,7 @@ Commands:
   install-skills  install the MyNim maintenance skill
   dev             build and run a native app with live reload
   build           compile a native project for this machine
-  generate        write the typed client and i18n catalog accessors
+  generate        write the typed client and Nim/TypeScript i18n accessors
   vet             typecheck a native Nim project
   i18n            check message catalogs
   doctor          check that the development environment is ready
