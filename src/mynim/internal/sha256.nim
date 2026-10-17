@@ -2,6 +2,12 @@
 
 import std/[endians, strutils]
 
+type Sha256State* = object
+  hash: array[8, uint32]
+  buffer: array[64, byte]
+  bufferLen: int
+  totalBytes: uint64
+
 const sha256K = [
   0x428a2f98'u32, 0x71374491'u32, 0xb5c0fbcf'u32, 0xe9b5dba5'u32, 0x3956c25b'u32,
   0x59f111f1'u32, 0x923f82a4'u32, 0xab1c5ed5'u32, 0xd807aa98'u32, 0x12835b01'u32,
@@ -17,58 +23,95 @@ const sha256K = [
   0x682e6ff3'u32, 0x748f82ee'u32, 0x78a5636f'u32, 0x84c87814'u32, 0x8cc70208'u32,
   0x90befffa'u32, 0xa4506ceb'u32, 0xbef9a3f7'u32, 0xc67178f2'u32]
 
-proc sha256Sum*(data: openArray[byte]): array[32, byte] =
-  var h = [0x6a09e667'u32, 0xbb67ae85'u32, 0x3c6ef372'u32, 0xa54ff53a'u32,
-           0x510e527f'u32, 0x9b05688c'u32, 0x1f83d9ab'u32, 0x5be0cd19'u32]
-  var msg = @data
-  let bitLen = uint64(msg.len) * 8
-  msg.add(0x80)
-  while msg.len mod 64 != 56:
-    msg.add(0)
-  var tail: array[8, byte]
-  bigEndian64(addr tail[0], unsafeAddr bitLen)
-  for b in tail: msg.add(b)
+proc sha256Init*(): Sha256State =
+  Sha256State(hash: [0x6a09e667'u32, 0xbb67ae85'u32, 0x3c6ef372'u32,
+    0xa54ff53a'u32, 0x510e527f'u32, 0x9b05688c'u32, 0x1f83d9ab'u32,
+    0x5be0cd19'u32])
+
+proc compressBlock(state: var Sha256State; chunk: openArray[byte]) =
   var w: array[64, uint32]
-  for chunkStart in countup(0, msg.len - 1, 64):
-    for i in 0 ..< 16:
-      bigEndian32(addr w[i], unsafeAddr msg[chunkStart + i * 4])
-    for i in 16 ..< 64:
-      let
-        s0 = (w[i - 15] shr 7 or (w[i - 15] shl 25)) xor
-             (w[i - 15] shr 18 or (w[i - 15] shl 14)) xor (w[i - 15] shr 3)
-        s1 = (w[i - 2] shr 17 or (w[i - 2] shl 15)) xor
-             (w[i - 2] shr 19 or (w[i - 2] shl 13)) xor (w[i - 2] shr 10)
-      w[i] = w[i - 16] + s0 + w[i - 7] + s1
-    var (a, b, c, d, e, f, g, hh) = (h[0], h[1], h[2], h[3], h[4], h[5],
-                                     h[6], h[7])
-    for i in 0 ..< 64:
-      let
-        s1 = (e shr 6 or (e shl 26)) xor (e shr 11 or (e shl 21)) xor
-             (e shr 25 or (e shl 7))
-        ch = (e and f) xor ((not e) and g)
-        t1 = hh + s1 + ch + sha256K[i] + w[i]
-        s0 = (a shr 2 or (a shl 30)) xor (a shr 13 or (a shl 19)) xor
-             (a shr 22 or (a shl 10))
-        maj = (a and b) xor (a and c) xor (b and c)
-        t2 = s0 + maj
-      hh = g
-      g = f
-      f = e
-      e = d + t1
-      d = c
-      c = b
-      b = a
-      a = t1 + t2
-    h[0] += a
-    h[1] += b
-    h[2] += c
-    h[3] += d
-    h[4] += e
-    h[5] += f
-    h[6] += g
-    h[7] += hh
+  for i in 0 ..< 16:
+    bigEndian32(addr w[i], unsafeAddr chunk[i * 4])
+  for i in 16 ..< 64:
+    let
+      s0 = (w[i - 15] shr 7 or (w[i - 15] shl 25)) xor
+           (w[i - 15] shr 18 or (w[i - 15] shl 14)) xor (w[i - 15] shr 3)
+      s1 = (w[i - 2] shr 17 or (w[i - 2] shl 15)) xor
+           (w[i - 2] shr 19 or (w[i - 2] shl 13)) xor (w[i - 2] shr 10)
+    w[i] = w[i - 16] + s0 + w[i - 7] + s1
+  var (a, b, c, d, e, f, g, hh) = (state.hash[0], state.hash[1],
+    state.hash[2], state.hash[3], state.hash[4], state.hash[5],
+    state.hash[6], state.hash[7])
+  for i in 0 ..< 64:
+    let
+      s1 = (e shr 6 or (e shl 26)) xor (e shr 11 or (e shl 21)) xor
+           (e shr 25 or (e shl 7))
+      ch = (e and f) xor ((not e) and g)
+      t1 = hh + s1 + ch + sha256K[i] + w[i]
+      s0 = (a shr 2 or (a shl 30)) xor (a shr 13 or (a shl 19)) xor
+           (a shr 22 or (a shl 10))
+      maj = (a and b) xor (a and c) xor (b and c)
+      t2 = s0 + maj
+    hh = g
+    g = f
+    f = e
+    e = d + t1
+    d = c
+    c = b
+    b = a
+    a = t1 + t2
+  state.hash[0] += a
+  state.hash[1] += b
+  state.hash[2] += c
+  state.hash[3] += d
+  state.hash[4] += e
+  state.hash[5] += f
+  state.hash[6] += g
+  state.hash[7] += hh
+
+proc sha256Update*(state: var Sha256State; data: openArray[byte]) =
+  state.totalBytes += uint64(data.len)
+  var consumed = 0
+  while consumed < data.len and state.bufferLen < state.buffer.len:
+    state.buffer[state.bufferLen] = data[consumed]
+    inc state.bufferLen
+    inc consumed
+  if state.bufferLen == state.buffer.len:
+    compressBlock(state, state.buffer)
+    state.bufferLen = 0
+  while data.len - consumed >= state.buffer.len:
+    var chunk: array[64, byte]
+    for index in 0 ..< chunk.len:
+      chunk[index] = data[consumed + index]
+    compressBlock(state, chunk)
+    consumed += chunk.len
+  while consumed < data.len:
+    state.buffer[state.bufferLen] = data[consumed]
+    inc state.bufferLen
+    inc consumed
+
+proc sha256Final*(state: var Sha256State): array[32, byte] =
+  let bitLen = state.totalBytes * 8
+  state.buffer[state.bufferLen] = 0x80
+  inc state.bufferLen
+  if state.bufferLen > 56:
+    while state.bufferLen < state.buffer.len:
+      state.buffer[state.bufferLen] = 0
+      inc state.bufferLen
+    compressBlock(state, state.buffer)
+    state.bufferLen = 0
+  while state.bufferLen < 56:
+    state.buffer[state.bufferLen] = 0
+    inc state.bufferLen
+  bigEndian64(addr state.buffer[56], unsafeAddr bitLen)
+  compressBlock(state, state.buffer)
   for i in 0 ..< 8:
-    bigEndian32(addr result[i * 4], addr h[i])
+    bigEndian32(addr result[i * 4], addr state.hash[i])
+
+proc sha256Sum*(data: openArray[byte]): array[32, byte] =
+  var state = sha256Init()
+  sha256Update(state, data)
+  sha256Final(state)
 
 proc sha256Hex*(data: openArray[byte]): string =
   for b in sha256Sum(data):

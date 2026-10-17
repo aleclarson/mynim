@@ -20,7 +20,7 @@ Flags:
   -skip-dmg           do not create a disk image on macOS
   -skip-notarize      do not notarize even when macos.notarize is set
   -sign identity      macOS signing identity (default: macos.signingIdentity or -)
-  -upload             upload installers to a draft GitHub release
+  -upload             upload installers to GitHub releases or updates.s3
   -debug              compile with checks and debug information
   -h, --help          show this help
 """
@@ -342,9 +342,9 @@ proc runBuild*(args: seq[string]): int =
     let version = configString(config, "version", "0.1.0")
     let updateSettings = updateArtifacts.runtimeUpdateSettings(config,
       targetOs & "-" & targetArch)
-    var githubRelease: releasePublisher.GitHubRelease
+    var publisher: releasePublisher.Publisher
     if upload:
-      githubRelease = releasePublisher.prepareGitHubRelease(config,
+      publisher = releasePublisher.preparePublisher(config,
         projectDir, version)
     var macosConfig = newJObject()
     if config.hasKey("macos") and config["macos"].kind != JNull:
@@ -475,7 +475,7 @@ proc runBuild*(args: seq[string]): int =
       var artifacts: seq[string]
       for kind, path in walkDir(targetDir):
         artifacts.add path
-      releasePublisher.publishGitHub(githubRelease, artifacts)
+      releasePublisher.publish(publisher, artifacts)
     return 0
   except CatchableError as error:
     let message = if error.msg.startsWith("nim-xplat build:"): error.msg

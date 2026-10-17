@@ -45,6 +45,15 @@ proc escapePathSegment(value: string): string =
 proc updateFileUrl(updates: JsonNode; filename, version: string): string =
   let github = configString(updates, "github", "")
   let baseUrl = configString(updates, "url", "")
+  let hasS3 = updates.hasKey("s3") and updates["s3"].kind != JNull
+  if hasS3:
+    if updates["s3"].kind != JObject:
+      raise newException(ValueError, "mygo.json: updates.s3 must be an object")
+    if github.len > 0:
+      raise newException(ValueError,
+        "mygo.json: updates needs either github or url, not both")
+    if baseUrl.len == 0:
+      raise newException(ValueError, "mygo.json: updates.s3 needs url")
   if github.len > 0 and baseUrl.len > 0:
     raise newException(ValueError,
       "mygo.json: updates needs either github or url, not both")
@@ -94,6 +103,15 @@ proc runtimeUpdateSettings*(config: JsonNode; target: string):
 
   let github = configString(updates, "github", "")
   let baseUrl = configString(updates, "url", "")
+  let hasS3 = updates.hasKey("s3") and updates["s3"].kind != JNull
+  if hasS3:
+    if updates["s3"].kind != JObject:
+      raise newException(ValueError, "mygo.json: updates.s3 must be an object")
+    if github.len > 0:
+      raise newException(ValueError,
+        "mygo.json: updates needs either github or url, not both")
+    if baseUrl.len == 0:
+      raise newException(ValueError, "mygo.json: updates.s3 needs url")
   if github.len > 0 and baseUrl.len > 0:
     raise newException(ValueError,
       "mygo.json: updates needs either github or url, not both")

@@ -1,11 +1,21 @@
 ## Upload build artifacts to a draft GitHub release.
 
-import std/[base64, json, os, osproc, streams, strutils]
+import std/[base64, json, os, osproc, streams, strutils, uri]
+import ./s3 as s3Upload
 
 type
   GitHubRelease* = object
     repo*, tag*, notes*: string
     latest*: bool
+
+  PublisherKind* = enum
+    pkGitHub, pkS3
+
+  Publisher* = object
+    kind*: PublisherKind
+    github*: GitHubRelease
+    s3*: s3Upload.S3Config
+    url*: string
 
 proc configString(config: JsonNode; key, fallback: string): string =
   if not config.hasKey(key):
@@ -54,7 +64,7 @@ proc prepareGitHubRelease*(config: JsonNode; projectDir, version: string):
   let updates = config["updates"]
   if updates.hasKey("s3") and updates["s3"].kind != JNull:
     raise newException(ValueError,
-      "nim-xplat build: S3 uploads are not ported yet")
+      "updates.s3 uses the S3 publisher, not the GitHub release publisher")
   let publicKey = configString(updates, "publicKey", "").strip()
   var decodedKey: string
   try:
@@ -89,6 +99,65 @@ proc prepareGitHubRelease*(config: JsonNode; projectDir, version: string):
     else: projectDir / changelog
   if fileExists(changelogPath):
     result.notes = releaseNotes(readFile(changelogPath), version)
+
+proc s3String(config: JsonNode; key: string): string =
+  if not config.hasKey(key) or config[key].kind == JNull:
+    return ""
+  if config[key].kind != JString:
+    raise newException(ValueError, "mygo.json: updates.s3." & key &
+      " must be a string")
+  config[key].getStr()
+
+proc preparePublisher*(config: JsonNode; projectDir, version: string):
+    Publisher =
+  if config.kind != JObject or not config.hasKey("updates") or
+      config["updates"].kind != JObject:
+    raise newException(ValueError,
+      "-upload needs updates.github or updates.s3 in mygo.json")
+  let updates = config["updates"]
+  if updates.hasKey("s3") and updates["s3"].kind != JNull:
+    if updates["s3"].kind != JObject:
+      raise newException(ValueError, "mygo.json: updates.s3 must be an object")
+    if configString(updates, "github", "").len > 0:
+      raise newException(ValueError,
+        "mygo.json: updates needs either github or url, not both")
+    result.s3.bucket = s3String(updates["s3"], "bucket")
+    result.s3.prefix = s3String(updates["s3"], "prefix")
+    result.s3.region = s3String(updates["s3"], "region")
+    result.s3.endpoint = s3String(updates["s3"], "endpoint")
+    if updates["s3"].hasKey("pathStyle") and
+        updates["s3"]["pathStyle"].kind != JNull:
+      if updates["s3"]["pathStyle"].kind != JBool:
+        raise newException(ValueError,
+          "mygo.json: updates.s3.pathStyle must be a boolean")
+      result.s3.pathStyleSet = true
+      result.s3.pathStyle = updates["s3"]["pathStyle"].getBool()
+    result.url = configString(updates, "url", "")
+    if result.url.len == 0:
+      raise newException(ValueError, "mygo.json: updates.s3 needs url")
+    let parsedUrl = try: parseUri(result.url)
+      except CatchableError:
+        raise newException(ValueError, "mygo.json: updates.url must be an HTTPS URL")
+    if parsedUrl.scheme.toLowerAscii() != "https" or
+        parsedUrl.hostname.len == 0:
+      raise newException(ValueError,
+        "mygo.json: updates.url must be an HTTPS URL")
+
+    let publicKey = configString(updates, "publicKey", "").strip()
+    var decodedKey: string
+    try:
+      decodedKey = decode(publicKey)
+    except ValueError:
+      raise newException(ValueError,
+        "updates.publicKey: invalid update public key")
+    if decodedKey.len != 32:
+      raise newException(ValueError,
+        "updates.publicKey: invalid update public key")
+    discard s3Upload.newS3Client(result.s3)
+    result.kind = pkS3
+  else:
+    result.kind = pkGitHub
+    result.github = prepareGitHubRelease(config, projectDir, version)
 
 proc uploadFiles*(artifacts: openArray[string]):
     tuple[files, manifests: seq[string]] =
@@ -168,3 +237,38 @@ proc publishGitHub*(release: GitHubRelease; artifacts: openArray[string]) =
   stdout.writeLine("Uploaded to release " & release.tag & " of " &
     release.repo & "; publish it with:\n  gh release edit " & release.tag &
     " --repo " & release.repo & " --draft=false" & latest)
+
+proc uploadHeaders(name: string): seq[tuple[name, value: string]] =
+  let extension = name.splitFile().ext.toLowerAscii()
+  let contentType = case extension
+    of ".dmg": "application/x-apple-diskimage"
+    of ".exe": "application/vnd.microsoft.portable-executable"
+    of ".deb": "application/vnd.debian.binary-package"
+    of ".gz": "application/gzip"
+    of ".json": "application/json"
+    of ".sh": "text/plain; charset=utf-8"
+    else: "application/octet-stream"
+  result.add ("Content-Type", contentType)
+  if name == "install.sh" or
+      (name.startsWith("update-") and name.endsWith(".json")):
+    result.add ("Cache-Control", "no-cache")
+
+proc publishS3*(config: s3Upload.S3Config; url: string;
+    artifacts: openArray[string]) =
+  let client = s3Upload.newS3Client(config)
+  let (files, manifests) = uploadFiles(artifacts)
+  for path in files & manifests:
+    let name = path.lastPathPart()
+    let key = client.objectKey(name)
+    client.put(key, path, uploadHeaders(name))
+    stdout.writeLine("Uploaded " & name)
+  let prefix = config.prefix.strip(chars = {'/'})
+  stdout.writeLine("Uploaded to s3://" & config.bucket & "/" & prefix &
+    ", which " & url & " serves")
+
+proc publish*(publisher: Publisher; artifacts: openArray[string]) =
+  case publisher.kind
+  of pkGitHub:
+    publishGitHub(publisher.github, artifacts)
+  of pkS3:
+    publishS3(publisher.s3, publisher.url, artifacts)

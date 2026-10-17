@@ -1,5 +1,7 @@
 import std/[assertions, json, os, strutils, tempfiles]
 import ../src/cmd/publish
+import ../src/cmd/s3 as s3Upload
+import ../src/cmd/update_artifacts as updateArtifacts
 
 const publicKey = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
 
@@ -62,6 +64,84 @@ proc testReleaseSettings() =
   doAssertRaises(ValueError):
     discard prepareGitHubRelease(githubConfig(s3 = true), temporary, "1.4.0")
 
+proc testS3Signing() =
+  let signature = s3Upload.signRequestV4("PUT", "/test%24file.text",
+    "examplebucket.s3.amazonaws.com", "us-east-1",
+    "AKIAIOSFODNN7EXAMPLE", "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+    "20130524T000000Z",
+    "44ce7dd67c959e0d3524ffac1771dfbba87d2b6b4b4e99e42034a8b803f8b072",
+    [("date", "Fri, 24 May 2013 00:00:00 GMT"),
+      ("x-amz-storage-class", "REDUCED_REDUNDANCY")])
+  doAssert signature.signature ==
+    "98ad721746da40c64f1a55b78f14c238d841ea1380cd77a1b5971af0ece108bd",
+    signature.signature
+  doAssert signature.signedHeaders ==
+    "date;host;x-amz-content-sha256;x-amz-date;x-amz-storage-class"
+
+proc s3Config(): JsonNode =
+  var updates = newJObject()
+  var s3 = newJObject()
+  updates["publicKey"] = %publicKey
+  updates["url"] = %"https://downloads.example.test/my-app/"
+  s3["bucket"] = %"examplebucket"
+  s3["prefix"] = %"/my-app/"
+  s3["endpoint"] = %"https://s3.example.test"
+  s3["pathStyle"] = %true
+  updates["s3"] = s3
+  result = newJObject()
+  result["updates"] = updates
+
+proc testS3Settings() =
+  let oldAccessKey = getEnv("AWS_ACCESS_KEY_ID")
+  let oldSecretKey = getEnv("AWS_SECRET_ACCESS_KEY")
+  let oldToken = getEnv("AWS_SESSION_TOKEN")
+  let oldRegion = getEnv("AWS_REGION")
+  putEnv("AWS_ACCESS_KEY_ID", "test-access-key")
+  putEnv("AWS_SECRET_ACCESS_KEY", "test-secret-key")
+  putEnv("AWS_SESSION_TOKEN", "")
+  putEnv("AWS_REGION", "eu-west-1")
+  defer:
+    putEnv("AWS_ACCESS_KEY_ID", oldAccessKey)
+    putEnv("AWS_SECRET_ACCESS_KEY", oldSecretKey)
+    putEnv("AWS_SESSION_TOKEN", oldToken)
+    putEnv("AWS_REGION", oldRegion)
+
+  let config = s3Config()
+  let publisher = preparePublisher(config, ".", "1.0.0")
+  doAssert publisher.kind == pkS3
+  doAssert publisher.s3.bucket == "examplebucket"
+  doAssert publisher.s3.prefix == "/my-app/"
+  doAssert publisher.url == "https://downloads.example.test/my-app/"
+  doAssert updateArtifacts.runtimeUpdateSettings(config, "linux-amd64").feed ==
+    "https://downloads.example.test/my-app/update-linux-amd64.json"
+
+  let client = s3Upload.newS3Client(publisher.s3)
+  let location = client.objectUrl(client.objectKey("sample file.delta"))
+  doAssert location.url ==
+    "https://s3.example.test/examplebucket/my-app/sample%20file.delta"
+  doAssert location.host == "s3.example.test"
+
+  var noUrl = s3Config()
+  noUrl["updates"].delete("url")
+  doAssertRaises ValueError:
+    discard preparePublisher(noUrl, ".", "1.0.0")
+  doAssertRaises ValueError:
+    discard updateArtifacts.runtimeUpdateSettings(noUrl, "linux-amd64")
+
+  var bothPublishers = s3Config()
+  bothPublishers["updates"]["github"] = %"owner/app"
+  doAssertRaises ValueError:
+    discard preparePublisher(bothPublishers, ".", "1.0.0")
+  doAssertRaises ValueError:
+    discard updateArtifacts.runtimeUpdateSettings(bothPublishers,
+      "linux-amd64")
+
+  var badEndpoint = s3Config()
+  badEndpoint["updates"]["s3"]["endpoint"] =
+    %"https://s3.example.test/path"
+  doAssertRaises ValueError:
+    discard preparePublisher(badEndpoint, ".", "1.0.0")
+
 proc testUploadSelection() =
   let temporary = createTempDir("mynim-publish-files-", "")
   defer: removeDir(temporary)
@@ -89,6 +169,78 @@ proc testUploadSelection() =
     discard uploadFiles([ignored])
 
 when defined(posix):
+  proc testS3UploadOrdering() =
+    let temporary = createTempDir("mynim-publish-s3-", "")
+    defer: removeDir(temporary)
+    let bin = temporary / "bin"
+    createDir(bin)
+    let log = temporary / "curl-configs.txt"
+    let curl = bin / "curl"
+    writeFile(curl, """#!/bin/sh
+config=""
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "--config" ]; then
+    config=$2
+    shift 2
+  else
+    shift
+  fi
+done
+output=$(sed -n 's/^output = "\(.*\)"$/\1/p' "$config")
+headers=$(sed -n 's/^dump-header = "\(.*\)"$/\1/p' "$config")
+printf 'HTTP/1.1 200 OK\r\n\r\n' > "$headers"
+: > "$output"
+cat "$config" >> "$MYNIM_TEST_S3_LOG"
+printf '\n---\n' >> "$MYNIM_TEST_S3_LOG"
+exit 0
+""")
+    setFilePermissions(curl, {fpUserRead, fpUserWrite, fpUserExec})
+
+    let archive = temporary / "sample.tar.gz"
+    let delta = temporary / "sample.delta"
+    let manifest = temporary / "update-linux-amd64.json"
+    let installScript = temporary / "install.sh"
+    for path in [archive, delta, manifest, installScript]:
+      writeFixture(path)
+
+    let oldPath = getEnv("PATH")
+    let oldLog = getEnv("MYNIM_TEST_S3_LOG")
+    putEnv("PATH", bin & ":" & oldPath)
+    putEnv("MYNIM_TEST_S3_LOG", log)
+    defer:
+      putEnv("PATH", oldPath)
+      putEnv("MYNIM_TEST_S3_LOG", oldLog)
+    let oldAccessKey = getEnv("AWS_ACCESS_KEY_ID")
+    let oldSecretKey = getEnv("AWS_SECRET_ACCESS_KEY")
+    let oldToken = getEnv("AWS_SESSION_TOKEN")
+    let oldRegion = getEnv("AWS_REGION")
+    putEnv("AWS_ACCESS_KEY_ID", "test-access-key")
+    putEnv("AWS_SECRET_ACCESS_KEY", "test-secret-key")
+    putEnv("AWS_SESSION_TOKEN", "test-session-token")
+    putEnv("AWS_REGION", "eu-west-1")
+    defer:
+      putEnv("AWS_ACCESS_KEY_ID", oldAccessKey)
+      putEnv("AWS_SECRET_ACCESS_KEY", oldSecretKey)
+      putEnv("AWS_SESSION_TOKEN", oldToken)
+      putEnv("AWS_REGION", oldRegion)
+
+    let config = s3Config()
+    let publisher = preparePublisher(config, ".", "1.0.0")
+    publish(publisher, [archive, delta, manifest, installScript])
+    let output = readFile(log)
+    doAssert output.count("url = ") == 4
+    doAssert output.find("sample.tar.gz") < output.find("sample.delta")
+    doAssert output.find("sample.delta") < output.find("install.sh")
+    doAssert output.find("install.sh") <
+      output.find("update-linux-amd64.json")
+    doAssert output.contains("Cache-Control: no-cache")
+    doAssert output.toLowerAscii().contains(
+      "x-amz-security-token: test-session-token")
+    doAssert output.toLowerAscii().count(
+      "x-amz-security-token: test-session-token") == 4
+    doAssert not output.contains("test-secret-key")
+
+  testS3UploadOrdering()
   proc testGithubDraftUpload() =
     let temporary = createTempDir("mynim-publish-gh-", "")
     defer: removeDir(temporary)
@@ -133,6 +285,8 @@ exit 0
 
 testReleaseNotes()
 testReleaseSettings()
+testS3Signing()
+testS3Settings()
 testUploadSelection()
 when defined(posix):
   testGithubDraftUpload()
