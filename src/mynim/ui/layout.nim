@@ -2765,6 +2765,36 @@ proc layoutAt(c: Context; bounds: Rect; now: MonoTime;
         result.rects[descendant].y += delta
   alignSplitHandles(c.owner.nodes, result.rects)
   placeInlineText(c.owner.nodes, result.rects)
+  c.owner.draggableOffsetScratch.setLen(c.owner.nodes.len)
+  if c.owner.nodes.len > 0:
+    c.owner.draggableOffsetScratch[0] = Point()
+  for slot in 1..<c.owner.nodes.len:
+    let node = c.owner.nodes[slot]
+    let parent = int(node.parent)
+    var inherited = c.owner.draggableOffsetScratch[parent]
+    if node.overlayAnchorIdentity != 0 and
+        c.owner.idSlots.hasKey(node.overlayAnchorIdentity):
+      let anchor = c.owner.idSlots[node.overlayAnchorIdentity]
+      var ancestor = parent
+      var containsAnchor = false
+      while ancestor > 0 and ancestor < c.owner.nodes.len:
+        if ancestor == anchor:
+          containsAnchor = true
+          break
+        ancestor = int(c.owner.nodes[ancestor].parent)
+      if not containsAnchor and anchor >= 0 and
+          anchor < c.owner.draggableOffsetScratch.len:
+        inherited.x += c.owner.draggableOffsetScratch[anchor].x
+        inherited.y += c.owner.draggableOffsetScratch[anchor].y
+    if node.draggable:
+      inherited.x += node.dragOffset.x
+      inherited.y += node.dragOffset.y
+    result.rects[slot].x += inherited.x
+    result.rects[slot].y += inherited.y
+    for rect in mitems(c.owner.nodes[slot].textInlineRects):
+      rect.x += inherited.x
+      rect.y += inherited.y
+    c.owner.draggableOffsetScratch[slot] = inherited
   c.owner.visibleIdentities.clear()
   c.owner.visibleClipScratch.setLen(c.owner.nodes.len)
   c.owner.visibilityBlockedScratch.setLen(c.owner.nodes.len)

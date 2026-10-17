@@ -20,6 +20,13 @@ type
     Vertical ## Up and Down move among group members.
     Both ## All four arrow keys move among group members.
 
+  Point* = object ## An offset in device independent pixels.
+    x*, y*: float32
+
+  DragAxis* {.pure.} = enum ## An axis along which a Draggable element moves.
+    Horizontal
+    Vertical
+
   TrackKind = enum
     trackFit, trackFixed, trackFr
 
@@ -63,6 +70,13 @@ type
     ease*: Easing ## Defaults to easeOut for timed animations.
     spring*: SpringOptions ## Spring settings when duration is zero.
     delay*: Duration ## Holds the current motion before changing target.
+
+  DraggableOptions* = object ## Pointer movement and release behavior.
+    axis*: set[DragAxis] ## Empty means both axes.
+    bounds*: Option[Rect] ## Offset bounds, if present.
+    rigid*: bool ## Stops at bounds instead of rubberbanding past them.
+    snap*: proc(point: Point): Point {.closure.} ## Chooses a release target.
+    animation*: Animation ## Motion to an app-set or released offset.
 
   Keyframe* = object ## A scalar value at a point in a keyed animation.
     at*: Duration ## Time from the start; the first frame must be at zero.

@@ -269,6 +269,8 @@ type
     pendingTextSubmitCallbacks: Table[uint64, seq[proc() {.closure.}]]
     textInputClients: Table[uint64, platform.TextInputClient]
     animations: Table[uint64, Table[string, ScalarAnimation]]
+    draggableStates: Table[uint64, DraggableState]
+    draggableGesture: DraggableGesture
     colorMotions: Table[uint64, Table[string, ColorMotion]]
     keyframes: Table[uint64, Table[string, ScalarSequence]]
     timelines: Table[uint64, Table[string, TimelineState]]
@@ -293,6 +295,7 @@ type
     visibleGeneration: uint32
     visibleClipScratch: seq[Rect]
     visibilityBlockedScratch: seq[bool]
+    draggableOffsetScratch: seq[Point]
     lastBounds: Table[uint64, Rect]
     trackedBounds: HashSet[uint64]
     focusIdentity: uint64
@@ -316,6 +319,17 @@ type
     inBuild, reduceMotion, animating: bool
     hasFrame: bool
     closed: bool
+
+  DraggableGesture = object
+    identity, serial: uint64
+    pressX, pressY, x, y: float32
+    velocityX, velocityY: float32
+    held, moved, released, canceled: bool
+
+  DraggableState = ref object
+    ownOffset, fromOffset: Point
+    gestureSerial: uint64
+    pressing, caught: bool
 
   UiLengthKind = enum
     lengthAuto, lengthPixels, lengthPercent
@@ -437,6 +451,8 @@ type
     textAlign: Align
     hovered, pressed, clicked, changed, submitted,
       valueChangedInBuild, trackPointer: bool
+    draggable, draggableDragging, draggableMoving: bool
+    dragOffset: Point
     label: string
     accessDescription: string
     accessValue: string
@@ -667,6 +683,7 @@ proc newContext*(): Context =
     initTable[uint64, platform.TextInputClient]()
   result.owner.animations =
     initTable[uint64, Table[string, ScalarAnimation]]()
+  result.owner.draggableStates = initTable[uint64, DraggableState]()
   result.owner.colorMotions =
     initTable[uint64, Table[string, ColorMotion]]()
   result.owner.keyframes =
@@ -1068,6 +1085,8 @@ proc retire(owner: ElementOwner) =
   owner.pendingTextSubmitCallbacks.clear()
   owner.textInputClients.clear()
   owner.animations.clear()
+  owner.draggableStates.clear()
+  owner.draggableGesture = DraggableGesture()
   owner.colorMotions.clear()
   owner.keyframes.clear()
   owner.timelines.clear()
@@ -1506,6 +1525,7 @@ proc build*(c: Context; view: proc(c: Context) {.closure.}) =
       initTable[uint64, platform.TextInputClient]()
     c.owner.animations =
       initTable[uint64, Table[string, ScalarAnimation]]()
+    c.owner.draggableStates = initTable[uint64, DraggableState]()
     c.owner.colorMotions =
       initTable[uint64, Table[string, ColorMotion]]()
     c.owner.keyframes =
@@ -1609,6 +1629,13 @@ proc build*(c: Context; view: proc(c: Context) {.closure.}) =
         staleAnimations.add(identity)
     for identity in staleAnimations:
       c.owner.animations.del(identity)
+    var staleDraggables: seq[uint64]
+    for identity in c.owner.draggableStates.keys:
+      if not c.owner.idSlots.hasKey(identity) and
+          not c.owner.retainedRouterIdentity(identity):
+        staleDraggables.add(identity)
+    for identity in staleDraggables:
+      c.owner.draggableStates.del(identity)
     var staleColorMotions: seq[uint64]
     for identity in c.owner.colorMotions.keys:
       if not c.owner.idSlots.hasKey(identity) and

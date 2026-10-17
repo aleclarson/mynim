@@ -93,10 +93,12 @@ proc drop*[T](e: Element; _: typedesc[T]): tuple[value: T, ok: bool] =
       return (current.value, true)
 
 proc dragging*(e: Element): bool =
-  ## Reports whether this element's value is being dragged.
+  ## Reports whether this value or element is being dragged by the pointer.
   let node = e.node
-  node != nil and e.owner.dragSourceIdentity == node.identity and
-    not e.owner.dragCanceled
+  node != nil and
+    ((node[].draggable and node[].draggableDragging) or
+     (e.owner.dragSourceIdentity == node[].identity and
+      not e.owner.dragCanceled))
 
 proc valueDropTargetAt(layout: LayoutResult; x, y: float32;
                        value: RootRef): int =

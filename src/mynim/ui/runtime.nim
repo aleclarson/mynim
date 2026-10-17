@@ -33,6 +33,12 @@ type
     pressX, pressY: float32
     dragCandidateIdentity: uint64
     nativeDragStarted: bool
+    pointerDraggableIdentity, pointerDraggableSerial: uint64
+    pointerDraggableLastX, pointerDraggableLastY: float32
+    pointerDraggableVelocityX, pointerDraggableVelocityY: float32
+    pointerDraggableLastAt: MonoTime
+    pointerDraggableMoved, pointerDraggableCaught,
+      pointerDraggableReleasePending, pointerDraggableCanceled: bool
     localDrag: LocalDragState
     splitPointerOffset: float64
     hasPointer: bool
@@ -1945,6 +1951,71 @@ proc paintLocalDrag(rt: Runtime; frame: var scene.Scene)
 proc showMenuButton(rt: Runtime; identity: uint64;
                     build: proc(menu: Menu) {.closure.})
 
+proc beginPointerDraggable(rt: Runtime) =
+  rt.pointerDraggableIdentity = 0
+  rt.pointerDraggableMoved = false
+  rt.pointerDraggableCaught = false
+  rt.pointerDraggableReleasePending = false
+  rt.pointerDraggableCanceled = false
+  let owner = rt.frameLayout.owner
+  if owner == nil or rt.pressTarget.owner != owner:
+    return
+  if rt.listReorder != nil or rt.gridReorder != nil or
+      rt.tableReorder != nil:
+    return
+  var slot = int(rt.pressTarget.slot)
+  if owner.textInputSlot(slot) >= 0 or
+      rt.frameLayout.sliderAncestor(slot) >= 0 or
+      owner.colorPlaneAncestor(slot) >= 0:
+    return
+  var child = slot
+  while child > 0 and child < owner.nodes.len:
+    if owner.nodes[child].splitHandle or
+        owner.nodes[child].tableResizeHandle:
+      return
+    child = int(owner.nodes[child].parent)
+  while slot > 0 and slot < owner.nodes.len:
+    let node = owner.nodes[slot]
+    if node.draggable and not owner.effectivelyDisabled(slot):
+      rt.pointerDraggableIdentity = node.identity
+      rt.pointerDraggableCaught = node.draggableMoving
+      if rt.pointerDraggableSerial == high(uint64):
+        rt.pointerDraggableSerial = 1
+      else:
+        inc rt.pointerDraggableSerial
+      rt.pointerDraggableLastX = rt.pointerX
+      rt.pointerDraggableLastY = rt.pointerY
+      rt.pointerDraggableVelocityX = 0
+      rt.pointerDraggableVelocityY = 0
+      rt.pointerDraggableLastAt = getMonoTime()
+      return
+    slot = int(node.parent)
+
+proc updatePointerDraggable(rt: Runtime) =
+  if rt.pointerDraggableIdentity == 0 or
+      rt.pointerDraggableReleasePending:
+    return
+  let now = getMonoTime()
+  let elapsed = float64((now - rt.pointerDraggableLastAt).inNanoseconds) /
+    1_000_000_000
+  let movedX = rt.pointerX != rt.pointerDraggableLastX
+  let movedY = rt.pointerY != rt.pointerDraggableLastY
+  if (movedX or movedY) and elapsed > 0 and elapsed <= 0.1:
+    rt.pointerDraggableVelocityX =
+      float32((rt.pointerX - rt.pointerDraggableLastX) / elapsed)
+    rt.pointerDraggableVelocityY =
+      float32((rt.pointerY - rt.pointerDraggableLastY) / elapsed)
+  elif elapsed > 0.1 or elapsed < 0:
+    rt.pointerDraggableVelocityX = 0
+    rt.pointerDraggableVelocityY = 0
+  rt.pointerDraggableLastX = rt.pointerX
+  rt.pointerDraggableLastY = rt.pointerY
+  rt.pointerDraggableLastAt = now
+  let dx = rt.pointerX - rt.pressX
+  let dy = rt.pointerY - rt.pressY
+  if dx * dx + dy * dy >= 16:
+    rt.pointerDraggableMoved = true
+
 proc renderFrame(rt: Runtime; presentFrame = true) =
   if rt.closed or rt.inFrame:
     return
@@ -2039,8 +2110,27 @@ proc renderFrame(rt: Runtime; presentFrame = true) =
     rt.context.owner.pointerX = rt.pointerX
     rt.context.owner.pointerY = rt.pointerY
     rt.context.owner.hasPointer = rt.hasPointer
+    rt.context.owner.draggableGesture = DraggableGesture(
+      identity: rt.pointerDraggableIdentity,
+      serial: rt.pointerDraggableSerial,
+      pressX: rt.pressX, pressY: rt.pressY,
+      x: rt.pointerX, y: rt.pointerY,
+      velocityX: rt.pointerDraggableVelocityX,
+      velocityY: rt.pointerDraggableVelocityY,
+      held: rt.pointerDraggableIdentity != 0 and
+        not rt.pointerDraggableReleasePending,
+      moved: rt.pointerDraggableMoved,
+      released: rt.pointerDraggableReleasePending,
+      canceled: rt.pointerDraggableCanceled)
   rt.context.build(rt.view)
   let currentOwner = rt.context.owner
+  currentOwner.draggableGesture = DraggableGesture()
+  if rt.pointerDraggableReleasePending:
+    rt.pointerDraggableIdentity = 0
+    rt.pointerDraggableMoved = false
+    rt.pointerDraggableCaught = false
+    rt.pointerDraggableReleasePending = false
+    rt.pointerDraggableCanceled = false
   rt.hoverSlots = remapSlots(previousIdentities, currentOwner, rt.hoverSlots)
   rt.pressedSlots = remapSlots(previousIdentities, currentOwner, rt.pressedSlots)
   rt.pressHoverSlots = remapSlots(previousIdentities, currentOwner,
@@ -2850,6 +2940,7 @@ proc event(rt: Runtime; ev: platform.SurfaceEvent): bool =
     rt.pointerX = float32(ev.x)
     rt.pointerY = float32(ev.y)
     rt.hasPointer = true
+    rt.updatePointerDraggable()
     rt.refreshPointer()
     if rt.localDrag != nil:
       rt.updateLocalDragTarget()
@@ -2888,6 +2979,9 @@ proc event(rt: Runtime; ev: platform.SurfaceEvent): bool =
         rt.requestFrame()
       return false
     if rt.startDragFromPress():
+      if rt.pointerDraggableIdentity != 0:
+        rt.pointerDraggableReleasePending = true
+        rt.pointerDraggableCanceled = true
       return true
     if rt.pressTarget.owner == rt.frameLayout.owner:
       let owner = rt.frameLayout.owner
@@ -2907,7 +3001,8 @@ proc event(rt: Runtime; ev: platform.SurfaceEvent): bool =
             owner.nodes[slot].trackPointer:
           tracksPointer = true
           break
-    if tracksPointer or rt.hoverSlots != previousHover or
+    if rt.pointerDraggableMoved or tracksPointer or
+        rt.hoverSlots != previousHover or
         rt.pressedSlots != previousPressed:
       rt.requestFrame()
     false
@@ -2941,6 +3036,11 @@ proc event(rt: Runtime; ev: platform.SurfaceEvent): bool =
     rt.pressY = rt.pointerY
     rt.dragCandidateIdentity = 0
     rt.nativeDragStarted = false
+    rt.pointerDraggableIdentity = 0
+    rt.pointerDraggableMoved = false
+    rt.pointerDraggableCaught = false
+    rt.pointerDraggableReleasePending = false
+    rt.pointerDraggableCanceled = false
     rt.splitPointerOffset = 0
     rt.hasPointer = true
     discard rt.dismissPopoverOutside(rt.pointerX, rt.pointerY)
@@ -2975,6 +3075,7 @@ proc event(rt: Runtime; ev: platform.SurfaceEvent): bool =
     rt.beginGridReorder(rt.pressTarget)
     if not rt.beginTableResize(rt.pressTarget):
       rt.beginTableReorder(rt.pressTarget)
+    rt.beginPointerDraggable()
     if rt.pressTarget.owner != nil:
       var slot = int(rt.pressTarget.slot)
       if rt.pressTarget.owner == rt.frameLayout.owner and
@@ -3075,6 +3176,7 @@ proc event(rt: Runtime; ev: platform.SurfaceEvent): bool =
     rt.pointerX = float32(ev.x)
     rt.pointerY = float32(ev.y)
     rt.hasPointer = true
+    rt.updatePointerDraggable()
     if rt.scrollbarDrag.state != nil:
       rt.scrollbarDrag.state.scrollbarDragging = false
       rt.scrollbarDrag = ScrollbarDrag()
@@ -3148,6 +3250,18 @@ proc event(rt: Runtime; ev: platform.SurfaceEvent): bool =
           rt.refreshPointer()
           rt.requestFrame()
           return true
+    if rt.pointerDraggableIdentity != 0:
+      rt.pointerDraggableReleasePending = true
+      let suppressClick = rt.pointerDraggableMoved or
+        rt.pointerDraggableCaught
+      rt.requestFrame()
+      if suppressClick:
+        rt.pressTarget = Element()
+        rt.pressMods = 0
+        rt.dragCandidateIdentity = 0
+        rt.pressHoverSlots.setLen(0)
+        rt.refreshPointer()
+        return true
     let sliderSlot = if rt.pressTarget.owner == rt.frameLayout.owner:
         rt.frameLayout.sliderAncestor(int(rt.pressTarget.slot))
       else:
@@ -3358,6 +3472,10 @@ proc event(rt: Runtime; ev: platform.SurfaceEvent): bool =
     let hadListReorder = rt.listReorder != nil
     let hadGridReorder = rt.gridReorder != nil
     let hadTableReorder = rt.tableReorder != nil
+    let hadPointerDraggable = rt.pointerDraggableIdentity != 0
+    if hadPointerDraggable:
+      rt.pointerDraggableReleasePending = true
+      rt.pointerDraggableCanceled = true
     if hadScrollbarDrag:
       rt.scrollbarDrag.state.scrollbarDragging = false
       rt.scrollbarDrag = ScrollbarDrag()
@@ -3381,7 +3499,7 @@ proc event(rt: Runtime; ev: platform.SurfaceEvent): bool =
     rt.updateTextInput()
     if rt.pressedSlots != previousPressed or previousFocusVisible or
         hadTextInput or hadScrollbarDrag or hadListReorder or
-        hadGridReorder or hadTableReorder:
+        hadGridReorder or hadTableReorder or hadPointerDraggable:
       rt.requestFrame()
     false
   of platform.pointerLeave:
