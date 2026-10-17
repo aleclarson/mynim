@@ -1,6 +1,5 @@
 ## Indexed, persistent UTF-8 text storage for large editable documents.
 
-import std/locks
 import mynim/internal/rope as textRope
 
 type

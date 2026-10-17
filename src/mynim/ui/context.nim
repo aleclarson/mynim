@@ -5,6 +5,7 @@ type
 
   ContextObj = object
     owner: ElementOwner
+    serviceState: UiServiceState
     routeRouter: Router
     theme: Theme
     reduceMotion: bool
@@ -27,6 +28,23 @@ type
     queueClick: proc(identity: uint64) {.closure.}
     hasPendingKey: bool
     themeEnabled, themeBackground: bool
+
+  Services* = object ## Persistent window services for controls and async work.
+    state: UiServiceState
+
+  UiServiceState = ref UiServiceStateObj
+
+  UiServiceStateObj = object
+    lock: Lock
+    clipboard: platform.Clipboard
+    invalidate: proc() {.closure.}
+    openURL: proc(url: string; done: proc(err: ref CatchableError)) {.closure.}
+    closed: bool
+
+  ServicesAccess = tuple[
+    clipboard: platform.Clipboard,
+    invalidate: proc() {.closure.},
+    openURL: proc(url: string; done: proc(err: ref CatchableError)) {.closure.}]
 
   Handle* = object ## Stable UI-thread element reference rebound each build.
     state: HandleState
@@ -697,6 +715,9 @@ proc bitmapSource(node: ElementNode): Rect =
     return
   Rect(x: left, y: top, w: right - left, h: bottom - top)
 
+proc `=destroy`(state: var UiServiceStateObj) =
+  deinitLock(state.lock)
+
 var nextHandleIdentity = 0'u64
 
 proc newContext*(): Context =
@@ -757,6 +778,70 @@ proc newContext*(): Context =
   result.owner.retainedRouteIdentities = initHashSet[uint64]()
   result.accordionHeaders = initTable[uint64, seq[uint64]]()
   result.theme = lightTheme()
+
+proc services*(c: Context): Services =
+  ## Returns persistent services for this window. The result becomes inert
+  ## when its content closes.
+  if c != nil:
+    result.state = c.serviceState
+
+proc serviceAccess(s: Services): ServicesAccess =
+  let state = s.state
+  if state == nil:
+    return
+  acquire(state.lock)
+  try:
+    if not state.closed:
+      result = (state.clipboard, state.invalidate, state.openURL)
+  finally:
+    release(state.lock)
+
+proc invalidate*(s: Services) =
+  ## Requests a frame; this method is safe to call from any thread.
+  let access = s.serviceAccess()
+  if access.invalidate != nil:
+    access.invalidate()
+
+proc readClipboard*(s: Services): string =
+  ## Reads plain text from the system clipboard on the UI thread.
+  let access = s.serviceAccess()
+  if access.clipboard != nil:
+    result = access.clipboard.readText()
+
+proc writeClipboard*(s: Services; text: string) =
+  ## Writes plain text to the system clipboard on the UI thread.
+  let access = s.serviceAccess()
+  if access.clipboard != nil:
+    access.clipboard.writeText(text)
+
+proc readClipboardData*(s: Services;
+                        formats: varargs[transfer.Format]): transfer.Data =
+  ## Reads clipboard representations; no formats means read all of them.
+  let access = s.serviceAccess()
+  if access.clipboard == nil:
+    return
+  let read = access.clipboard.readData(@formats)
+  if read.err == nil or read.d.items().len > 0:
+    result = read.d
+
+proc clipboardFormats*(s: Services): seq[transfer.Format] =
+  ## Lists clipboard representations without reading their data.
+  let access = s.serviceAccess()
+  if access.clipboard != nil:
+    result = access.clipboard.formats()
+
+proc writeClipboardData*(s: Services; data: transfer.Data) =
+  ## Writes multiple clipboard representations on the UI thread.
+  let access = s.serviceAccess()
+  if access.clipboard != nil:
+    access.clipboard.writeData(data, nil)
+
+proc openUrl*(s: Services; url: string) =
+  ## Opens a URL through the system browser on the UI thread. Use safeToOpen
+  ## for untrusted destinations.
+  let access = s.serviceAccess()
+  if access.openURL != nil:
+    access.openURL(url, nil)
 
 proc after(c: Context; d: Duration) =
   ## Requests another frame after d, for something delayed by time.
@@ -2159,6 +2244,17 @@ proc close*(c: Context) =
   ## Detaches saved handles and releases frame storage when the context closes.
   if c == nil or c.owner.closed:
     return
+  if c.serviceState != nil:
+    let state = c.serviceState
+    acquire(state.lock)
+    try:
+      state.closed = true
+      state.clipboard = nil
+      state.invalidate = nil
+      state.openURL = nil
+    finally:
+      release(state.lock)
+    c.serviceState = nil
   c.owner.actions.setLen(0)
   for router in c.owner.routers:
     if router != nil:

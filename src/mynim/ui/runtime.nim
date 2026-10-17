@@ -3883,6 +3883,17 @@ method attachContent*(content: Content; conn: surface.Conn) =
                    modalFocusReturns: initTable[uint64, uint64]())
   rt.context.owner.focusActive = true
   let frameSurface = conn.surface
+  var invalidate = conn.invalidate
+  if invalidate == nil:
+    invalidate = proc() =
+      if frameSurface != nil:
+        frameSurface.requestFrame()
+  let serviceState = UiServiceState(
+    clipboard: conn.clipboard,
+    invalidate: invalidate,
+    openURL: conn.openURL)
+  initLock(serviceState.lock)
+  rt.context.serviceState = serviceState
   rt.context.owner.invalidate = proc() =
     if frameSurface != nil:
       frameSurface.requestFrame()
