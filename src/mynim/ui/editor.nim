@@ -779,6 +779,60 @@ proc selectedLineSpan(snapshot: Snapshot; selection: Selection):
     dec result.last
   result.last = max(result.first, result.last)
 
+proc lineStart(snapshot: Snapshot; line: int): int =
+  snapshot.offset(Pos(line: line, column: 0))
+
+proc lineEnd(snapshot: Snapshot; line: int): int =
+  snapshot.offset(Pos(line: line, column: snapshot.line(line).len))
+
+proc moveSelectedLines(state: State; down: bool) =
+  state.ensureState()
+  if state.readOnly:
+    return
+  let snapshot = state.buffer.snapshot()
+  let selection = state.caretSelection
+  let span = snapshot.selectedLineSpan(selection)
+  if (not down and span.first == 0) or
+      (down and span.last + 1 >= snapshot.lineCount()):
+    return
+
+  let firstStart = snapshot.lineStart(span.first)
+  let lastEnd = snapshot.lineEnd(span.last)
+  let lineBlock = snapshot.slice(firstStart, lastEnd)
+  var edit: Edit
+  var shift: int
+  if down:
+    let nextLine = snapshot.line(span.last + 1)
+    edit = Edit(start: firstStart,
+      pastLast: snapshot.lineEnd(span.last + 1),
+      text: nextLine & "\n" & lineBlock)
+    shift = nextLine.len + 1
+  else:
+    let previousLine = snapshot.line(span.first - 1)
+    edit = Edit(start: snapshot.lineStart(span.first - 1),
+      pastLast: lastEnd, text: lineBlock & "\n" & previousLine)
+    shift = -(previousLine.len + 1)
+  let afterSelection = Selection(anchor: selection.anchor + shift,
+    head: selection.head + shift)
+  state.applyEditorEdits(snapshot, selection, afterSelection, @[edit])
+
+proc duplicateSelectedLines(state: State; keepOriginal: bool) =
+  state.ensureState()
+  if state.readOnly:
+    return
+  let snapshot = state.buffer.snapshot()
+  let selection = state.caretSelection
+  let span = snapshot.selectedLineSpan(selection)
+  let firstStart = snapshot.lineStart(span.first)
+  let lastEnd = snapshot.lineEnd(span.last)
+  let lineBlock = snapshot.slice(firstStart, lastEnd)
+  let inserted = "\n" & lineBlock
+  let edit = Edit(start: lastEnd, pastLast: lastEnd, text: inserted)
+  let shift = if keepOriginal: 0 else: inserted.len
+  let afterSelection = Selection(anchor: selection.anchor + shift,
+    head: selection.head + shift)
+  state.applyEditorEdits(snapshot, selection, afterSelection, @[edit])
+
 proc indentSelection(state: State; outdent: bool) =
   state.ensureState()
   if state.readOnly:
@@ -1054,6 +1108,13 @@ proc view*(c: ui.Context; state: State): ui.Element =
     if key.key == platform.keySlash and key.mods == commentModifier:
       state.toggleComment()
       return true
+    if key.key in {platform.keyUp, platform.keyDown}:
+      if key.mods == platform.modAlt:
+        state.moveSelectedLines(key.key == platform.keyDown)
+        return true
+      if key.mods == (platform.modAlt or platform.modShift):
+        state.duplicateSelectedLines(key.key == platform.keyUp)
+        return true
     if key.key == platform.keyTab:
       if (key.mods and not platform.modShift) != 0:
         return false

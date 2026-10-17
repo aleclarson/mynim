@@ -131,6 +131,18 @@ proc commentKey(text: string; language: editor.Language; anchor, head: int):
   doAssert native.frame()
   $editorState.buffer
 
+proc lineKey(text: string; anchor, head: int; key: platform.Key;
+             mods: platform.Modifiers): string =
+  editorState.readOnly = false
+  editorState.buffer.set(text)
+  editorState.select(anchor, head)
+  discard native.send(platform.SurfaceEvent(kind: platform.surfaceResize))
+  doAssert native.frame()
+  doAssert native.send(platform.SurfaceEvent(kind: platform.keyPressed,
+    key: key, mods: mods))
+  doAssert native.frame()
+  $editorState.buffer
+
 let go = editor.languageNamed("go")
 let emptyPair = "func main() {}"
 doAssert enter(emptyPair, go, emptyPair.len - 1) == "func main() {\n\t\n}"
@@ -200,6 +212,43 @@ doAssert editorState.selectedText() == blockCommented
 doAssert commentKey(blockCommented, editor.languageNamed("css"), 0,
   blockCommented.len) == css
 doAssert editorState.selectedText() == css
+
+let lines = "one\ntwo\nthree"
+doAssert lineKey(lines, 5, 5, platform.keyUp, platform.modAlt) ==
+  "two\none\nthree"
+doAssert editorState.cursor() == 1
+doAssert editorState.undo()
+doAssert $editorState.buffer == lines
+doAssert editorState.cursor() == 5
+doAssert editorState.redo()
+doAssert $editorState.buffer == "two\none\nthree"
+doAssert lineKey(lines, 5, 5, platform.keyDown, platform.modAlt) ==
+  "one\nthree\ntwo"
+doAssert editorState.cursor() == 11
+doAssert lineKey(lines, 4, 7, platform.keyUp, platform.modAlt) ==
+  "two\none\nthree"
+doAssert editorState.selection() == editor.Selection(anchor: 0, head: 3)
+doAssert lineKey(lines, 5, 5, platform.keyDown,
+  platform.modAlt or platform.modShift) == "one\ntwo\ntwo\nthree"
+doAssert editorState.cursor() == 9
+doAssert editorState.undo()
+doAssert $editorState.buffer == lines
+doAssert editorState.cursor() == 5
+doAssert editorState.redo()
+doAssert $editorState.buffer == "one\ntwo\ntwo\nthree"
+doAssert editorState.cursor() == 9
+doAssert lineKey(lines, 4, 7, platform.keyDown,
+  platform.modAlt or platform.modShift) == "one\ntwo\ntwo\nthree"
+doAssert editorState.selection() == editor.Selection(anchor: 8, head: 11)
+doAssert lineKey(lines, 5, 5, platform.keyUp,
+  platform.modAlt or platform.modShift) == "one\ntwo\ntwo\nthree"
+doAssert editorState.cursor() == 5
+doAssert lineKey(lines, 1, 1, platform.keyUp, platform.modAlt) == lines
+doAssert lineKey(lines, 11, 11, platform.keyDown, platform.modAlt) == lines
+let unicodeLines = "😀x\néy\nz"
+doAssert lineKey(unicodeLines, "😀x\né".len, "😀x\né".len,
+  platform.keyUp, platform.modAlt) == "éy\n😀x\nz"
+doAssert editorState.cursor() == "é".len
 
 win.destroy()
 loop.shutdown()
