@@ -867,7 +867,7 @@ proc openUrlThen*(c: Context; url: string;
       if owner != nil and not owner.closed and owner.invalidate != nil:
         owner.invalidate())
 
-proc after(c: Context; d: Duration) =
+proc after*(c: Context; d: Duration) =
   ## Requests another frame after d, for something delayed by time.
   if c == nil or c.owner == nil or c.owner.closed:
     return
