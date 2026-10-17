@@ -52,5 +52,23 @@ proc testNoDefaultOutputWithoutFrontend() =
   doAssert not fileExists(project / "mygo.ts")
   doAssert not fileExists(project / "src" / "mygo.ts")
 
+proc testGenerateWebTemplateClient() =
+  let temporary = createTempDir("mynim-generate-web-", "")
+  defer:
+    if dirExists(temporary):
+      removeDir(temporary)
+
+  let project = temporary / "web-app"
+  doAssert runInit(@[
+    "--template", "web", "--mygo", getCurrentDir(), project]) == 0
+  doAssert runGenerate(@[project]) == 0
+  let client = project / "src" / "mygo.ts"
+  doAssert fileExists(client)
+  let source = readFile(client)
+  doAssert "export const Greeter" in source
+  doAssert "greet(name: string): Promise<string>" in source
+  doAssert "return call(\"Greeter.Greet\", name);" in source
+
 testGenerateClient()
 testNoDefaultOutputWithoutFrontend()
+testGenerateWebTemplateClient()

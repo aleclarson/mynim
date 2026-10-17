@@ -20,7 +20,7 @@ Usage:
 
 Commands:
 
-  init            create a native UI project
+  init            create a native UI or web frontend project
   install-skills  install the MyNim maintenance skill
   dev             build and run a native app with live reload
   build           compile a native project for this machine

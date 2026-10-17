@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>{{APP_NAME}}</title>
+    <link rel="stylesheet" href="./src/style.css" />
+  </head>
+  <body>
+    <main>
+      <h1>{{APP_NAME}}</h1>
+      <p class="muted">Nim ↔ TypeScript, with typed calls.</p>
+      <form id="greet">
+        <input id="name" placeholder="Your name" autocomplete="off" autofocus />
+        <button type="submit">Greet</button>
+      </form>
+      <p id="greeting" class="card"></p>
+    </main>
+    <script type="module" src="./src/main.ts"></script>
+  </body>
+</html>

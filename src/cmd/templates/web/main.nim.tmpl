@@ -1,0 +1,35 @@
+import std/json
+import mynim
+
+const appTitle = {{APP_NAME}}
+
+proc greet*(c: CallContext; args: seq[JsonNode]):
+    tuple[v: JsonNode, err: ref CatchableError] =
+  discard c
+  if args.len != 1 or args[0].kind != JString:
+    result.v = newJNull()
+    result.err = newException(ValueError, "name must be a string")
+    return
+  let name = args[0].getStr()
+  result.v = newJString("Hello, " &
+    (if name.len == 0: "stranger" else: name) &
+    "! This response comes from Nim.")
+
+when isMainModule:
+  app.setName(appTitle)
+  let handler: BoundMethod = greet
+  `bind`("Greeter", [("Greet", handler)])
+  bindTypeScript("Greeter", "Greet", [
+    TypeScriptParam(name: "name", tsType: "string")], "string")
+  app.whenReady(proc() =
+    discard newWindow(WindowOptions(
+      title: appTitle,
+      width: 960,
+      height: 640,
+      minWidth: 480,
+      minHeight: 360,
+      backgroundColor: "light-dark(#f6f7f9, #0f1115)",
+      stateKey: "main",
+      url: "/"))
+  )
+  app.run()

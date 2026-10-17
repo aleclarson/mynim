@@ -1,0 +1,17 @@
+import std/[assertions, json]
+import ../src/main as starter
+
+block greet_returns_the_name_from_the_page:
+  let (value, err) = starter.greet(nil, @[newJString("Ada")])
+  doAssert err == nil
+  doAssert value.getStr() == "Hello, Ada! This response comes from Nim."
+
+block greet_uses_a_default_name:
+  let (value, err) = starter.greet(nil, @[newJString("")])
+  doAssert err == nil
+  doAssert value.getStr() == "Hello, stranger! This response comes from Nim."
+
+block greet_rejects_a_non_string:
+  let (value, err) = starter.greet(nil, @[newJInt(4)])
+  doAssert value.kind == JNull
+  doAssert err != nil

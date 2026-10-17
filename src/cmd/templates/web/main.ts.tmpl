@@ -1,0 +1,11 @@
+import { Greeter } from "./mygo";
+
+const $ = <T extends HTMLElement>(selector: string) =>
+  document.querySelector<T>(selector)!;
+
+$("#greet").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  $("#greeting").textContent = await Greeter.greet(
+    $<HTMLInputElement>("#name").value,
+  );
+});

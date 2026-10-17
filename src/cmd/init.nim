@@ -1,4 +1,4 @@
-## Create a native UI application project.
+## Create a MyNim application project.
 
 import std/[json, math, os, strutils]
 import mynim/image as imagePackage
@@ -8,18 +8,26 @@ const
   version = "0.1.0"
   usageInit = """Usage: mygo init [flags] <dir>
 
-Create a new MyNim project with a native, GPU-rendered UI.
+Create a new MyNim project with a native, GPU-rendered UI by default.
 
 Flags:
   -name string       application name (defaults to the directory name)
   -package string    Nimble package name (defaults to a slug of the directory)
   -module string     alias for -package
-  -template string   native (the default); web is not ported yet
+  -template string   native (the default) or web
   -mygo path         local MyNim checkout to use instead of a package dependency
   -h, --help         show this help
 """
   nativeMainTemplate = staticRead("templates/native/main.nim.tmpl")
   nativeTestTemplate = staticRead("templates/native/test_app.nim.tmpl")
+  webMainTemplate = staticRead("templates/web/main.nim.tmpl")
+  webTestTemplate = staticRead("templates/web/test_app.nim.tmpl")
+  webIndexTemplate = staticRead("templates/web/index.html.tmpl")
+  webClientTemplate = staticRead("templates/web/main.ts.tmpl")
+  webStyleTemplate = staticRead("templates/web/style.css.tmpl")
+  webTsconfigTemplate = staticRead("templates/web/tsconfig.json.tmpl")
+  webViteTemplate = staticRead("templates/web/vite.config.ts.tmpl")
+  webRuntimeVersion = "^0.5.1"
   iconSize = 1024
 
 proc slugify(value: string): string =
@@ -118,11 +126,14 @@ proc localSourcePath(path: string): string =
     raise newException(ValueError,
       "mygo init: " & result & " is not a MyNim checkout")
 
-proc nimbleFile(local: bool): string =
+proc nimbleFile(local: bool; web = false): string =
   result = """version       = "0.1.0"
 author        = "MyNim app"
-description   = "Native UI application built with MyNim"
-license       = "MIT"
+"""
+  result.add "description   = " &
+    (if web: "\"Web frontend application built with MyNim\"\n"
+    else: "\"Native UI application built with MyNim\"\n")
+  result.add """license       = "MIT"
 srcDir        = "src"
 bin           = @["main"]
 
@@ -135,24 +146,69 @@ requires "nim >= 2.2.0"
 task run, "Run the application":
   exec "nim c -r src/main.nim"
 
-task test, "Run the headless UI test":
+task test, "Run the starter application test":
   exec "nim c -r tests/test_app.nim"
 """
 
-proc writeProject(dir, appName, packageName, local: string) =
+proc htmlEscape(value: string): string =
+  for ch in value:
+    case ch
+    of '&': result.add "&amp;"
+    of '<': result.add "&lt;"
+    of '>': result.add "&gt;"
+    of '"': result.add "&quot;"
+    of '\'': result.add "&#39;"
+    else: result.add ch
+
+proc writeWebFiles(dir, appName: string) =
+  writeText(dir / "index.html",
+    webIndexTemplate.replace("{{APP_NAME}}", htmlEscape(appName)))
+  writeText(dir / "src" / "main.ts", webClientTemplate)
+  writeText(dir / "src" / "style.css", webStyleTemplate)
+  writeText(dir / "tsconfig.json", webTsconfigTemplate)
+  writeText(dir / "vite.config.ts", webViteTemplate)
+
+  var scripts = newJObject()
+  scripts["dev"] = %"mygo dev"
+  scripts["build"] = %"mygo build"
+  scripts["generate"] = %"mygo generate"
+  scripts["dev:web"] = %"vite"
+  scripts["build:web"] = %"tsc --noEmit && vite build"
+  scripts["typecheck"] = %"tsc --noEmit"
+  var dependencies = newJObject()
+  dependencies["mygo-runtime"] = %webRuntimeVersion
+  var devDependencies = newJObject()
+  devDependencies["typescript"] = %"^7"
+  devDependencies["vite"] = %"^8"
+  var packageJson = newJObject()
+  packageJson["name"] = %slugify(appName)
+  packageJson["private"] = %true
+  packageJson["type"] = %"module"
+  packageJson["scripts"] = scripts
+  packageJson["dependencies"] = dependencies
+  packageJson["devDependencies"] = devDependencies
+  writeText(dir / "package.json", packageJson.pretty & "\n")
+
+proc writeProject(dir, appName, packageName, local: string;
+    projectTemplate: string) =
   createDir(dir)
   createDir(dir / "src")
   createDir(dir / "tests")
   createDir(dir / "resources")
 
   let appNameLiteral = appName.escape()
-  let main = nativeMainTemplate.replace("{{APP_NAME}}", appNameLiteral)
-  let test = nativeTestTemplate
+  let web = projectTemplate == "web"
+  let main = (if web: webMainTemplate else: nativeMainTemplate)
+    .replace("{{APP_NAME}}", appNameLiteral)
+  let test = if web: webTestTemplate else: nativeTestTemplate
   writeText(dir / "src" / "main.nim", main)
   writeText(dir / "tests" / "test_app.nim", test)
-  writeText(dir / (packageName & ".nimble"), nimbleFile(local.len > 0))
-  writeText(dir / ".gitignore",
-    "/build/\n/dist/\n/.mygo/\n/main\n/main.exe\n")
+  writeText(dir / (packageName & ".nimble"),
+    nimbleFile(local.len > 0, web))
+  var gitignore = "/build/\n/dist/\n/.mygo/\n/main\n/main.exe\n"
+  if web:
+    gitignore.add "/node_modules/\n"
+  writeText(dir / ".gitignore", gitignore)
 
   var config = newJObject()
   config["name"] = %appName
@@ -160,6 +216,12 @@ proc writeProject(dir, appName, packageName, local: string) =
     slugify(appName).replace("-", ""))
   config["version"] = %version
   config["out"] = %"build"
+  if web:
+    config["devUrl"] = %"http://localhost:5173"
+    config["devCommand"] = %"npm run dev:web"
+    config["buildCommand"] = %"npm run build:web"
+    config["frontendDist"] = %"dist"
+    config["bindings"] = %"src/mygo.ts"
   writeText(dir / "mygo.json", config.pretty & "\n")
 
   if local.len > 0:
@@ -167,6 +229,8 @@ proc writeProject(dir, appName, packageName, local: string) =
       "switch(\"path\", " & (local / "src").escape() & ")\n")
   writeBytes(dir / "resources" / "icon.png", defaultIcon())
   installBundledSkills(dir)
+  if web:
+    writeWebFiles(dir, appName)
 
 proc runInit*(args: seq[string]): int =
   var appName, packageOption, localOption = ""
@@ -210,8 +274,9 @@ proc runInit*(args: seq[string]): int =
       paths.add arg
     inc index
 
-  if projectTemplate != "native":
-    stderr.writeLine("mygo init: only the native template is ported so far")
+  if projectTemplate notin ["native", "web"]:
+    stderr.writeLine("mygo init: unknown template " & projectTemplate &
+      "; want native or web")
     return 1
   if paths.len != 1:
     stderr.writeLine("mygo init: expected one project directory")
@@ -225,14 +290,19 @@ proc runInit*(args: seq[string]): int =
       splitPath(packageOption).tail else: directoryName
     let packageName = slugify(packageBase).replace("-", "_")
     let local = localSourcePath(localOption)
-    writeProject(dir, name, packageName, local)
+    writeProject(dir, name, packageName, local, projectTemplate)
     let shownPath = displayPath(dir)
     stdout.writeLine("Created " & name & " at " & shownPath & ".")
     stdout.writeLine("Next steps:")
     stdout.writeLine("  cd " & shownPath)
-    stdout.writeLine("  nimble test")
-    stdout.writeLine("  nimble build")
-    stdout.writeLine("  ./main")
+    if projectTemplate == "web":
+      stdout.writeLine("  npm install")
+      stdout.writeLine("  npm run dev")
+      stdout.writeLine("  npm run build")
+    else:
+      stdout.writeLine("  nimble test")
+      stdout.writeLine("  nimble build")
+      stdout.writeLine("  ./main")
     return 0
   except CatchableError as error:
     stderr.writeLine(error.msg)
