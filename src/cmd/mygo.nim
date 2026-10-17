@@ -8,6 +8,7 @@ import ./generate
 import ./init
 import ./i18n_check
 import ./skills
+import ./vet
 
 const
   version = "0.1.0"
@@ -24,6 +25,7 @@ Commands:
   dev             build and run a native app with live reload
   build           compile a native project for this machine
   generate        write the typed TypeScript client
+  vet             typecheck a native Nim project
   i18n            check message catalogs
   doctor          check that the development environment is ready
   version         print the MyGo version
@@ -70,7 +72,11 @@ proc run(args: seq[string]): int =
     if args.len > 1:
       return runI18n(args[1 .. ^1])
     return runI18n(@[])
-  of "vet", "migrate-ui", "keygen":
+  of "vet":
+    if args.len > 1:
+      return runVet(args[1 .. ^1])
+    return runVet(@[])
+  of "migrate-ui", "keygen":
     stderr.writeLine("mygo: command \"" & args[0] & "\" is not ported yet")
     return 1
   else:
