@@ -2,6 +2,7 @@
 
 import std/[algorithm, locks, monotimes, strutils, times, unicode]
 import mynim/internal/platform as platform
+import mynim/internal/text as textStack
 import mynim/ui as ui
 import mynim/ui/editor/commands as editorCommands
 import mynim/ui/editor/syntax as syntax
@@ -83,7 +84,7 @@ proc commandNamed*(name: string): tuple[command: Command, found: bool] =
   editorCommands.commandNamed(name)
 
 proc defaultBindings*(): seq[Binding] =
-  ## Returns platform shortcuts for the commands implemented by the editor.
+  ## Returns the currently ported subset of platform editor shortcuts.
   editorCommands.defaultBindings()
 
 const
@@ -1242,6 +1243,73 @@ proc insertNewline(state: State) =
   state.selectionPending = true
   state.buffer.setSelectionAfter(state, state.caretSelection)
 
+proc graphemeMove(snapshot: Snapshot; runeOffset: int; direction: int): int =
+  let document = snapshot.document
+  let current = max(0, min(runeOffset, document.len()))
+  let line = document.lineAt(current)
+  let range = document.lineRange(line)
+  if direction < 0:
+    if current > range.start:
+      var runes: seq[Rune]
+      for rune in document.line(line).runes:
+        runes.add(rune)
+      var boundaries: textStack.Boundaries
+      boundaries.reset(runes)
+      return range.start + boundaries.prevGrapheme(current - range.start)
+    if current > 0:
+      return current - 1
+  elif direction > 0:
+    if current < range.`end`:
+      var runes: seq[Rune]
+      for rune in document.line(line).runes:
+        runes.add(rune)
+      var boundaries: textStack.Boundaries
+      boundaries.reset(runes)
+      return range.start + boundaries.nextGrapheme(current - range.start)
+    if current < document.len():
+      return current + 1
+  current
+
+proc moveCaret(state: State; command: Command): bool =
+  let snapshot = state.buffer.snapshot()
+  let selection = state.caretSelection
+  let selecting = command in {
+    Command.selectLeft, Command.selectRight, Command.selectLineStart,
+    Command.selectLineEnd, Command.selectDocStart, Command.selectDocEnd}
+  let movingLeft = command in {
+    Command.moveLeft, Command.selectLeft, Command.moveLineStart,
+    Command.selectLineStart, Command.moveDocStart, Command.selectDocStart}
+  var targetByte = selection.head
+  if not selecting and not selection.empty() and
+      command in {Command.moveLeft, Command.moveRight}:
+    targetByte = if movingLeft: selection.start() else: selection.pastLast()
+  else:
+    let currentRune = snapshot.document.runeOffsetAtByte(selection.head)
+    var targetRune = currentRune
+    case command
+    of Command.moveLeft, Command.selectLeft:
+      targetRune = snapshot.graphemeMove(currentRune, -1)
+    of Command.moveRight, Command.selectRight:
+      targetRune = snapshot.graphemeMove(currentRune, 1)
+    of Command.moveLineStart, Command.selectLineStart:
+      targetRune = snapshot.document.lineRange(
+        snapshot.document.lineAt(currentRune)).start
+    of Command.moveLineEnd, Command.selectLineEnd:
+      targetRune = snapshot.document.lineRange(
+        snapshot.document.lineAt(currentRune)).`end`
+    of Command.moveDocStart, Command.selectDocStart:
+      targetRune = 0
+    of Command.moveDocEnd, Command.selectDocEnd:
+      targetRune = snapshot.document.len()
+    else:
+      return false
+    targetByte = snapshot.document.byteOffset(targetRune)
+  let anchor = if selecting: selection.anchor else: targetByte
+  if anchor == selection.anchor and targetByte == selection.head:
+    return false
+  state.select(anchor, targetByte)
+  true
+
 proc run*(state: State; command: Command): bool =
   ## Runs a supported editor command; unsupported commands return false.
   state.ensureState()
@@ -1261,6 +1329,11 @@ proc run*(state: State; command: Command): bool =
     return state.undo()
   of Command.redo:
     return state.redo()
+  of Command.moveLeft, Command.moveRight, Command.moveLineStart,
+      Command.moveLineEnd, Command.moveDocStart, Command.moveDocEnd,
+      Command.selectLeft, Command.selectRight, Command.selectLineStart,
+      Command.selectLineEnd, Command.selectDocStart, Command.selectDocEnd:
+    return state.moveCaret(command)
   else:
     discard
 

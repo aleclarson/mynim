@@ -58,7 +58,7 @@ proc commandNamed*(name: string): tuple[command: Command, found: bool] =
   (noCommand, false)
 
 proc defaultBindings*(): seq[Binding] =
-  ## Returns the currently implemented editor shortcuts for this platform.
+  ## Returns the currently ported subset of this platform's editor shortcuts.
   let commandMod = when defined(macosx): ui.modSuper else: ui.modCtrl
   result = @[
     Binding(mods: 0, key: ui.keyEnter, command: Command.newline),

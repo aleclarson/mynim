@@ -372,7 +372,30 @@ doAssert native.frame()
 doAssert editorState.selectedText() == "one\ntwo",
   "the platform select-all binding should select the document"
 
+let graphemeText = "A👩‍💻e\u0301Z"
+editorState.buffer.set(graphemeText)
+editorState.select(graphemeText.len, graphemeText.len)
+doAssert editorState.run(editor.Command.moveLeft)
+doAssert editorState.cursor() == "A👩‍💻e\u0301".len
+doAssert editorState.run(editor.Command.moveLeft)
+doAssert editorState.cursor() == "A👩‍💻".len,
+  "horizontal movement should keep emoji and combining sequences intact"
+editorState.select(1, 1)
+doAssert editorState.run(editor.Command.selectRight)
+doAssert editorState.selectedText() == "👩‍💻"
+editorState.buffer.set("first\nsecond")
+editorState.select("first\nsec".len, "first\nsec".len)
+doAssert editorState.run(editor.Command.moveLineStart)
+doAssert editorState.cursor() == "first\n".len
+doAssert editorState.run(editor.Command.selectLineEnd)
+doAssert editorState.selectedText() == "second"
+doAssert editorState.run(editor.Command.moveDocStart)
+doAssert editorState.cursor() == 0
+doAssert editorState.run(editor.Command.selectDocEnd)
+doAssert editorState.selectedText() == "first\nsecond"
+
 editorState.readOnly = true
+editorState.buffer.set("one\ntwo")
 editorState.select(0, 0)
 doAssert not editorState.run(editor.Command.deleteLine)
 doAssert $editorState.buffer == "one\ntwo"
