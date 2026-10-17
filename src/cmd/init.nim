@@ -151,7 +151,8 @@ proc writeProject(dir, appName, packageName, local: string) =
   writeText(dir / "src" / "main.nim", main)
   writeText(dir / "tests" / "test_app.nim", test)
   writeText(dir / (packageName & ".nimble"), nimbleFile(local.len > 0))
-  writeText(dir / ".gitignore", "/build/\n/dist/\n/main\n/main.exe\n")
+  writeText(dir / ".gitignore",
+    "/build/\n/dist/\n/.mygo/\n/main\n/main.exe\n")
 
   var config = newJObject()
   config["name"] = %appName

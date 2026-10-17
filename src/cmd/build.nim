@@ -14,14 +14,14 @@ Flags:
   -h, --help       show this help
 """
 
-proc configString(config: JsonNode; key, fallback: string): string =
+proc configString*(config: JsonNode; key, fallback: string): string =
   if not config.hasKey(key):
     return fallback
   if config[key].kind != JString:
     raise newException(ValueError, "mygo.json: " & key & " must be a string")
   config[key].getStr()
 
-proc slug(value: string): string =
+proc slug*(value: string): string =
   var separator = false
   for ch in value.toLowerAscii:
     if ch in {'a'..'z', '0'..'9'}:
@@ -34,7 +34,7 @@ proc slug(value: string): string =
   if result.len == 0:
     result = "app"
 
-proc hostTarget(): tuple[os, arch, path: string] =
+proc hostTarget*(): tuple[os, arch, path: string] =
   let targetOs = when hostOS == "macosx": "darwin" else: hostOS
   let targetArch = hostCPU
   (targetOs, targetArch, targetOs & "/" & targetArch)
@@ -69,7 +69,7 @@ proc xmlEscape(value: string): string =
     of '\'': result.add "&apos;"
     else: result.add ch
 
-proc writeInfoPlist(path, name, identifier, version, executable: string) =
+proc writeInfoPlist*(path, name, identifier, version, executable: string) =
   var content = """<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
   "http://www.apple.com/DTDs/PropertyList-1.0.dtd">

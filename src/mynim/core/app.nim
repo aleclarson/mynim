@@ -31,14 +31,18 @@ proc name*(a: Application): string =
   let name = a.name
   a.mu.release()
   if name != "":
-    return name
+    return if devLaunched and not name.endsWith(" Dev"):
+      name & " Dev" else: name
   let (info, ok) = packageInfo()
   if ok and info.name != "":
-    return info.name
+    return if devLaunched and not info.name.endsWith(" Dev"):
+      info.name & " Dev" else: info.name
   let exe = getAppFilename().extractFilename()
   if exe == "":
     return "MyNim"
-  exe.changeFileExt("").extractFilename()
+  result = exe.changeFileExt("").extractFilename()
+  if devLaunched and not result.endsWith(" Dev"):
+    result.add " Dev"
 
 proc setName*(a: Application; name: string) =
   ## Overrides the application name. Call it before run.

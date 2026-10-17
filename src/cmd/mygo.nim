@@ -2,6 +2,7 @@
 
 import std/os
 import ./build
+import ./dev
 import ./doctor
 import ./generate
 import ./init
@@ -20,6 +21,7 @@ Commands:
 
   init            create a native UI project
   install-skills  install the MyNim maintenance skill
+  dev             build and run a native app with live reload
   build           compile a native project for this machine
   generate        write the typed TypeScript client
   i18n            check message catalogs
@@ -56,6 +58,10 @@ proc run(args: seq[string]): int =
     if args.len > 1:
       return runBuild(args[1 .. ^1])
     return runBuild(@[])
+  of "dev":
+    if args.len > 1:
+      return runDev(args[1 .. ^1])
+    return runDev(@[])
   of "generate", "gen":
     if args.len > 1:
       return runGenerate(args[1 .. ^1])
@@ -64,7 +70,7 @@ proc run(args: seq[string]): int =
     if args.len > 1:
       return runI18n(args[1 .. ^1])
     return runI18n(@[])
-  of "vet", "migrate-ui", "dev", "keygen":
+  of "vet", "migrate-ui", "keygen":
     stderr.writeLine("mygo: command \"" & args[0] & "\" is not ported yet")
     return 1
   else:
