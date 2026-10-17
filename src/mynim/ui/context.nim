@@ -134,6 +134,25 @@ type
     generation: uint32
     initialized, done: bool
 
+  TimelineSegment = object
+    start, duration: int64
+    fromValue, toValue: float32
+    ease: Easing
+
+  TimelineLabel = object
+    name: string
+    at: int64
+
+  TimelineState = ref object
+    at: MonoTime
+    generation, seenGeneration, restedGeneration: uint32
+    run: uint64
+    raw, duration, build, time: int64
+    segments: seq[TimelineSegment]
+    labels: seq[TimelineLabel]
+    started, built, moving, reverse, holding, done, over, atStart,
+      initialized: bool
+
   ColorMotion = object
     fromColor, targetColor, shown: Color
     progress: ScalarAnimation
@@ -252,6 +271,7 @@ type
     animations: Table[uint64, Table[string, ScalarAnimation]]
     colorMotions: Table[uint64, Table[string, ColorMotion]]
     keyframes: Table[uint64, Table[string, ScalarSequence]]
+    timelines: Table[uint64, Table[string, TimelineState]]
     findBarStates: Table[uint64, FindBarState]
     pendingDataDrops: Table[uint64, transfer.Drop]
     pendingValueDrops: Table[uint64, RootRef]
@@ -325,6 +345,13 @@ type
     owner: ElementOwner
     slot: uint32
     generation: uint32
+
+  Timeline* = ref object
+    ## A frame-scoped playhead shared by a keyed element timeline.
+    owner: ElementOwner
+    generation: uint32
+    state: TimelineState
+    previousStart, previousEnd: int64
 
   Bitmap* = ref object
     ## A stable scene image created once and reused across frame builds.
@@ -639,6 +666,8 @@ proc newContext*(): Context =
     initTable[uint64, Table[string, ColorMotion]]()
   result.owner.keyframes =
     initTable[uint64, Table[string, ScalarSequence]]()
+  result.owner.timelines =
+    initTable[uint64, Table[string, TimelineState]]()
   result.owner.findBarStates = initTable[uint64, FindBarState]()
   result.owner.pendingDataDrops = initTable[uint64, transfer.Drop]()
   result.owner.pendingValueDrops = initTable[uint64, RootRef]()
@@ -1036,6 +1065,7 @@ proc retire(owner: ElementOwner) =
   owner.animations.clear()
   owner.colorMotions.clear()
   owner.keyframes.clear()
+  owner.timelines.clear()
   owner.findBarStates.clear()
   owner.pendingDataDrops.clear()
   owner.pendingValueDrops.clear()
@@ -1470,6 +1500,8 @@ proc build*(c: Context; view: proc(c: Context) {.closure.}) =
       initTable[uint64, Table[string, ColorMotion]]()
     c.owner.keyframes =
       initTable[uint64, Table[string, ScalarSequence]]()
+    c.owner.timelines =
+      initTable[uint64, Table[string, TimelineState]]()
     c.owner.findBarStates = initTable[uint64, FindBarState]()
     c.owner.pendingDataDrops = initTable[uint64, transfer.Drop]()
     c.owner.localStates = initTable[uint64, Table[string, RootRef]]()
@@ -1581,6 +1613,13 @@ proc build*(c: Context; view: proc(c: Context) {.closure.}) =
         staleKeyframes.add(identity)
     for identity in staleKeyframes:
       c.owner.keyframes.del(identity)
+    var staleTimelines: seq[uint64]
+    for identity in c.owner.timelines.keys:
+      if not c.owner.idSlots.hasKey(identity) and
+          not c.owner.retainedRouterIdentity(identity):
+        staleTimelines.add(identity)
+    for identity in staleTimelines:
+      c.owner.timelines.del(identity)
     var staleDialogs: seq[uint64]
     for identity, state in c.owner.dialogStates:
       if (state == nil or state.seenGeneration != c.owner.generation) and

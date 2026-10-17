@@ -75,6 +75,30 @@ type
     alternate*: bool ## Runs every other play backward.
     delay*, repeatDelay*: Duration ## Holds before playback and between plays.
 
+  Tween* = object ## A scalar value placed along a timeline.
+    fromValue*, to*: float32 ## The values shown at the segment's ends.
+    duration*: Duration ## How long the segment takes.
+    ease*: Easing ## Defaults to easeOut.
+
+  TimelineOptions* = object ## Playback settings for `Element.timeline`.
+    run*: uint64 ## Change this to restart the timeline from its beginning.
+    repeat*: int ## Additional plays; `RepeatForever` loops without end.
+    alternate*: bool ## Runs every other play backward.
+    delay*: Duration ## Holds the playhead before the first play.
+    repeatDelay*: Duration ## Holds the playhead between plays.
+    paused*: bool ## Holds the playhead where it is.
+    reverse*: bool ## Plays backward to the start; a changed run starts at the end.
+    seek*: Option[Duration] ## Holds the playhead at an absolute time.
+    progress*: Option[float32] ## Holds the playhead at a fraction of its duration.
+
+  Placement* = object ## Where a tween or label starts along a timeline.
+    kind: PlacementKind
+    offset: Duration
+    labelName: string
+
+  PlacementKind = enum
+    placementAfter, placementWith, placementAt, placementLabel
+
   ScrollMotionChannel = object
     value, velocity, target: float64
     at: MonoTime

@@ -1764,6 +1764,310 @@ proc keyframes*(e: Element; key: string; frames: openArray[Keyframe];
   owner.keyframes[node.identity] = sequences
   sequence.value
 
+proc saturatingAdd(a, b: int64): int64 =
+  if b > 0 and a > high(int64) - b:
+    high(int64)
+  elif b < 0 and a < low(int64) - b:
+    low(int64)
+  else:
+    a + b
+
+proc saturatingMultiply(a, b: int64): int64 =
+  if a <= 0 or b <= 0:
+    return 0
+  if a > high(int64) div b:
+    high(int64)
+  else:
+    a * b
+
+proc timelineEnd(state: TimelineState; options: TimelineOptions):
+    tuple[at: int64, known: bool] =
+  if options.repeat == RepeatForever or state.duration <= 0:
+    return (0'i64, false)
+  if options.repeat == high(int):
+    return (high(int64), true)
+  let plays = int64(options.repeat) + 1
+  let duration = saturatingMultiply(plays, state.duration)
+  let pauses = saturatingMultiply(plays - 1,
+    options.repeatDelay.inNanoseconds)
+  (saturatingAdd(duration, pauses), true)
+
+proc tweenValue(timeline: Timeline; segment: TimelineSegment): float32 =
+  let state = timeline.state
+  if state.over:
+    return if state.atStart: segment.fromValue else: segment.toValue
+  if segment.duration <= 0:
+    return if state.time >= segment.start: segment.toValue else: segment.fromValue
+  if state.time <= segment.start:
+    return segment.fromValue
+  if state.time >= saturatingAdd(segment.start, segment.duration):
+    return segment.toValue
+  let ease = if segment.ease == nil: easeOut else: segment.ease
+  let progress = float32(state.time - segment.start) /
+    float32(segment.duration)
+  let eased = ease(progress)
+  if not finiteMotion(float64(eased)):
+    raise newException(ValueError,
+      "ui: timeline easing result must be finite")
+  let value = float64(segment.fromValue) +
+    (float64(segment.toValue) - float64(segment.fromValue)) * float64(eased)
+  result = float32(value)
+  if not finiteMotion(float64(result)):
+    raise newException(ValueError, "ui: timeline values must be finite")
+
+proc timelineCue(state: TimelineState; owner: ElementOwner;
+                 options: TimelineOptions) =
+  let delay = options.delay.inNanoseconds
+  if state.run != options.run:
+    state.run = options.run
+    state.raw = 0
+    state.done = false
+    state.over = false
+    state.restedGeneration = 0
+    if options.reverse:
+      let ending = state.timelineEnd(options)
+      state.raw = saturatingAdd(delay,
+        if ending.known: ending.at else: state.duration)
+  state.reverse = options.reverse
+  var held = false
+  if options.seek.isSome:
+    state.raw = saturatingAdd(delay, options.seek.get.inNanoseconds)
+    held = true
+  if options.progress.isSome:
+    let progress = options.progress.get
+    let rawOffset = float64(progress) * float64(state.duration)
+    let offset = if rawOffset >= float64(high(int64)): high(int64)
+      elif rawOffset <= float64(low(int64)): low(int64)
+      else: int64(rawOffset)
+    state.raw = saturatingAdd(delay, offset)
+    held = true
+  if held:
+    state.over = false
+  elif not options.paused and owner.reduceMotion:
+    state.over = true
+  if state.over:
+    state.atStart = options.reverse or
+      (options.alternate and options.repeat mod 2 != 0)
+    state.time = if state.atStart: 0 else: state.duration
+    state.done = true
+    state.moving = false
+    state.holding = true
+    if state.restedGeneration == 0:
+      state.restedGeneration = owner.generation
+    return
+  let ending = state.timelineEnd(options)
+  if ending.known:
+    state.raw = min(state.raw, saturatingAdd(delay, ending.at))
+  state.raw = max(state.raw, 0'i64)
+  let raw = saturatingAdd(state.raw, -delay)
+  let position = playhead(raw, state.duration, options.repeat,
+    options.alternate, options.repeatDelay.inNanoseconds)
+  state.time = position.at
+  state.done = position.done
+  if raw > 0 and state.duration <= 0:
+    state.done = state.built
+  if options.reverse:
+    state.done = raw <= 0
+  state.holding = options.paused or held
+  state.moving = not state.done and not state.holding
+  if state.done:
+    if state.restedGeneration == 0:
+      state.restedGeneration = owner.generation
+    return
+  state.restedGeneration = 0
+  if held and not state.built:
+    owner.animating = true
+    return
+  if state.moving:
+    owner.animating = true
+
+proc timelineTick(state: TimelineState; owner: ElementOwner;
+                  options: TimelineOptions) =
+  if not state.started:
+    state.started = true
+    state.at = owner.frameNow
+    state.run = options.run
+    state.timelineCue(owner, options)
+    return
+  state.built = true
+  let elapsed = (owner.frameNow - state.at).inNanoseconds
+  state.at = owner.frameNow
+  if elapsed > 0 and state.moving:
+    if state.reverse:
+      let delay = options.delay.inNanoseconds
+      state.raw = max(saturatingAdd(state.raw, -elapsed),
+        min(state.raw, delay))
+    else:
+      state.raw = saturatingAdd(state.raw, elapsed)
+  state.timelineCue(owner, options)
+
+proc beginTimeline(timeline: Timeline; options: TimelineOptions) =
+  let state = timeline.state
+  state.generation = timeline.generation
+  state.duration = state.build
+  state.build = 0
+  state.segments.setLen(0)
+  state.labels.setLen(0)
+  state.timelineTick(timeline.owner, options)
+
+proc timeline*(e: Element; key: string;
+               options = TimelineOptions()): Timeline =
+  ## Returns the keyed timeline for this element in the current build.
+  ## Ask for it once per element and build; change `options.run` to replay it.
+  if options.repeat < RepeatForever or options.delay < DurationZero or
+      options.repeatDelay < DurationZero:
+    raise newException(ValueError,
+      "ui: timeline repeat and delays must be nonnegative")
+  if options.seek.isSome and options.progress.isSome:
+    raise newException(ValueError,
+      "ui: a timeline takes seek or progress, not both")
+  if options.progress.isSome and
+      not finiteMotion(float64(options.progress.get)):
+    raise newException(ValueError, "ui: timeline progress must be finite")
+  let node = e.node
+  if node == nil:
+    return nil
+  let owner = e.owner
+  var timelines = owner.timelines.mgetOrPut(node.identity,
+    initTable[string, TimelineState]())
+  var state = timelines.getOrDefault(key)
+  if state == nil:
+    new(state)
+  elif state.seenGeneration == owner.generation:
+    raise newException(ValueError,
+      "ui: an element asked for its timeline twice in one build: " & key)
+  elif not state.initialized or state.generation + 1 != owner.generation:
+    new(state)
+  state.initialized = true
+  state.seenGeneration = owner.generation
+  timelines[key] = state
+  owner.timelines[node.identity] = timelines
+  new(result)
+  result.owner = owner
+  result.generation = owner.generation
+  result.state = state
+  result.beginTimeline(options)
+
+proc place(timeline: Timeline; placement: Placement): int64 =
+  var position: int64
+  let offset = placement.offset.inNanoseconds
+  case placement.kind
+  of placementWith:
+    position = saturatingAdd(timeline.previousStart, offset)
+  of placementAt:
+    position = offset
+  of placementLabel:
+    var found = false
+    if timeline.state.labels.len > 0:
+      for i in countdown(timeline.state.labels.high, 0):
+        if timeline.state.labels[i].name == placement.labelName:
+          position = saturatingAdd(timeline.state.labels[i].at, offset)
+          found = true
+          break
+    if not found:
+      raise newException(ValueError,
+        "ui: timeline has no label " & placement.labelName)
+  of placementAfter:
+    position = saturatingAdd(timeline.previousEnd, offset)
+  max(position, 0'i64)
+
+proc afterPrevious*(offset: Duration = DurationZero): Placement =
+  ## Starts after the previous tween, or overlaps it by a negative offset.
+  Placement(kind: placementAfter, offset: offset)
+
+proc withPrevious*(offset: Duration = DurationZero): Placement =
+  ## Starts relative to the previous tween's start.
+  Placement(kind: placementWith, offset: offset)
+
+proc atTime*(time: Duration): Placement =
+  ## Starts at an absolute time on the timeline.
+  Placement(kind: placementAt, offset: time)
+
+proc atLabel*(name: string; offset: Duration = DurationZero): Placement =
+  ## Starts relative to a label previously added to the timeline.
+  Placement(kind: placementLabel, offset: offset, labelName: name)
+
+proc tween*(timeline: Timeline; value: Tween;
+            placement = Placement()): float32 =
+  ## Adds a tween and returns the scalar value at this frame's playhead.
+  if not finiteMotion(float64(value.fromValue)) or
+      not finiteMotion(float64(value.to)):
+    raise newException(ValueError, "ui: timeline tween values must be finite")
+  if value.duration < DurationZero:
+    raise newException(ValueError,
+      "ui: timeline tween duration must not be negative")
+  if timeline == nil or timeline.owner == nil or
+      not timeline.owner.inBuild or
+      timeline.generation != timeline.owner.generation:
+    return value.fromValue
+  let start = timeline.place(placement)
+  let duration = value.duration.inNanoseconds
+  let segment = TimelineSegment(start: start, duration: duration,
+    fromValue: value.fromValue, toValue: value.to, ease: value.ease)
+  timeline.state.segments.add(segment)
+  let ending = saturatingAdd(start, duration)
+  if ending > timeline.state.build:
+    timeline.state.build = ending
+    if timeline.state.done and not timeline.state.over and
+        not timeline.state.reverse and not timeline.state.holding and
+        ending > timeline.state.duration:
+      timeline.state.moving = true
+      timeline.owner.animating = true
+  timeline.previousStart = start
+  timeline.previousEnd = ending
+  timeline.tweenValue(segment)
+
+proc label*(timeline: Timeline; name: string;
+            placement = Placement()) =
+  ## Marks a time for later tweens to reference with `atLabel`.
+  if timeline == nil or timeline.owner == nil or
+      not timeline.owner.inBuild or
+      timeline.generation != timeline.owner.generation:
+    return
+  timeline.state.labels.add(TimelineLabel(name: name,
+    at: timeline.place(placement)))
+
+proc duration*(timeline: Timeline): Duration =
+  ## Returns the timeline duration without its repeats.
+  if timeline == nil:
+    return DurationZero
+  initDuration(nanoseconds = max(timeline.state.build, timeline.state.duration))
+
+proc time*(timeline: Timeline): Duration =
+  ## Returns the playhead time within one play of the timeline.
+  if timeline == nil:
+    return DurationZero
+  let state = timeline.state
+  if state.over:
+    return initDuration(nanoseconds =
+      if state.atStart: 0 else: max(state.build, state.duration))
+  initDuration(nanoseconds = min(state.time,
+    max(state.build, state.duration)))
+
+proc progress*(timeline: Timeline): float32 =
+  ## Returns the playhead position from zero to one.
+  if timeline == nil:
+    return 0
+  let state = timeline.state
+  let duration = max(state.build, state.duration)
+  if state.over or (state.done and duration <= 0):
+    return if state.atStart: 0 else: 1
+  if duration <= 0:
+    return 0
+  float32(min(max(float64(state.time) / float64(duration), 0), 1))
+
+proc settled*(timeline: Timeline): bool =
+  ## Reports whether playback has come to rest at either end.
+  if timeline == nil or not timeline.state.done:
+    return false
+  if timeline.state.over or timeline.state.reverse:
+    return true
+  timeline.state.build <= timeline.state.duration
+
+proc arrived*(timeline: Timeline): bool =
+  ## Reports whether the timeline came to rest in this build.
+  timeline != nil and timeline.state.restedGeneration == timeline.generation
+
 proc cubicEaseOut(progress: float32): float32 =
   let inverse = 1'f32 - progress
   1'f32 - inverse * inverse * inverse
@@ -1944,6 +2248,14 @@ proc settled*(e: Element; key: string): bool =
   let sequence = sequences.getOrDefault(key)
   if sequence.initialized and not sequence.done:
     return false
+  let timelines = e.owner.timelines.getOrDefault(node.identity)
+  let timelineState = timelines.getOrDefault(key)
+  if timelineState != nil:
+    if not timelineState.done:
+      return false
+    if not timelineState.over and not timelineState.reverse and
+        timelineState.build > timelineState.duration:
+      return false
   let channels = e.owner.animations.getOrDefault(node.identity)
   let channel = channels.getOrDefault(key)
   not channel.initialized or (not channel.moving and not channel.pending)
