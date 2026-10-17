@@ -3129,6 +3129,8 @@ proc event(rt: Runtime; ev: platform.SurfaceEvent): bool =
           return true
     rt.textFieldCommand(ev.text)
   of platform.pointerScroll:
+    discard rt.event(platform.SurfaceEvent(kind: platform.pointerMove,
+      x: scrollDelta(ev.x), y: scrollDelta(ev.y), mods: ev.mods))
     rt.pointerX = scrollDelta(ev.x)
     rt.pointerY = scrollDelta(ev.y)
     rt.hasPointer = true
@@ -3198,6 +3200,7 @@ proc event(rt: Runtime; ev: platform.SurfaceEvent): bool =
         platform.TextRange(start: caret, `end`: caret))
     true
   of platform.pointerMove:
+    let moved = rt.pointerX != float32(ev.x) or rt.pointerY != float32(ev.y)
     if rt.frameLayout.owner != nil:
       inc rt.frameLayout.owner.pointerRevision
     if rt.scrollbarDrag.state != nil:
@@ -3216,14 +3219,15 @@ proc event(rt: Runtime; ev: platform.SurfaceEvent): bool =
     rt.hasPointer = true
     if rt.inputPressCaptured:
       let slot = int(rt.pressTarget.slot)
-      discard rt.deliverInput(slot, InputEvent(
-        kind: InputKind.InputPointerMove, button: rt.inputPressButton,
-        mods: ev.mods))
+      if moved:
+        discard rt.deliverInput(slot, InputEvent(
+          kind: InputKind.InputPointerMove, button: rt.inputPressButton,
+          mods: ev.mods))
       rt.refreshPointer()
       return false
     rt.updatePointerDraggable()
     rt.refreshPointer()
-    if rt.pressTarget.owner == nil:
+    if moved and rt.pressTarget.owner == nil:
       let handlerSlot = rt.frameLayout.inputHandlerAt(rt.pointerX,
         rt.pointerY)
       if handlerSlot > 0:
@@ -3307,6 +3311,8 @@ proc event(rt: Runtime; ev: platform.SurfaceEvent): bool =
       rt.requestFrame()
     false
   of platform.pointerDown:
+    discard rt.event(platform.SurfaceEvent(kind: platform.pointerMove,
+      x: ev.x, y: ev.y, mods: ev.mods))
     var contextClick = ev.button == 1
     var inputAttempted = false
     when defined(macosx):
@@ -3469,6 +3475,8 @@ proc event(rt: Runtime; ev: platform.SurfaceEvent): bool =
       rt.requestFrame()
     return rt.pressTarget.owner != nil
   of platform.pointerUp:
+    discard rt.event(platform.SurfaceEvent(kind: platform.pointerMove,
+      x: ev.x, y: ev.y, mods: ev.mods))
     if rt.inputPressCaptured:
       rt.pointerX = float32(ev.x)
       rt.pointerY = float32(ev.y)

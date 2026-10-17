@@ -31,6 +31,8 @@ block input_handler_dispatch:
 
   tester.setFocused(true)
   tester.press(10, 20)
+  doAssert events[^2].kind == ui.InputKind.InputPointerMove
+  doAssert events[^2].x == 10 and events[^2].y == 20
   doAssert events[^1].kind == ui.InputKind.InputPointerDown
   doAssert events[^1].x == 10 and events[^1].y == 20
   doAssert events[^1].clicks == 1
@@ -38,6 +40,8 @@ block input_handler_dispatch:
   doAssert events[^1].kind == ui.InputKind.InputPointerMove
   doAssert events[^1].x == 140 and events[^1].y == 150
   tester.release(150, 160)
+  doAssert events[^2].kind == ui.InputKind.InputPointerMove
+  doAssert events[^2].x == 150 and events[^2].y == 160
   doAssert events[^1].kind == ui.InputKind.InputPointerUp
   doAssert events[^1].x == 150 and events[^1].y == 160
 
@@ -58,10 +62,11 @@ block input_handler_dispatch:
   doAssert shortcuts == 1
   doAssert events.countIt(it.kind == ui.InputKind.InputKeyDown) == keyDownCount
 
-  tester.move(15, 25)
-  tester.scroll(15, 25, 2, 3)
+  tester.scroll(20, 30, 2, 3)
+  doAssert events[^2].kind == ui.InputKind.InputPointerMove
+  doAssert events[^2].x == 20 and events[^2].y == 30
   doAssert events[^1].kind == ui.InputKind.InputScroll
-  doAssert events[^1].x == 15 and events[^1].y == 25
+  doAssert events[^1].x == 20 and events[^1].y == 30
   doAssert events[^1].dx == 2 and events[^1].dy == 3
 
   tester.typeText("hello")
@@ -135,12 +140,14 @@ block capture_ends_when_handler_is_removed:
   defer: tester.close()
 
   tester.press(10, 10)
-  doAssert events == @[ui.InputKind.InputPointerDown]
+  doAssert events == @[ui.InputKind.InputPointerMove,
+    ui.InputKind.InputPointerDown]
   listening = false
   tester.frame()
   tester.move(12, 12)
   tester.release(12, 12)
-  doAssert events == @[ui.InputKind.InputPointerDown]
+  doAssert events == @[ui.InputKind.InputPointerMove,
+    ui.InputKind.InputPointerDown]
 
 let fake = fakeBackend.newFakeBackend()
 theBackend = platform.Backend(fake)
