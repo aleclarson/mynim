@@ -2,6 +2,7 @@
 
 import std/[algorithm, json, os, osproc, streams, strutils, tempfiles]
 import ./resources as projectResources
+import ./generate
 
 const usageBuild = """Usage: mygo build [flags] [dir]
 
@@ -40,7 +41,8 @@ proc hostTarget*(): tuple[os, arch, path: string] =
   let targetArch = hostCPU
   (targetOs, targetArch, targetOs & "/" & targetArch)
 
-proc compileApp(projectDir, source, output, cache: string; debug: bool):
+proc compileApp(projectDir, source, output, cache: string; debug,
+    embedFrontend: bool):
     tuple[code: int, log: string] =
   let nim = findExe("nim")
   if nim.len == 0:
@@ -48,6 +50,8 @@ proc compileApp(projectDir, source, output, cache: string; debug: bool):
   var args = @["c", "--nimcache:" & cache]
   if not debug:
     args.add "-d:release"
+  if embedFrontend:
+    args.add "-d:mynimGeneratedFrontend"
   when hostOS == "windows":
     args.add "--app:gui"
   args.add "--out:" & output
@@ -138,6 +142,14 @@ proc installFrontend*() =
   writeFile(path, "import mynim_frontend\n" &
     "mynim_frontend.installFrontend()\ninclude " &
     nimStringLiteral(source) & "\n")
+
+proc needsClientGeneration(projectDir: string; config: JsonNode): bool =
+  if config.hasKey("bindings"):
+    return true
+  for key in ["devUrl", "devCommand", "buildCommand", "frontendDist"]:
+    if config.hasKey(key) and configString(config, key, "").len > 0:
+      return true
+  dirExists(projectDir / "frontend") or fileExists(projectDir / "package.json")
 
 proc xmlEscape(value: string): string =
   for ch in value:
@@ -296,6 +308,9 @@ proc runBuild*(args: seq[string]): int =
     if not fileExists(source):
       raise newException(ValueError,
         "mygo build: expected src/main.nim or main.nim in " & projectDir)
+    if needsClientGeneration(projectDir, config) and
+        runGenerate(@[projectDir]) != 0:
+      return 1
     if buildCommand.len > 0 and not skipBuildCommand:
       stdout.writeLine("Running buildCommand")
       let code = runBuildCommand(buildCommand, projectDir)
@@ -336,7 +351,8 @@ proc runBuild*(args: seq[string]): int =
       createDir(macOSDir)
       createDir(resourcesDir)
       let binary = macOSDir / executable
-      let compiled = compileApp(projectDir, compileSource, binary, cache, debug)
+      let compiled = compileApp(projectDir, compileSource, binary, cache,
+        debug, configuredFrontend.len > 0)
       if compiled.code != 0:
         stderr.write(compiled.log)
         return 1
@@ -346,7 +362,8 @@ proc runBuild*(args: seq[string]): int =
         executable)
     else:
       let binary = stage / executable
-      let compiled = compileApp(projectDir, compileSource, binary, cache, debug)
+      let compiled = compileApp(projectDir, compileSource, binary, cache,
+        debug, configuredFrontend.len > 0)
       if compiled.code != 0:
         stderr.write(compiled.log)
         return 1

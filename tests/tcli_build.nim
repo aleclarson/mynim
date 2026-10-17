@@ -27,6 +27,8 @@ proc testBuild() =
   let buildStep = project / "build_step.nim"
   let buildMarker = project / "build-step-ran.txt"
   writeFile(buildStep, """import std/os
+if not fileExists("client-generation-ran.txt"):
+  quit(17)
 createDir("frontend-dist")
 writeFile("frontend-dist/index.html", "NIM-EMBEDDED-FRONTEND-MARKER")
 writeFile("build-step-ran.txt", "yes")
@@ -38,19 +40,23 @@ writeFile("build-step-ran.txt", "yes")
   writeFile(configPath, config.pretty & "\n")
   writeFile(project / "src" / "main.nim", """import std/os
 import mynim
-import mynim/internal/vfs as mynimVfs
 
-if getEnv("MYGO_FRONTEND_TEST") == "1":
-  let (body, err) = mynimVfs.readFile(mynim_frontend.embeddedFrontend(),
-    "index.html")
-  if err != nil:
-    quit(2)
-  var content = newString(body.len)
-  for index, value in body:
-    content[index] = char(value)
-  if content != "NIM-EMBEDDED-FRONTEND-MARKER":
-    quit(3)
-  quit(0)
+if getEnv("MYNIM_GENERATE").len > 0:
+  writeFile("client-generation-ran.txt", "yes")
+
+when defined(mynimGeneratedFrontend):
+  import mynim/internal/vfs as mynimVfs
+  if getEnv("MYGO_FRONTEND_TEST") == "1":
+    let (body, err) = mynimVfs.readFile(mynim_frontend.embeddedFrontend(),
+      "index.html")
+    if err != nil:
+      quit(2)
+    var content = newString(body.len)
+    for index, value in body:
+      content[index] = char(value)
+    if content != "NIM-EMBEDDED-FRONTEND-MARKER":
+      quit(3)
+    quit(0)
 
 app.run()
 """)
