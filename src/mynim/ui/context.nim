@@ -431,6 +431,7 @@ type
     clickHandler: proc(mods: platform.Modifiers) {.closure.}
     drawFn: proc(painter: var Painter; rect: Rect) {.closure.}
     menuBuilder: proc(menu: Menu) {.closure.}
+    contextMenuBuilder: proc(menu: Menu) {.closure.}
     accessRole: platform.AccessRole
     accessSort: platform.AccessStates
     accessExtraStates: platform.AccessStates

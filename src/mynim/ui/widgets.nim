@@ -346,6 +346,14 @@ proc menuButton*(c: Context; label: string;
       if openMenu != nil:
         openMenu(identity, build)
 
+proc contextMenu*(e: Element;
+                  build: proc(menu: Menu) {.closure.}): Element =
+  ## Builds a native context menu when the element receives a secondary click.
+  result = e
+  let node = e.node
+  if node != nil:
+    node[].contextMenuBuilder = build
+
 proc primaryButton*(c: Context; label: string): Element =
   ## Creates an accent-colored button for the primary action.
   c.themedButton(label, primary = true)

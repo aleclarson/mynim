@@ -2239,6 +2239,46 @@ proc showTableHeaderMenu(rt: Runtime; target: Element;
     )
   true
 
+proc showContextMenu(rt: Runtime; target: Element; x, y: float32): bool =
+  if rt.closed or rt.conn.popupMenu == nil or
+      target.owner == nil or target.owner != rt.frameLayout.owner:
+    return false
+  let owner = rt.frameLayout.owner
+  var slot = int(target.slot)
+  var build: proc(menu: Menu) {.closure.}
+  var rightToLeft = false
+  while slot > 0 and slot < owner.nodes.len:
+    let node = owner.nodes[slot]
+    if node.contextMenuBuilder != nil:
+      if owner.effectivelyDisabled(slot) or
+          owner.effectivelyToolbarCollapsed(slot):
+        return false
+      build = node.contextMenuBuilder
+      rightToLeft = node.rightToLeft
+      break
+    slot = int(node.parent)
+  if build == nil:
+    return false
+
+  let opening = newUiMenu(0, "", rightToLeft)
+  build(opening)
+  if opening.snapshot.items.len > 0:
+    rt.conn.popupMenu(opening.snapshot, float64(x), float64(y),
+      proc(id: int) =
+        if rt.closed:
+          return
+        var chosenLabel = ""
+        for item in opening.snapshot.items:
+          if item.id == id:
+            chosenLabel = item.label
+            break
+        let selection = newUiMenu(id, chosenLabel, rightToLeft)
+        build(selection)
+        if selection.session.choiceSeen:
+          rt.requestFrame()
+    )
+  true
+
 proc showMenuButton(rt: Runtime; identity: uint64;
                     build: proc(menu: Menu) {.closure.}) =
   if rt.closed or rt.conn.popupMenu == nil or build == nil or
@@ -2883,7 +2923,8 @@ proc event(rt: Runtime; ev: platform.SurfaceEvent): bool =
       rt.hasPointer = true
       rt.refreshPointer()
       let target = rt.frameLayout.targetAt(rt.pointerX, rt.pointerY)
-      if rt.showTableHeaderMenu(target, rt.pointerX, rt.pointerY):
+      if rt.showContextMenu(target, rt.pointerX, rt.pointerY) or
+          rt.showTableHeaderMenu(target, rt.pointerX, rt.pointerY):
         if rt.hoverSlots != previousHover:
           rt.requestFrame()
         return true

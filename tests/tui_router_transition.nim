@@ -31,6 +31,8 @@ doAssert not router.hasAnimation()
 var outgoingActionTriggered = false
 let routerContent = ui.newContent(proc(ctx: ui.Context) =
   discard router.view(ctx, proc(route: ui.Route) =
+    discard ctx.backButton(router)
+    discard ctx.forwardButton(router)
     if route.match("/notes"):
       route.title("Notes")
       discard ctx.button("Outgoing action").onClick(proc() =
@@ -87,6 +89,34 @@ tree = native.accessibility()[0]
 doAssert hasLabel(tree, "Home") and hasLabel(tree, "Current home")
 doAssert not hasLabel(tree, "Current edit"),
   "Transition.None should not retain the outgoing page in the current tree"
+let backButton = accessNode(tree, platform.roleButton, "Back")
+doAssert native.send(platform.SurfaceEvent(kind: platform.pointerDown,
+  x: backButton.bounds.x + backButton.bounds.w / 2,
+  y: backButton.bounds.y + backButton.bounds.h / 2, button: 1))
+fake.step()
+let backMenu = fake.allPopups()[^1].menu
+doAssert backMenu.items.len == 3
+doAssert backMenu.items[^1].label == "Notes"
+fake.windows[^1].clickMenuItem(backMenu.items[^1].id)
+doAssert router.location() == "/notes",
+  "the Back context menu should jump directly to the selected history entry"
+doAssert native.frame()
+tree = native.accessibility()[0]
+doAssert hasLabel(tree, "Notes")
+let forwardButton = accessNode(tree, platform.roleButton, "Forward")
+doAssert native.send(platform.SurfaceEvent(kind: platform.pointerDown,
+  x: forwardButton.bounds.x + forwardButton.bounds.w / 2,
+  y: forwardButton.bounds.y + forwardButton.bounds.h / 2, button: 1))
+fake.step()
+let forwardMenu = fake.allPopups()[^1].menu
+doAssert forwardMenu.items.len == 3
+doAssert forwardMenu.items[^1].label == "Home"
+fake.windows[^1].clickMenuItem(forwardMenu.items[^1].id)
+doAssert router.location() == "/home",
+  "the Forward context menu should jump directly to the selected entry"
+doAssert native.frame()
+tree = native.accessibility()[0]
+doAssert hasLabel(tree, "Home")
 router.clearAnimation()
 doAssert not router.hasAnimation()
 

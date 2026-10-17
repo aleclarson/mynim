@@ -317,6 +317,19 @@ proc historyButton(c: Context; router: Router; backward: bool): Element =
       if router != nil:
         if backward: router.back() else: router.forward()
     )
+  discard result.contextMenu(proc(menu: Menu) =
+    if router == nil:
+      return
+    for distance in 1..15:
+      let index = if backward: router.at - distance
+        else: router.at + distance
+      if index < 0 or index >= router.entries.len:
+        break
+      let entry = router.entries[index]
+      let title = if entry.title.len > 0: entry.title else: entry.location
+      if menu.item(title).chosen:
+        router.go(if backward: -distance else: distance)
+  )
 
 proc backButton*(c: Context; router: Router): Element =
   ## Creates a button that returns to the previous Router history entry.
