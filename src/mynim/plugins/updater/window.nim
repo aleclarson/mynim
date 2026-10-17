@@ -197,12 +197,12 @@ proc build*(state: UpdaterWindow; c: ui.Context): ui.Element =
         state.respond(view, button)
   )
 
-proc open*(state: UpdaterWindow): MainWindow =
+proc open*(state: UpdaterWindow; foreground: bool): MainWindow =
   ## Opens and shows the native update window.
   if state == nil:
     raise newException(ValueError, "updater: window state cannot be nil")
   if state.window != nil and not state.window.isDestroyed():
-    if state.user:
+    if foreground:
       state.window.show()
       state.window.focus()
     return state.window
@@ -220,9 +220,18 @@ proc open*(state: UpdaterWindow): MainWindow =
   ))
   if state.onClose != nil:
     discard state.window.onClosed(state.onClose)
-  if state.user:
+  if foreground:
     state.window.show()
     state.window.focus()
   else:
     state.window.showInactive()
   result = state.window
+
+proc open*(state: UpdaterWindow): MainWindow =
+  ## Opens the window using the foreground setting passed to its constructor.
+  state.open(state.user)
+
+proc close*(state: UpdaterWindow) =
+  ## Closes the native window if it is open.
+  if state != nil and state.window != nil and not state.window.isDestroyed():
+    state.window.close()
