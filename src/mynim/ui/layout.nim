@@ -2530,6 +2530,27 @@ proc alignSplitHandles(nodes: var seq[ElementNode]; rects: var seq[Rect]) =
         bar.x - bounds.x
     nodes[slot].sliderValue = float64(position)
 
+proc hasVisibleArea(box, clip: Rect): bool =
+  min(box.x + box.w, clip.x + clip.w) > max(box.x, clip.x) and
+    min(box.y + box.h, clip.y + clip.h) > max(box.y, clip.y)
+
+proc childClip(clip: Rect; node: ElementNode; box: Rect): Rect =
+  result = clip
+  if not node.clipsChildren:
+    return
+  let clipsX = node.scrollState != nil or node.clipX
+  let clipsY = node.scrollState != nil or node.clipY
+  if clipsX:
+    let left = max(clip.x, box.x + node.border[3])
+    let right = min(clip.x + clip.w, box.x + box.w - node.border[1])
+    result.x = left
+    result.w = max(right - left, 0'f32)
+  if clipsY:
+    let top = max(clip.y, box.y + node.border[0])
+    let bottom = min(clip.y + clip.h, box.y + box.h - node.border[2])
+    result.y = top
+    result.h = max(bottom - top, 0'f32)
+
 proc layoutAt(c: Context; bounds: Rect; now: MonoTime;
               reduceMotion: bool): LayoutResult =
   ## Lays out the latest completed build inside bounds.
@@ -2744,6 +2765,23 @@ proc layoutAt(c: Context; bounds: Rect; now: MonoTime;
         result.rects[descendant].y += delta
   alignSplitHandles(c.owner.nodes, result.rects)
   placeInlineText(c.owner.nodes, result.rects)
+  c.owner.visibleIdentities.clear()
+  c.owner.visibleClipScratch.setLen(c.owner.nodes.len)
+  c.owner.visibilityBlockedScratch.setLen(c.owner.nodes.len)
+  if c.owner.nodes.len > 0:
+    c.owner.visibleClipScratch[0] = result.root
+    c.owner.visibilityBlockedScratch[0] = false
+  for slot in 1..<c.owner.nodes.len:
+    let node = c.owner.nodes[slot]
+    let parent = int(node.parent)
+    let inheritedClip = c.owner.visibleClipScratch[parent]
+    let blocked = c.owner.visibilityBlockedScratch[parent] or node.inert
+    c.owner.visibilityBlockedScratch[slot] = blocked
+    if not blocked and hasVisibleArea(result.rects[slot], inheritedClip):
+      c.owner.visibleIdentities.incl(c.owner.nodes[slot].identity)
+    c.owner.visibleClipScratch[slot] = childClip(inheritedClip, node,
+      result.rects[slot])
+  c.owner.visibleGeneration = c.owner.generation
   c.owner.committedRects = result.rects
   for slot, node in c.owner.nodes:
     if node.identity in c.owner.trackedBounds:
@@ -2774,6 +2812,14 @@ proc bounds*(e: Element): Rect =
     return
   e.owner.trackedBounds.incl(n[].identity)
   e.owner.lastBounds.getOrDefault(n[].identity)
+
+proc inView*(e: Element): bool =
+  ## Reports whether this element had visible area in the previous layout.
+  let n = e.node
+  if n == nil or e.generation == 0 or
+      e.owner.visibleGeneration != e.generation - 1:
+    return false
+  n[].identity in e.owner.visibleIdentities
 
 proc pointerPosition*(e: Element): tuple[x, y: float32, over: bool] =
   ## Returns pointer coordinates relative to the element and whether it is

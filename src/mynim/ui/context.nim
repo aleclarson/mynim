@@ -289,6 +289,10 @@ type
     routers: seq[Router]
     frameNow: MonoTime
     committedRects: seq[Rect]
+    visibleIdentities: HashSet[uint64]
+    visibleGeneration: uint32
+    visibleClipScratch: seq[Rect]
+    visibilityBlockedScratch: seq[bool]
     lastBounds: Table[uint64, Rect]
     trackedBounds: HashSet[uint64]
     focusIdentity: uint64
@@ -637,6 +641,7 @@ proc newContext*(): Context =
   result.owner.identityParents = initTable[uint64, uint64]()
   result.owner.lastBounds = initTable[uint64, Rect]()
   result.owner.trackedBounds = initHashSet[uint64]()
+  result.owner.visibleIdentities = initHashSet[uint64]()
   result.owner.previousInteraction = initTable[uint64, uint8]()
   result.owner.keyedSeen = initHashSet[string]()
   result.owner.pendingNotices = initTable[uint64, uint8]()
@@ -1085,6 +1090,10 @@ proc retire(owner: ElementOwner) =
   owner.dragCanceled = false
   owner.pendingDropGeneration = 0
   owner.committedRects = @[]
+  owner.visibleIdentities.clear()
+  owner.visibleGeneration = 0
+  owner.visibleClipScratch.setLen(0)
+  owner.visibilityBlockedScratch.setLen(0)
   owner.lastBounds.clear()
   owner.trackedBounds.clear()
   owner.focusIdentity = 0
@@ -1465,6 +1474,7 @@ proc build*(c: Context; view: proc(c: Context) {.closure.}) =
     c.owner.identityParents = initTable[uint64, uint64]()
     c.owner.lastBounds = initTable[uint64, Rect]()
     c.owner.trackedBounds = initHashSet[uint64]()
+    c.owner.visibleIdentities = initHashSet[uint64]()
     c.owner.previousInteraction = initTable[uint64, uint8]()
     c.owner.keyedSeen = initHashSet[string]()
     c.owner.pendingNotices = initTable[uint64, uint8]()
