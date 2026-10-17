@@ -802,6 +802,11 @@ proc invalidate*(s: Services) =
   if access.invalidate != nil:
     access.invalidate()
 
+proc invalidate*(c: Context) =
+  ## Requests a frame from any thread; use Services beyond this build.
+  if c != nil:
+    c.services().invalidate()
+
 proc readClipboard*(s: Services): string =
   ## Reads plain text from the system clipboard on the UI thread.
   let access = s.serviceAccess()
@@ -842,6 +847,25 @@ proc openUrl*(s: Services; url: string) =
   let access = s.serviceAccess()
   if access.openURL != nil:
     access.openURL(url, nil)
+
+proc openUrl*(c: Context; url: string) =
+  ## Opens a URL through its registered handler on the UI thread.
+  if c != nil and c.openURL != nil:
+    c.openURL(url, nil)
+
+proc openUrlThen*(c: Context; url: string;
+                  done: proc(err: ref CatchableError) {.closure.}) =
+  ## Opens a URL and reports the result before requesting another frame.
+  if c == nil or c.openURL == nil:
+    return
+  if done == nil:
+    c.openURL(url, nil)
+  else:
+    let owner = c.owner
+    c.openURL(url, proc(err: ref CatchableError) =
+      done(err)
+      if owner != nil and not owner.closed and owner.invalidate != nil:
+        owner.invalidate())
 
 proc after(c: Context; d: Duration) =
   ## Requests another frame after d, for something delayed by time.
@@ -2254,7 +2278,7 @@ proc close*(c: Context) =
       state.openURL = nil
     finally:
       release(state.lock)
-    c.serviceState = nil
+  c.openURL = nil
   c.owner.actions.setLen(0)
   for router in c.owner.routers:
     if router != nil:
