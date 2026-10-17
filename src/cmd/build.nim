@@ -146,6 +146,8 @@ proc installFrontend*() =
 proc needsClientGeneration(projectDir: string; config: JsonNode): bool =
   if config.hasKey("bindings"):
     return true
+  if config.hasKey("i18n") and config["i18n"].kind != JNull:
+    return true
   for key in ["devUrl", "devCommand", "buildCommand", "frontendDist"]:
     if config.hasKey(key) and configString(config, key, "").len > 0:
       return true

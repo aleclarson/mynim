@@ -1,12 +1,14 @@
 ## Generate the typed TypeScript client of a MyNim application.
 
 import std/[json, os, osproc, streams, strtabs, strutils, tempfiles]
+import ./i18n_generate
 
 const usageGenerate = """Usage: mygo generate [-o file] [dir]
 
-Write the TypeScript client for the services and events bound by the app.
-The output defaults to bindings in mygo.json, or the conventional path for a
-project with a frontend. Apps without a frontend produce no client by default.
+Write the TypeScript client for the services and events bound by the app, and
+`catalog_gen.nim` when i18n catalogs are configured. The client output defaults
+to bindings in mygo.json, or the conventional path for a project with a
+frontend. Apps without a frontend produce no client by default.
 
 Flags:
   -o, --output file  output file (overrides mygo.json)
@@ -104,6 +106,8 @@ proc runGenerate*(args: seq[string]): int =
         raise newException(ValueError,
           "mygo generate: mygo.json must contain a JSON object")
 
+    let catalogModule = generateCatalogModule(projectDir, source, config)
+
     let configuredOutput = if outputOption.len > 0:
       absolutePath(if isAbsolute(outputOption): outputOption
         else: projectDir / outputOption)
@@ -143,6 +147,13 @@ proc runGenerate*(args: seq[string]): int =
       var shownPath = configuredOutput
       try:
         shownPath = relativePath(configuredOutput, projectDir)
+      except ValueError:
+        discard
+      stdout.writeLine("Generated " & shownPath)
+    if catalogModule.len > 0:
+      var shownPath = catalogModule
+      try:
+        shownPath = relativePath(catalogModule, projectDir)
       except ValueError:
         discard
       stdout.writeLine("Generated " & shownPath)

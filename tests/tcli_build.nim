@@ -115,8 +115,19 @@ app.run()
   writeFile(project / "src" / "main.nim", "import mynim\napp.run()\n")
   config["buildCommand"] = %""
   config["frontendDist"] = %""
+  config["i18n"] = parseJson("""{"source":"en","dir":"locales"}""")
   writeFile(configPath, config.pretty & "\n")
+  createDir(project / "locales")
+  writeFile(project / "locales" / "en.json", """{"hello": "Hello"}""")
+  writeFile(project / "locales" / "de.json", """{"hello": "Hallo"}""")
+  writeFile(project / "src" / "main.nim", """import mynim
+import catalog_gen
+
+doAssert catalog_gen.inLocale("de").hello() == "Hallo"
+app.run()
+""")
   doAssert runBuild(@["-o", output, project]) == 0
+  doAssert fileExists(project / "src" / "catalog_gen.nim")
   doAssert runBuild(@["-platform", "other/target", project]) == 1
   doAssert runBuild(@["-unknown", project]) == 2
   doAssert runBuild(@["--help"]) == 0
