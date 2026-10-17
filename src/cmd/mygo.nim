@@ -7,6 +7,7 @@ import ./doctor
 import ./generate
 import ./init
 import ./i18n_check
+import ./keygen
 import ./skills
 import ./vet
 
@@ -27,6 +28,7 @@ Commands:
   generate        write the typed client and Nim/TypeScript i18n accessors
   vet             typecheck a native Nim project
   i18n            check message catalogs
+  keygen          create the key pair that signs updates
   doctor          check that the development environment is ready
   version         print the MyGo version
   help            print this help
@@ -76,7 +78,11 @@ proc run(args: seq[string]): int =
     if args.len > 1:
       return runVet(args[1 .. ^1])
     return runVet(@[])
-  of "migrate-ui", "keygen":
+  of "keygen":
+    if args.len > 1:
+      return runKeygen(args[1 .. ^1])
+    return runKeygen(@[])
+  of "migrate-ui":
     stderr.writeLine("mygo: command \"" & args[0] & "\" is not ported yet")
     return 1
   else:
