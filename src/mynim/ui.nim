@@ -53,6 +53,7 @@ include mynim/ui/element
 include mynim/ui/path
 include mynim/ui/router
 include mynim/ui/context
+include mynim/ui/handler
 include mynim/ui/rich_text
 include mynim/ui/list_state
 include mynim/ui/menu

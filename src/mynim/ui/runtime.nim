@@ -16,6 +16,9 @@ type
     frameLayout: LayoutResult
     pressTarget: Element
     pressMods: platform.Modifiers
+    inputPressButton: int
+    inputPressCaptured: bool
+    byPosition: HashSet[platform.Key]
     scrollbarDrag: ScrollbarDrag
     focusSlot, keyPressSlot: int
     keyPressKey: platform.Key
@@ -2202,7 +2205,13 @@ proc renderFrame(rt: Runtime; presentFrame = true) =
       generation: currentOwner.generation)
   else:
     rt.pressTarget = Element()
+    rt.inputPressCaptured = false
     rt.pressHoverSlots.setLen(0)
+  if rt.inputPressCaptured:
+    let capturedSlot = int(rt.pressTarget.slot)
+    if capturedSlot <= 0 or capturedSlot >= currentOwner.nodes.len or
+        currentOwner.nodes[capturedSlot].inputHandler == nil:
+      rt.inputPressCaptured = false
   if rt.textInputAdapter != nil:
     rt.textInputAdapter.slot = remapSlot(previousIdentities, currentOwner,
       previousTextInputSlot)
@@ -2815,6 +2824,101 @@ proc startDragFromPress(rt: Runtime): bool =
   rt.requestFrame()
   true
 
+proc inputHandlerSlot(layout: LayoutResult; start: int): int =
+  let owner = layout.owner
+  var slot = start
+  while owner != nil and slot > 0 and slot < owner.nodes.len:
+    if owner.nodes[slot].inputHandler != nil and
+        not owner.effectivelyDisabled(slot) and
+        not owner.effectivelyToolbarCollapsed(slot):
+      return slot
+    slot = int(owner.nodes[slot].parent)
+
+proc inputHandlerAt(layout: LayoutResult; x, y: float32): int =
+  let target = layout.targetAt(x, y)
+  if target.owner == layout.owner:
+    return layout.inputHandlerSlot(int(target.slot))
+
+proc focusedInputHandlerSlot(rt: Runtime): int =
+  if rt.surfaceFocused:
+    return rt.frameLayout.inputHandlerSlot(rt.focusSlot)
+
+proc deliverInput(rt: Runtime; slot: int; ev: InputEvent): bool =
+  let layout = rt.frameLayout
+  let owner = layout.owner
+  if owner == nil or slot <= 0 or slot >= owner.nodes.len:
+    return false
+  let handler = owner.nodes[slot].inputHandler
+  if handler == nil:
+    return false
+  var input = ev
+  let (x, y, ok) = layout.localPoint(slot, rt.pointerX, rt.pointerY)
+  if ok:
+    let rect = layout.rects[slot]
+    input.x = x - rect.x
+    input.y = y - rect.y
+  else:
+    input.x = 0
+    input.y = 0
+  if input.kind == InputKind.InputScroll:
+    let (dx, dy, vectorOk) = layout.localVector(slot, rt.pointerX,
+      rt.pointerY, input.dx, input.dy)
+    if vectorOk:
+      input.dx = dx
+      input.dy = dy
+    else:
+      input.dx = 0
+      input.dy = 0
+  result = handler(input)
+  if result:
+    rt.requestFrame()
+
+proc focusInputTarget(rt: Runtime; start: int) =
+  let layout = rt.frameLayout
+  let owner = layout.owner
+  var slot = start
+  while owner != nil and slot > 0 and slot < owner.nodes.len:
+    if layout.focusableSlot(slot) and not owner.effectivelyDisabled(slot):
+      rt.setRuntimeFocus(layout, slot)
+      return
+    slot = int(owner.nodes[slot].parent)
+
+proc captureInputPointerDown(rt: Runtime; slot, button: int;
+    mods: platform.Modifiers; clicks: int): bool =
+  let layout = rt.frameLayout
+  let owner = layout.owner
+  if owner == nil or slot <= 0 or slot >= owner.nodes.len:
+    return false
+  let input = InputEvent(kind: InputKind.InputPointerDown, button: button,
+    clicks: max(clicks, 1), mods: mods)
+  if not rt.deliverInput(slot, input):
+    return false
+  rt.inputPressCaptured = true
+  rt.inputPressButton = button
+  rt.pressTarget = Element(owner: owner, slot: uint32(slot),
+    generation: layout.generation)
+  rt.pressMods = mods
+  rt.pressX = rt.pointerX
+  rt.pressY = rt.pointerY
+  rt.dragCandidateIdentity = 0
+  rt.pressHoverSlots = layout.slotsAt(rt.pointerX, rt.pointerY)
+  rt.refreshPointer()
+  true
+
+proc inputKeyDown(rt: Runtime; ev: platform.SurfaceEvent): platform.Key =
+  result = ev.key
+  if platform.keyByPosition(result, ev.physicalKey, ev.mods):
+    rt.byPosition.incl(ev.physicalKey)
+    result = ev.physicalKey
+  elif not ev.repeat:
+    rt.byPosition.excl(ev.physicalKey)
+
+proc inputKeyUp(rt: Runtime; ev: platform.SurfaceEvent): platform.Key =
+  result = ev.key
+  if result == platform.keyUnknown and ev.physicalKey in rt.byPosition:
+    result = ev.physicalKey
+  rt.byPosition.excl(ev.physicalKey)
+
 proc event(rt: Runtime; ev: platform.SurfaceEvent): bool =
   if rt.closed:
     return false
@@ -2842,7 +2946,8 @@ proc event(rt: Runtime; ev: platform.SurfaceEvent): bool =
     rt.requestFrame()
     false
   of platform.keyPressed:
-    if ev.key == platform.keyEscape and rt.localDrag != nil and
+    let key = rt.inputKeyDown(ev)
+    if key == platform.keyEscape and rt.localDrag != nil and
         not rt.localDrag.canceled:
       rt.localDrag.canceled = true
       rt.localDrag.overIdentity = 0
@@ -2851,10 +2956,17 @@ proc event(rt: Runtime; ev: platform.SurfaceEvent): bool =
         rt.frameLayout.owner.dragOverIdentity = 0
       rt.requestFrame()
       return true
-    if ev.key == platform.keyTab and
+    if not rt.shortcutActionRegistered(ev.mods, key):
+      let slot = rt.focusedInputHandlerSlot()
+      if slot > 0 and rt.deliverInput(slot, InputEvent(
+          kind: InputKind.InputKeyDown, key: key,
+          physicalKey: ev.physicalKey, mods: ev.mods, repeat: ev.repeat)):
+        rt.keyboardFocusVisible = true
+        return true
+    if key == platform.keyTab and
         (ev.mods and (platform.modCtrl or platform.modAlt or
           platform.modSuper)) == 0:
-      if rt.runShortcutAction(ev.mods, ev.key):
+      if rt.runShortcutAction(ev.mods, key):
         return true
       let owner = rt.frameLayout.owner
       let client = if owner != nil and rt.focusSlot > 0 and
@@ -2863,7 +2975,7 @@ proc event(rt: Runtime; ev: platform.SurfaceEvent): bool =
             TextFieldClient(owner.nodes[rt.focusSlot].textClient)
         else:
             nil
-      if rt.textFieldTextKey(client, ev.key, ev.mods):
+      if rt.textFieldTextKey(client, key, ev.mods):
         return true
       rt.rememberFocusGroup()
       let next = rt.nextFocusSlot(rt.frameLayout, rt.focusSlot,
@@ -2889,26 +3001,26 @@ proc event(rt: Runtime; ev: platform.SurfaceEvent): bool =
           rt.frameLayout.owner.focusVisibleSlots = @[fallback]
         return true
       return false
-    if ev.key == platform.keyEscape and ev.mods == 0 and rt.dismissPopover():
+    if key == platform.keyEscape and ev.mods == 0 and rt.dismissPopover():
       return true
-    if ev.key == platform.keyEscape and ev.mods == 0 and rt.dismissModal():
+    if key == platform.keyEscape and ev.mods == 0 and rt.dismissModal():
       return true
-    if rt.comboBoxKey(ev.key, ev.mods):
+    if rt.comboBoxKey(key, ev.mods):
       return true
-    if rt.sliderKey(ev.key, ev.mods):
+    if rt.sliderKey(key, ev.mods):
       return true
     let owner = rt.frameLayout.owner
     if ev.mods == 0 and owner != nil and rt.focusSlot > 0 and
         rt.focusSlot < owner.nodes.len:
       let node = owner.nodes[rt.focusSlot]
       if node.menuBuilder != nil and
-          ev.key in {platform.keyEnter, platform.keySpace, platform.keyDown}:
+          key in {platform.keyEnter, platform.keySpace, platform.keyDown}:
         if not ev.repeat:
           rt.showMenuButton(node.identity, node.menuBuilder)
         rt.keyboardFocusVisible = true
         rt.requestFrame()
         return true
-    if ev.mods == 0 and ev.key in {platform.keyUp, platform.keyDown}:
+    if ev.mods == 0 and key in {platform.keyUp, platform.keyDown}:
       let owner = rt.context.owner
       if owner != nil and rt.focusSlot > 0 and
           rt.focusSlot < owner.nodes.len and
@@ -2917,14 +3029,14 @@ proc event(rt: Runtime; ev: platform.SurfaceEvent): bool =
         let stepHandler = owner.nodes[rt.focusSlot].accessStepHandler
         if stepHandler != nil:
           let step = owner.nodes[rt.focusSlot].accessStep
-          stepHandler(if ev.key == platform.keyUp: step else: -step)
+          stepHandler(if key == platform.keyUp: step else: -step)
           rt.keyboardFocusVisible = true
           rt.requestFrame()
           return true
-    if rt.textFieldKey(ev.key, ev.mods):
+    if rt.textFieldKey(key, ev.mods):
       return true
     var nextFocusSlot = rt.focusSlot
-    if rt.frameLayout.handleListKey(rt.focusSlot, ev.key, ev.mods,
+    if rt.frameLayout.handleListKey(rt.focusSlot, key, ev.mods,
         nextFocusSlot):
       if nextFocusSlot != rt.focusSlot:
         rt.focusSlot = nextFocusSlot
@@ -2932,30 +3044,30 @@ proc event(rt: Runtime; ev: platform.SurfaceEvent): bool =
       rt.keyboardFocusVisible = true
       rt.requestFrame()
       return true
-    if rt.handleFocusGroupKey(ev.key, ev.mods):
+    if rt.handleFocusGroupKey(key, ev.mods):
       return true
-    if ev.key in {platform.keyEnter, platform.keySpace} and
+    if key in {platform.keyEnter, platform.keySpace} and
         ev.mods == 0 and rt.focusSlot > 0 and
-        rt.frameLayout.keyboardActivationSlot(rt.focusSlot, ev.key):
+        rt.frameLayout.keyboardActivationSlot(rt.focusSlot, key):
       if not ev.repeat:
         rt.keyPressSlot = rt.focusSlot
-        rt.keyPressKey = ev.key
+        rt.keyPressKey = key
         rt.keyboardFocusVisible = true
         rt.refreshPointer()
         rt.requestFrame()
       return true
-    if ev.key == platform.keyEnter and rt.submitFocusedText(ev.mods):
+    if key == platform.keyEnter and rt.submitFocusedText(ev.mods):
       return true
-    if rt.runShortcutAction(ev.mods, ev.key):
+    if rt.runShortcutAction(ev.mods, key):
       return true
-    if ev.key == platform.keyEscape and
+    if key == platform.keyEscape and
         rt.context.owner.tooltips.shown != 0:
       rt.context.owner.tooltips.dismissed = rt.context.owner.tooltips.shown
       rt.requestFrame()
       return true
     var dx, dy, page: float32
     if ev.mods == 0:
-      case ev.key
+      case key
       of platform.keyDown: dy = 40
       of platform.keyUp: dy = -40
       of platform.keyRight: dx = 40
@@ -2967,16 +3079,16 @@ proc event(rt: Runtime; ev: platform.SurfaceEvent): bool =
       of platform.keyHome: dy = -1_000_000_000
       of platform.keyEnd: dy = 1_000_000_000
       else: discard
-    elif ev.mods == platform.modShift and ev.key == platform.keySpace:
+    elif ev.mods == platform.modShift and key == platform.keySpace:
       page = -1
-    elif ev.mods == platform.modSuper and ev.key == platform.keyHome:
+    elif ev.mods == platform.modSuper and key == platform.keyHome:
       dy = -1_000_000_000
-    elif ev.mods == platform.modSuper and ev.key == platform.keyEnd:
+    elif ev.mods == platform.modSuper and key == platform.keyEnd:
       dy = 1_000_000_000
     when defined(macosx):
-      if ev.mods == platform.modSuper and ev.key == platform.keyUp:
+      if ev.mods == platform.modSuper and key == platform.keyUp:
         dy = -1_000_000_000
-      elif ev.mods == platform.modSuper and ev.key == platform.keyDown:
+      elif ev.mods == platform.modSuper and key == platform.keyDown:
         dy = 1_000_000_000
     if (dx != 0 or dy != 0 or page != 0) and
         rt.frameLayout.scrollKey(rt.focusSlot, rt.pointerX, rt.pointerY,
@@ -2985,7 +3097,14 @@ proc event(rt: Runtime; ev: platform.SurfaceEvent): bool =
       return true
     false
   of platform.keyReleased:
-    if ev.key == rt.keyPressKey and rt.keyPressSlot > 0:
+    let key = rt.inputKeyUp(ev)
+    let slot = rt.focusedInputHandlerSlot()
+    if slot > 0 and rt.deliverInput(slot, InputEvent(
+        kind: InputKind.InputKeyUp, key: key,
+        physicalKey: ev.physicalKey, mods: ev.mods, repeat: ev.repeat)):
+      rt.keyboardFocusVisible = true
+      return true
+    if key == rt.keyPressKey and rt.keyPressSlot > 0:
       let slot = rt.keyPressSlot
       let activate = rt.focusSlot == slot and
         rt.frameLayout.keyboardActivationSlot(slot, rt.keyPressKey)
@@ -2999,11 +3118,25 @@ proc event(rt: Runtime; ev: platform.SurfaceEvent): bool =
       return true
     false
   of platform.surfaceCommand:
+    let slot = rt.focusedInputHandlerSlot()
+    if slot > 0:
+      var input = InputEvent(kind: InputKind.InputCommand, text: ev.text)
+      if rt.deliverInput(slot, input):
+        return true
+      if ev.text == "pasteAndMatchStyle":
+        input.text = "paste"
+        if rt.deliverInput(slot, input):
+          return true
     rt.textFieldCommand(ev.text)
   of platform.pointerScroll:
     rt.pointerX = scrollDelta(ev.x)
     rt.pointerY = scrollDelta(ev.y)
     rt.hasPointer = true
+    let handlerSlot = rt.frameLayout.inputHandlerAt(rt.pointerX, rt.pointerY)
+    if handlerSlot > 0 and rt.deliverInput(handlerSlot, InputEvent(
+        kind: InputKind.InputScroll, dx: scrollDelta(ev.dx),
+        dy: scrollDelta(ev.dy), mods: ev.mods, precise: ev.precise)):
+      return true
     var dx = scrollDelta(ev.dx)
     var dy = scrollDelta(ev.dy)
     if (ev.mods and platform.modShift) != 0 and dx == 0:
@@ -3016,6 +3149,11 @@ proc event(rt: Runtime; ev: platform.SurfaceEvent): bool =
   of platform.textInput:
     let adapter = rt.textInputAdapter
     if adapter == nil or adapter.inputTarget() == nil:
+      let inputSlot = rt.focusedInputHandlerSlot()
+      if inputSlot > 0 and rt.deliverInput(inputSlot, InputEvent(
+          kind: InputKind.InputText, text: ev.text)):
+        rt.keyboardFocusVisible = true
+        return true
       let owner = rt.frameLayout.owner
       if owner != nil and rt.focusSlot > 0 and
           rt.focusSlot < owner.nodes.len:
@@ -3039,6 +3177,11 @@ proc event(rt: Runtime; ev: platform.SurfaceEvent): bool =
   of platform.textComposition:
     let adapter = rt.textInputAdapter
     if adapter == nil or adapter.inputTarget() == nil:
+      let slot = rt.focusedInputHandlerSlot()
+      if slot > 0 and rt.deliverInput(slot, InputEvent(
+          kind: InputKind.InputCompose, text: ev.text, caret: ev.caret)):
+        rt.keyboardFocusVisible = true
+        return true
       return false
     when not defined(emscripten):
       if rt.lastTextInput.noInputMethod:
@@ -3071,8 +3214,21 @@ proc event(rt: Runtime; ev: platform.SurfaceEvent): bool =
     rt.pointerX = float32(ev.x)
     rt.pointerY = float32(ev.y)
     rt.hasPointer = true
+    if rt.inputPressCaptured:
+      let slot = int(rt.pressTarget.slot)
+      discard rt.deliverInput(slot, InputEvent(
+        kind: InputKind.InputPointerMove, button: rt.inputPressButton,
+        mods: ev.mods))
+      rt.refreshPointer()
+      return false
     rt.updatePointerDraggable()
     rt.refreshPointer()
+    if rt.pressTarget.owner == nil:
+      let handlerSlot = rt.frameLayout.inputHandlerAt(rt.pointerX,
+        rt.pointerY)
+      if handlerSlot > 0:
+        discard rt.deliverInput(handlerSlot, InputEvent(
+          kind: InputKind.InputPointerMove, button: -1, mods: ev.mods))
     if rt.localDrag != nil:
       rt.updateLocalDragTarget()
       rt.requestFrame()
@@ -3152,14 +3308,33 @@ proc event(rt: Runtime; ev: platform.SurfaceEvent): bool =
     false
   of platform.pointerDown:
     var contextClick = ev.button == 1
+    var inputAttempted = false
     when defined(macosx):
       if ev.button == 0 and (ev.mods and platform.modCtrl) != 0:
         contextClick = true
+    if ev.button != 0:
+      rt.pointerX = float32(ev.x)
+      rt.pointerY = float32(ev.y)
+      rt.hasPointer = true
+      let handlerSlot = rt.frameLayout.inputHandlerAt(rt.pointerX,
+        rt.pointerY)
+      inputAttempted = handlerSlot > 0
+      if handlerSlot > 0 and rt.captureInputPointerDown(handlerSlot,
+          ev.button, ev.mods, ev.clicks):
+        return true
     if contextClick:
       let previousHover = rt.hoverSlots
       rt.pointerX = float32(ev.x)
       rt.pointerY = float32(ev.y)
       rt.hasPointer = true
+      when defined(macosx):
+        if ev.button == 0:
+          let handlerSlot = rt.frameLayout.inputHandlerAt(rt.pointerX,
+            rt.pointerY)
+          inputAttempted = handlerSlot > 0
+          if handlerSlot > 0 and rt.captureInputPointerDown(handlerSlot,
+              ev.button, ev.mods, ev.clicks):
+            return true
       rt.refreshPointer()
       let target = rt.frameLayout.targetAt(rt.pointerX, rt.pointerY)
       if rt.showContextMenu(target, rt.pointerX, rt.pointerY) or
@@ -3199,6 +3374,15 @@ proc event(rt: Runtime; ev: platform.SurfaceEvent): bool =
     rt.dragCandidateIdentity = rt.dragCandidate(rt.pressTarget)
     rt.pressMods = ev.mods
     rt.pressHoverSlots = rt.frameLayout.slotsAt(rt.pointerX, rt.pointerY)
+    if not inputAttempted and rt.pressTarget.owner == rt.frameLayout.owner:
+      let targetSlot = int(rt.pressTarget.slot)
+      let handlerSlot = rt.frameLayout.inputHandlerSlot(targetSlot)
+      inputAttempted = handlerSlot > 0
+      if handlerSlot > 0:
+        rt.focusInputTarget(targetSlot)
+        if rt.captureInputPointerDown(handlerSlot, ev.button, ev.mods,
+            ev.clicks):
+          return true
     if rt.pressTarget.owner == rt.frameLayout.owner and
         rt.pressTarget.slot > 0 and
         int(rt.pressTarget.slot) < rt.frameLayout.owner.nodes.len:
@@ -3285,6 +3469,34 @@ proc event(rt: Runtime; ev: platform.SurfaceEvent): bool =
       rt.requestFrame()
     return rt.pressTarget.owner != nil
   of platform.pointerUp:
+    if rt.inputPressCaptured:
+      rt.pointerX = float32(ev.x)
+      rt.pointerY = float32(ev.y)
+      rt.hasPointer = true
+      let slot = int(rt.pressTarget.slot)
+      discard rt.deliverInput(slot, InputEvent(
+        kind: InputKind.InputPointerUp, button: ev.button,
+        clicks: max(ev.clicks, 1), mods: ev.mods))
+      if ev.button != rt.inputPressButton:
+        return false
+      rt.inputPressCaptured = false
+      var clicked = false
+      var clickedSlot = -1
+      if ev.button == 0:
+        clicked = rt.frameLayout.dispatchClick(rt.pressTarget,
+          rt.pointerX, rt.pointerY, rt.pressMods, clickedSlot)
+      rt.clickedSlots.setLen(0)
+      rt.doubleClickedSlots.setLen(0)
+      if clicked:
+        rt.clickedSlots.add(clickedSlot)
+        if ev.clicks >= 2:
+          rt.doubleClickedSlots.add(clickedSlot)
+      rt.pressTarget = Element()
+      rt.pressMods = 0
+      rt.pressHoverSlots.setLen(0)
+      rt.refreshPointer()
+      rt.requestFrame()
+      return clicked
     if ev.button != 0:
       return false
     rt.doubleClickedSlots.setLen(0)
@@ -3638,6 +3850,12 @@ proc event(rt: Runtime; ev: platform.SurfaceEvent): bool =
     rt.cancelGridReorder()
     rt.cancelTableReorder()
     rt.cancelKeyPress()
+    if rt.inputPressCaptured:
+      discard rt.deliverInput(int(rt.pressTarget.slot), InputEvent(
+        kind: InputKind.InputPointerUp, button: rt.inputPressButton,
+        clicks: 1, mods: rt.pressMods))
+      rt.inputPressCaptured = false
+    rt.byPosition.clear()
     rt.keyboardFocusVisible = false
     rt.surfaceFocused = false
     rt.context.owner.focusActive = false
@@ -3763,6 +3981,16 @@ proc event(rt: Runtime; ev: platform.SurfaceEvent): bool =
         discard rt.frameLayout.revealSlot(slot)
         rt.requestFrame()
         result = true
+    elif ev.action == platform.accessSelectText and ev.id > 0:
+      let slot = int(ev.id - 1)
+      let owner = rt.frameLayout.owner
+      if owner != nil and slot > 0 and slot < owner.nodes.len:
+        let handler = owner.nodes[slot].inputHandler
+        if handler != nil and not owner.effectivelyDisabled(slot) and
+            not owner.effectivelyToolbarCollapsed(slot):
+          result = rt.deliverInput(slot, InputEvent(
+            kind: InputKind.InputSelect, start: ev.`from`, `end`: ev.to))
+          rt.requestFrame()
     elif ev.action == platform.accessSetValue and ev.id > 0:
       let slot = int(ev.id - 1)
       let owner = rt.frameLayout.owner
@@ -3879,6 +4107,7 @@ method attachContent*(content: Content; conn: surface.Conn) =
   let rt = Runtime(conn: conn, view: content.view, context: newContext(),
                    focusSlot: -1, keyPressSlot: -1, surfaceFocused: true,
                    themeDirty: true,
+                   byPosition: initHashSet[platform.Key](),
                    focusGroupLast: initTable[uint64, uint64](),
                    modalFocusReturns: initTable[uint64, uint64]())
   rt.context.owner.focusActive = true

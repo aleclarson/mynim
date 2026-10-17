@@ -51,6 +51,36 @@ type
   Rect* = object ## A rectangle in device independent pixels.
     x*, y*, w*, h*: float32
 
+  InputKind* {.pure.} = enum ## The kind of input an element can handle.
+    InputKeyDown,     ## A key was pressed.
+    InputKeyUp,       ## A key was released.
+    InputText,        ## Text was typed or committed by an input method.
+    InputCompose,     ## An input method updated its marked text.
+    InputCommand,     ## A menu editing command, such as `paste`.
+    InputPointerDown, ## A pointer button was pressed.
+    InputPointerUp,   ## A pointer button was released.
+    InputPointerMove, ## The pointer moved over or was captured by the element.
+    InputScroll,      ## A scroll input occurred over the element.
+    InputSelect       ## Assistive technology selected text by rune range.
+
+  InputEvent* = object ## Input delivered to an element's `handleInput` callback.
+    kind*: InputKind ## The input kind.
+    key*: platform.Key ## The logical key for a key down or up event.
+    physicalKey*: platform.Key ## The key's ANSI US keyboard position, if known.
+    mods*: platform.Modifiers ## Modifier keys held during the event.
+    repeat*: bool ## Whether a key down repeats.
+    text*: string ## Text, composition, or command payload.
+    caret*: int ## Composition caret offset in runes.
+    x*: float32 ## Pointer position relative to the element's box.
+    y*: float32 ## Pointer position relative to the element's box.
+    button*: int ## Pointer button: 0 primary, 1 secondary, 2 middle; -1 on hover.
+    clicks*: int ## Click count for pointer down or up.
+    dx*: float32 ## Scroll distance along the element's local X axis.
+    dy*: float32 ## Scroll distance along the element's local Y axis.
+    precise*: bool ## Whether scroll deltas are precise pixel-like values.
+    start*: int ## Start rune for an assistive text selection.
+    `end`*: int ## End rune for an assistive text selection.
+
   Fit* {.pure.} = enum ## How an image fills its element.
     Contain ## Scales inside the element and keeps aspect ratio.
     Cover ## Covers the element and crops the excess.

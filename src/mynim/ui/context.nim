@@ -540,6 +540,7 @@ type
     textAreaParagraphs: int
     textAreaLine: int
     clickHandler: proc(mods: platform.Modifiers) {.closure.}
+    inputHandler: proc(ev: InputEvent): bool {.closure.}
     drawFn: proc(painter: var Painter; rect: Rect) {.closure.}
     menuBuilder: proc(menu: Menu) {.closure.}
     contextMenuBuilder: proc(menu: Menu) {.closure.}
