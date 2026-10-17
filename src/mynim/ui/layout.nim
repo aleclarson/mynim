@@ -1618,6 +1618,7 @@ proc retarget(channel: var ScalarAnimation; target: float64;
   channel.target = target
   channel.moving = true
   channel.jumped = false
+  channel.restedGeneration = 0
   if animation.duration > DurationZero:
     channel.curve = true
     channel.fromValue = channel.value
@@ -1754,10 +1755,13 @@ proc keyframes*(e: Element; key: string; frames: openArray[Keyframe];
   elif owner.reduceMotion:
     sequence.value = sequence.finalValue()
     sequence.done = true
+    sequence.restedGeneration = owner.generation
   else:
     let sampled = sequence.sample(owner.frameNow)
     sequence.value = sampled.value
     sequence.done = sampled.done
+    if sequence.done:
+      sequence.restedGeneration = owner.generation
     owner.animating = owner.animating or not sequence.done
   sequence.generation = owner.generation
   sequences[key] = sequence
@@ -2082,7 +2086,9 @@ proc update(channel: var ScalarAnimation; owner: ElementOwner; target: float64;
       initialized: true)
     return target
 
+  let moving = channel.moving or channel.pending
   if owner.reduceMotion and respectReduceMotion:
+    let arrived = channel.moving or channel.pending or channel.value != target
     channel.value = target
     channel.velocity = 0
     channel.fromValue = target
@@ -2091,6 +2097,8 @@ proc update(channel: var ScalarAnimation; owner: ElementOwner; target: float64;
     channel.moving = false
     channel.pending = false
     channel.jumped = false
+    if arrived:
+      channel.restedGeneration = owner.generation
   else:
     channel.advance(owner.frameNow)
     if target != channel.goal() and animation.delay > DurationZero:
@@ -2099,6 +2107,7 @@ proc update(channel: var ScalarAnimation; owner: ElementOwner; target: float64;
       channel.pendingAt = owner.frameNow + animation.delay
       channel.pendingAnimation = animation
       channel.pendingAnimation.delay = DurationZero
+      channel.restedGeneration = 0
     elif target != channel.goal():
       channel.pending = false
       channel.retarget(target, animation, owner.frameNow)
@@ -2109,7 +2118,10 @@ proc update(channel: var ScalarAnimation; owner: ElementOwner; target: float64;
       channel.stiffness = physics.stiffness
       channel.damping = physics.damping
       channel.precision = physics.precision
-    owner.animating = owner.animating or channel.moving or channel.pending
+    if channel.moving or channel.pending:
+      owner.animating = true
+    elif moving:
+      channel.restedGeneration = owner.generation
 
   channel.generation = owner.generation
   channel.value
@@ -2222,6 +2234,7 @@ proc jump*(e: Element; key: string; value: float32): float32 =
     channel.jumped = true
     channel.at = owner.frameNow
   channel.generation = owner.generation
+  channel.restedGeneration = 0
   channels[key] = channel
   owner.animations[node.identity] = channels
   value
@@ -2235,7 +2248,7 @@ proc velocity*(e: Element; key: string): float32 =
   float32(channels.getOrDefault(key).velocity)
 
 proc settled*(e: Element; key: string): bool =
-  ## Reports whether a keyed scalar animation or keyframe sequence is at rest.
+  ## Reports whether keyed animation, color, keyframe, or timeline state is at rest.
   let node = e.node
   if node == nil:
     return true
@@ -2259,6 +2272,25 @@ proc settled*(e: Element; key: string): bool =
   let channels = e.owner.animations.getOrDefault(node.identity)
   let channel = channels.getOrDefault(key)
   not channel.initialized or (not channel.moving and not channel.pending)
+
+proc arrived*(e: Element; key: string): bool =
+  ## Reports whether a keyed animation reached rest in this build.
+  let node = e.node
+  if node == nil:
+    return false
+  let generation = e.owner.generation
+  let channels = e.owner.animations.getOrDefault(node.identity)
+  if channels.getOrDefault(key).restedGeneration == generation:
+    return true
+  let motions = e.owner.colorMotions.getOrDefault(node.identity)
+  if motions.getOrDefault(key).progress.restedGeneration == generation:
+    return true
+  let sequences = e.owner.keyframes.getOrDefault(node.identity)
+  if sequences.getOrDefault(key).restedGeneration == generation:
+    return true
+  let timelines = e.owner.timelines.getOrDefault(node.identity)
+  let timelineState = timelines.getOrDefault(key)
+  timelineState != nil and timelineState.restedGeneration == generation
 
 proc alignFormLabels(nodes: var seq[ElementNode]) =
   var widths = initTable[int, float32]()

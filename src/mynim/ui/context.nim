@@ -123,7 +123,7 @@ type
     mass, stiffness, damping, precision: float64
     pendingTarget: float64
     pendingAnimation: Animation
-    generation: uint32
+    generation, restedGeneration: uint32
     initialized, moving, curve, pending, jumped: bool
 
   ScalarSequence = object
@@ -131,7 +131,7 @@ type
     options: KeyframeOptions
     startAt: MonoTime
     fromValue, value: float32
-    generation: uint32
+    generation, restedGeneration: uint32
     initialized, done: bool
 
   TimelineSegment = object
