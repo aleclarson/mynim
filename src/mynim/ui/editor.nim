@@ -945,6 +945,48 @@ proc joinSelectedLines(state: State) =
   let edit = Edit(start: firstStart, pastLast: blockEnd, text: joined)
   state.applyEditorEdits(snapshot, selection, afterSelection, @[edit])
 
+proc lineIncreasesIndent(state: State; snapshot: Snapshot; lineIndex: int;
+                         line: string): bool =
+  let language = state.buffer.language
+  if language == nil:
+    return
+  let trimmedEnd = line.trailingSpaceStart()
+  if trimmedEnd == 0:
+    return
+  for pair in language.brackets:
+    if pair.open.len == 0 or pair.open == "<" or
+        trimmedEnd < pair.open.len or
+        line[trimmedEnd - pair.open.len ..< trimmedEnd] != pair.open:
+      continue
+    let column = trimmedEnd - pair.open.len
+    if state.tokenKindAt(snapshot, language, lineIndex, column) notin
+        {syntax.tokenString, syntax.tokenComment}:
+      return true
+  if language.name == "Python" and line[trimmedEnd - 1] == ':' and
+      state.tokenKindAt(snapshot, language, lineIndex, trimmedEnd - 1) notin
+        {syntax.tokenString, syntax.tokenComment}:
+    return true
+
+proc insertLineAround(state: State; above: bool) =
+  state.ensureState()
+  if state.readOnly:
+    return
+  let snapshot = state.buffer.snapshot()
+  let selection = state.caretSelection
+  let span = snapshot.selectedLineSpan(selection)
+  let lineIndex = if above: span.first else: span.last
+  let line = snapshot.line(lineIndex)
+  var indent = line.leadingIndent()
+  if not above and state.lineIncreasesIndent(snapshot, lineIndex, line):
+    indent.add(state.buffer.language.indentationUnit())
+  let at = if above: snapshot.lineStart(lineIndex)
+    else: snapshot.lineEnd(lineIndex)
+  let insertion = if above: indent & "\n" else: "\n" & indent
+  let caret = at + (if above: indent.len else: insertion.len)
+  let edit = Edit(start: at, pastLast: at, text: insertion)
+  let afterSelection = Selection(anchor: caret, head: caret)
+  state.applyEditorEdits(snapshot, selection, afterSelection, @[edit])
+
 proc indentSelection(state: State; outdent: bool) =
   state.ensureState()
   if state.readOnly:
@@ -1226,6 +1268,11 @@ proc view*(c: ui.Context; state: State): ui.Element =
       return true
     if key.key == platform.keyJ and key.mods == platform.modCtrl:
       state.joinSelectedLines()
+      return true
+    if key.key == platform.keyEnter and
+        (key.mods == commandModifier or
+        key.mods == (commandModifier or platform.modShift)):
+      state.insertLineAround((key.mods and platform.modShift) != 0)
       return true
     if key.key in {platform.keyUp, platform.keyDown}:
       if key.mods == platform.modAlt:

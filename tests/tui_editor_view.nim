@@ -288,6 +288,21 @@ doAssert lineKey(blankJoin, 0, blankJoin.len, platform.keyJ,
   joinModifier) == "a b"
 doAssert editorState.selection() == editor.Selection(anchor: 0, head: 3)
 doAssert lineKey("a\nb", 2, 2, platform.keyJ, joinModifier) == "a\nb"
+doAssert lineKey("  value", 3, 3, platform.keyEnter,
+  deleteModifier) == "  value\n  "
+doAssert editorState.cursor() == "  value\n  ".len
+doAssert editorState.undo()
+doAssert $editorState.buffer == "  value"
+doAssert lineKey("  value", 3, 3, platform.keyEnter,
+  deleteModifier or platform.modShift) == "  \n  value"
+doAssert editorState.cursor() == 2
+let goBlock = "func main() {"
+doAssert lineKey(goBlock, goBlock.len, goBlock.len, platform.keyEnter,
+  deleteModifier) == "func main() {\n\t"
+let pythonBlock = "def f():"
+editorState.buffer.setLanguage(editor.languageNamed("python"))
+doAssert lineKey(pythonBlock, pythonBlock.len, pythonBlock.len,
+  platform.keyEnter, deleteModifier) == "def f():\n    "
 
 win.destroy()
 loop.shutdown()
