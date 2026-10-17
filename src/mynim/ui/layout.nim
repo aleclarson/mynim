@@ -2528,6 +2528,7 @@ proc targetAt(layout: LayoutResult; x, y: float32): Element =
       else:
         orderIndex
     if slot > 0 and layout.owner.inActiveModalScope(slot) and
+        not layout.owner.effectivelyInert(slot) and
         not layout.owner.effectivelyToolbarCollapsed(slot) and
         not layout.pointerTransparent(slot) and
         layout.containsPointer(slot, x, y) and

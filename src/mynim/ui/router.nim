@@ -7,11 +7,26 @@ type
     layouts: seq[int]
     viewIdentity, focusIdentity: uint64
 
+  RouteViewState = ref object
+    shown, leaving: RouteEntry
+    shownPageIdentity, containerIdentity: uint64
+    direction: int
+    focusing, announcing, resetProgress: bool
+
+  Transition* {.pure.} = enum
+    Auto ## Slide deeper or back; fade across pages and when motion is reduced.
+    Fade ## Fade the incoming page.
+    None ## Replace pages immediately.
+
   Router* = ref object
     entries: seq[RouteEntry]
     at: int
     identity, nextPageIdentity: uint64
-    pendingPageFocus, pendingAnnouncement: bool
+    views: Table[uint64, RouteViewState]
+    transitionMode: Transition
+    transitionAnimation: Animation
+    hasTransitionAnimation: bool
+    pendingPageFocus: bool
     onChanged: proc() {.closure.}
 
   RouteParam = tuple[name, value: string]
@@ -30,6 +45,7 @@ var nextRouterIdentity = 0'u64
 
 proc changed(router: Router)
 proc sharePages(entry: RouteEntry; previous: RouteEntry; location: string)
+proc pruneViews(router: Router)
 
 func isHexDigitChar(c: char): bool =
   c in {'0'..'9', 'a'..'f', 'A'..'F'}
@@ -169,9 +185,41 @@ proc replace*(router: Router; target: string)
 proc newRouter*(initialPath = "/"): Router =
   ## Creates a URL history showing initialPath.
   new(result)
+  result.views = initTable[uint64, RouteViewState]()
   inc nextRouterIdentity
   result.identity = nextRouterIdentity
   result.replace(initialPath)
+
+func transition*(router: Router): Transition =
+  ## Returns how this Router replaces pages. The default is Transition.Auto.
+  if router == nil: Transition.Auto else: router.transitionMode
+
+proc transition*(router: Router; value: Transition) =
+  ## Sets how this Router replaces pages.
+  if router == nil or router.transitionMode == value:
+    return
+  router.transitionMode = value
+  router.changed()
+
+proc animation*(router: Router; value: Animation) =
+  ## Sets the animation used for page transitions.
+  if router == nil:
+    return
+  value.validateAnimation()
+  router.transitionAnimation = value
+  router.hasTransitionAnimation = true
+  router.changed()
+
+proc clearAnimation*(router: Router) =
+  ## Restores the default 150 ms fade and 250 ms slide animations.
+  if router == nil or not router.hasTransitionAnimation:
+    return
+  router.hasTransitionAnimation = false
+  router.changed()
+
+func hasAnimation*(router: Router): bool =
+  ## Reports whether this Router has a custom page transition animation.
+  router != nil and router.hasTransitionAnimation
 
 proc route*(router: Router): Route =
   ## Returns a route for the current location, for matching path patterns.
@@ -269,6 +317,7 @@ proc push*(router: Router; target: string) =
     let excess = router.entries.len - routerHistoryLimit
     router.entries = router.entries[excess..^1]
   router.at = router.entries.high
+  router.pruneViews()
   router.changed()
 
 proc replace*(router: Router; target: string) =
@@ -290,6 +339,7 @@ proc replace*(router: Router; target: string) =
     if segmentsOf(resolved.location) == segmentsOf(previous.location):
       entry.title = previous.title
     router.entries[router.at] = entry
+    router.pruneViews()
     router.changed()
 
 proc go*(router: Router; distance: int) =
@@ -352,6 +402,20 @@ proc sharePages(entry: RouteEntry; previous: RouteEntry; location: string) =
       break
     entry.pages.add(previous.pages[level])
     entry.layouts.add(prefixLength)
+
+proc pruneViews(router: Router) =
+  if router == nil:
+    return
+  var activeScopes = initHashSet[uint64]()
+  for entry in router.entries:
+    for page in entry.pages:
+      activeScopes.incl(page)
+  var stale: seq[uint64]
+  for scope in router.views.keys:
+    if scope != 0 and scope notin activeScopes:
+      stale.add(scope)
+  for scope in stale:
+    router.views.del(scope)
 
 proc pageIdentity(router: Router; entry: RouteEntry; level: int): uint64 =
   while entry.pages.len <= level:

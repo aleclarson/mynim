@@ -364,7 +364,7 @@ type
     dialogDismissed: bool
     tabStopSet, tabStop: bool
     noInputMethod: bool
-    formContainer, formField, formLabel, accessHidden, disabled,
+    formContainer, formField, formLabel, accessHidden, disabled, inert,
       invalid, tooltipEnabled, tooltipOverlay, passThrough: bool
     popoverAnchor: bool
     focusOrientation: FocusOrientation
@@ -1084,7 +1084,16 @@ proc effectivelyDisabled(owner: ElementOwner; slot: int): bool =
     return true
   var current = slot
   while current > 0 and current < owner.nodes.len:
-    if owner.nodes[current].disabled:
+    if owner.nodes[current].disabled or owner.nodes[current].inert:
+      return true
+    current = int(owner.nodes[current].parent)
+
+proc effectivelyInert(owner: ElementOwner; slot: int): bool =
+  if owner == nil or slot <= 0 or slot >= owner.nodes.len:
+    return false
+  var current = slot
+  while current > 0 and current < owner.nodes.len:
+    if owner.nodes[current].inert:
       return true
     current = int(owner.nodes[current].parent)
 

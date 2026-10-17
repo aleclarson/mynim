@@ -572,7 +572,8 @@ proc accessibilityTree(layout: LayoutResult;
     index = -1
   for slot in 1..<owner.nodes.len:
     let node = owner.nodes[slot]
-    if node.accessHidden or not owner.inActiveModalScope(slot) or
+    if node.accessHidden or owner.effectivelyInert(slot) or
+        not owner.inActiveModalScope(slot) or
         owner.effectivelyToolbarCollapsed(slot):
       continue
     let isDisabled = owner.effectivelyDisabled(slot)
