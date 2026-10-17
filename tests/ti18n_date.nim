@@ -4,6 +4,27 @@ import mynim/i18n as i18n
 
 let date = dateTime(2026, mOct, 5, zone = utc())
 
+proc eastFiveFromTime(time: Time): ZonedTime =
+  ZonedTime(time: time, utcOffset: -5 * 60 * 60, isDst: false)
+
+proc eastFiveFromAdjTime(time: Time): ZonedTime =
+  ZonedTime(time: time + initDuration(hours = -5),
+    utcOffset: -5 * 60 * 60, isDst: false)
+
+proc eastFiveThirtyFromTime(time: Time): ZonedTime =
+  ZonedTime(time: time, utcOffset: -(5 * 60 + 30) * 60, isDst: false)
+
+proc eastFiveThirtyFromAdjTime(time: Time): ZonedTime =
+  ZonedTime(time: time + initDuration(minutes = -(5 * 60 + 30)),
+    utcOffset: -(5 * 60 + 30) * 60, isDst: false)
+
+proc westFourFromTime(time: Time): ZonedTime =
+  ZonedTime(time: time, utcOffset: 4 * 60 * 60, isDst: false)
+
+proc westFourFromAdjTime(time: Time): ZonedTime =
+  ZonedTime(time: time + initDuration(hours = 4),
+    utcOffset: 4 * 60 * 60, isDst: false)
+
 block date_skeletons:
   let usShort = i18n.formatDate("en-US", date,
     i18n.DateOptions(skeleton: "yMd"))
@@ -27,6 +48,53 @@ block best_fit_skeletons:
   let morning = dateTime(2026, mOct, 5, 7, 4, zone = utc())
   doAssert i18n.formatDate("en-US", morning,
     i18n.DateOptions(skeleton: "yMMMdHm")) == "Oct 5, 2026, 07:04"
+
+block date_time_styles:
+  let morning = dateTime(2026, mOct, 5, 7, 4, 9, zone = utc())
+  let easternZone = newTimezone("Test/EastFive", eastFiveFromTime,
+    eastFiveFromAdjTime)
+  let eastern = dateTime(2026, mOct, 5, 7, 4, 9, zone = easternZone)
+  let halfHourZone = newTimezone("Test/EastFiveThirty",
+    eastFiveThirtyFromTime, eastFiveThirtyFromAdjTime)
+  let westZone = newTimezone("Test/WestFour", westFourFromTime,
+    westFourFromAdjTime)
+  doAssert i18n.formatDate("en-US", morning,
+    i18n.DateOptions(dateStyle: i18n.dateStyleShort)) == "10/5/26"
+  doAssert i18n.formatDate("en-US", morning,
+    i18n.DateOptions(dateStyle: i18n.dateStyleShort,
+      skeleton: "yMMMMd")) == "10/5/26"
+  doAssert i18n.formatDate("en-US", morning,
+    i18n.DateOptions(dateStyle: i18n.dateStyleFull)) ==
+    "Monday, October 5, 2026"
+  doAssert i18n.formatDate("en-US", morning,
+    i18n.DateOptions(timeStyle: i18n.dateStyleMedium)) == "7:04:09 AM"
+  doAssert i18n.formatDate("en-US", morning,
+    i18n.DateOptions(timeStyle: i18n.dateStyleShort,
+      hourCycle: 24)) == "07:04"
+  doAssert i18n.formatDate("en-US", morning,
+    i18n.DateOptions(timeStyle: i18n.dateStyleLong)) == "7:04:09 AM UTC"
+  doAssert i18n.formatDate("en-US", morning,
+    i18n.DateOptions(timeStyle: i18n.dateStyleFull)) ==
+    "7:04:09 AM Coordinated Universal Time"
+  doAssert i18n.formatDate("en-US", eastern,
+    i18n.DateOptions(timeStyle: i18n.dateStyleLong)) == "7:04:09 AM GMT+5"
+  doAssert i18n.formatDate("en-US", eastern,
+    i18n.DateOptions(timeStyle: i18n.dateStyleFull)) == "7:04:09 AM GMT+05:00"
+  doAssert i18n.formatDate("en-US", dateTime(2026, mOct, 5, 7, 4, 9,
+      zone = halfHourZone),
+    i18n.DateOptions(timeStyle: i18n.dateStyleFull)) ==
+    "7:04:09 AM GMT+05:30"
+  doAssert i18n.formatDate("en-US", dateTime(2026, mOct, 5, 7, 4, 9,
+      zone = westZone),
+    i18n.DateOptions(timeStyle: i18n.dateStyleFull)) == "7:04:09 AM GMT-04:00"
+  doAssert i18n.formatDate("en-US", morning,
+    i18n.DateOptions(dateStyle: i18n.dateStyleFull,
+      timeStyle: i18n.dateStyleShort)) ==
+    "Monday, October 5, 2026 at 7:04 AM"
+  doAssert i18n.formatDate("en-US", morning,
+    i18n.DateOptions(dateStyle: i18n.dateStyleFull,
+      timeStyle: i18n.dateStyleShort, hourCycle: 24)) ==
+    "Monday, October 5, 2026 at 07:04"
 
 block localized_names:
   doAssert i18n.months("en", i18n.nameAbbreviated)[0] == "Jan"

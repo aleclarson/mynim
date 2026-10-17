@@ -7,7 +7,7 @@
 ## parsing, choice evaluation, number styles, date/time styles, and the
 ## en-XA/ar-XB pseudo locales are supported, along with runtime catalog
 ## lookup and locale fallback. Date skeletons use best-fit CLDR patterns;
-## week-based years, fractional seconds, and localized time-zone names remain
+## week-based years, fractional seconds, and other ICU date fields remain
 ## open, as do TypeScript catalog accessors.
 
 import std/[strutils, tables, times, atomics, unicode, math, json, algorithm,
@@ -27,13 +27,20 @@ type
     ## The width of a localized month, weekday, or day-period name.
     nameWide, nameAbbreviated, nameShort, nameNarrow
 
+  DateStyle* = enum ## A CLDR date or time pattern length.
+    dateStyleNone ## Leave this component out; skeletons apply when both are unset.
+    dateStyleShort ## Numeric dates and short times.
+    dateStyleMedium ## Abbreviated dates and times with seconds.
+    dateStyleLong ## Written month names and long times.
+    dateStyleFull ## Weekday names and full times.
+
   DateOptions* = object
     ## Options for localized Gregorian date formatting.
-    skeleton*: string
-      ## CLDR fields in any order. Common forms include "yMd", "yMMMM",
-      ## and "yMMMMd"; the closest CLDR skeleton pattern is selected.
-    hourCycle*: int
-      ## 12 or 24 to override the locale's hour cycle for hour fields.
+    dateStyle*: DateStyle ## Style of the date component, if any.
+    timeStyle*: DateStyle ## Style of the time component, if any.
+    skeleton*: string ## CLDR fields used when both styles are unset, in any
+                       ## order, such as "yMd", "yMMMMd", or "jm".
+    hourCycle*: int ## 12 or 24 to override the locale's hour cycle.
 
   NumberOptions* = object
     ## Options for localized decimal and percent formatting.
@@ -860,6 +867,52 @@ proc dateNumber(value, minDigits: int;
     else:
       result.add ch
 
+proc dateZone(data: int; value: DateTime; field: char; width: int;
+              digits: array[10, string]): string =
+  var offset = -value.utcOffset
+  let long = width >= 4
+  let zoneName = if value.timezone.isNil: "" else: value.timezone.name
+  if field in {'z', 'v'} and offset == 0 and zoneName in ["UTC", "Etc/UTC"]:
+    return dateSlot(data, if long: 189 else: 190)
+  if offset == 0:
+    result = dateSlot(data, 187)
+    return if result == "": "GMT" else: result
+  var hourFormat = dateSlot(data, 188)
+  if hourFormat == "": hourFormat = "+HH:mm;-HH:mm"
+  let separator = hourFormat.find(';')
+  if separator >= 0:
+    hourFormat = if offset < 0: hourFormat[separator + 1 .. ^1]
+      else: hourFormat[0 ..< separator]
+  if offset < 0: offset = -offset
+  let hours = offset div 3600
+  let minutes = offset mod 3600 div 60
+  let hourDigits = if long: 2 else: 1
+  if not long and minutes == 0:
+    let minuteIndex = hourFormat.find("mm")
+    if minuteIndex >= 0:
+      let hourIndex = hourFormat[0..<minuteIndex].rfind('H')
+      if hourIndex >= 0:
+        hourFormat = hourFormat[0..hourIndex]
+  var offsetText = ""
+  var index = 0
+  while index < hourFormat.len:
+    if hourFormat[index] == 'H':
+      var past = index + 1
+      while past < hourFormat.len and hourFormat[past] == 'H':
+        inc past
+      offsetText.add dateNumber(hours, hourDigits, digits)
+      index = past
+    elif index + 1 < hourFormat.len and hourFormat[index] == 'm' and
+        hourFormat[index + 1] == 'm':
+      offsetText.add dateNumber(minutes, 2, digits)
+      index += 2
+    else:
+      offsetText.add hourFormat[index]
+      inc index
+  var pattern = dateSlot(data, 186)
+  if pattern == "": pattern = "GMT{0}"
+  pattern.replace("{0}", offsetText)
+
 proc dateField(locale: string; data: int; value: DateTime; field: char;
                width: int; digits: array[10, string]): string =
   case field
@@ -908,6 +961,7 @@ proc dateField(locale: string; data: int; value: DateTime; field: char;
     width, digits)
   of 'm': return dateNumber(value.minute, width, digits)
   of 's': return dateNumber(value.second, width, digits)
+  of 'z', 'v': return dateZone(data, value, field, width, digits)
   else:
     result = repeat(field, width)
 
@@ -955,6 +1009,7 @@ type
     types: array[DatePatternField, int]
     chars: array[DatePatternField, char]
     widths: array[DatePatternField, int]
+    addedDayPeriod: bool
 
   DatePatternCandidate = object
     pattern: string
@@ -1058,10 +1113,12 @@ proc newDateSkeleton(value: string): DateSkeleton =
   let hour = result.chars[dpfHour]
   if hour in {'h', 'K'} and result.types[dpfDayPeriod] == 0:
     result.addDatePatternField('a', 1)
+    result.addedDayPeriod = true
   elif hour in {'H', 'k'}:
     result.types[dpfDayPeriod] = 0
     result.chars[dpfDayPeriod] = '\0'
     result.widths[dpfDayPeriod] = 0
+    result.addedDayPeriod = false
 
 proc dateFieldMask(skeleton: DateSkeleton): int =
   for field in DatePatternField:
@@ -1206,6 +1263,12 @@ proc bestAppendingDatePattern(data: int; request: DateSkeleton; mask: int;
     result.add " " & adjustedDatePattern(next.candidate.pattern,
       next.candidate, request, defaultHour)
 
+proc datePatternSkeleton(skeleton: DateSkeleton): string =
+  for field in DatePatternField:
+    if skeleton.types[field] != 0 and not
+        (field == dpfDayPeriod and skeleton.addedDayPeriod):
+      result.add repeat(skeleton.chars[field], skeleton.widths[field])
+
 proc generatedDatePattern(data: int; skeleton: string; hour,
                           defaultHour: char): string =
   let request = newDateSkeleton(skeleton)
@@ -1233,7 +1296,42 @@ proc generatedDatePattern(data: int; skeleton: string; hour,
   if glue == "": glue = "{1} {0}"
   replaceDateHours(glue.replace("{1}", date).replace("{0}", time), hour)
 
+proc dateStyleIndex(style: DateStyle): int =
+  case style
+  of dateStyleFull: 0
+  of dateStyleLong: 1
+  of dateStyleMedium: 2
+  of dateStyleShort, dateStyleNone: 3
+
+proc styledDatePattern(data: int; options: DateOptions): string =
+  let dateStyle = options.dateStyle
+  let timeStyle = options.timeStyle
+  if dateStyle == dateStyleNone:
+    return dateSlot(data, 174 + dateStyleIndex(timeStyle))
+  let date = dateSlot(data, 170 + dateStyleIndex(dateStyle))
+  if timeStyle == dateStyleNone:
+    return date
+  let time = dateSlot(data, 174 + dateStyleIndex(timeStyle))
+  let index = dateStyleIndex(dateStyle)
+  var glue = dateSlot(data, 182 + index)
+  if glue == "": glue = dateSlot(data, 178 + index)
+  if glue == "": glue = "{1} {0}"
+  glue.replace("{1}", date).replace("{0}", time)
+
 proc datePattern(locale: string; data: int; options: DateOptions): string =
+  if options.dateStyle != dateStyleNone or options.timeStyle != dateStyleNone:
+    let pattern = styledDatePattern(data, options)
+    if options.timeStyle == dateStyleNone:
+      return pattern
+    let defaultHour = preferredHourSymbol(locale)
+    let hour = if options.hourCycle == 12: 'h'
+      elif options.hourCycle == 24: 'H' else: defaultHour
+    let skeleton = newDateSkeleton(pattern)
+    if skeleton.chars[dpfHour] == '\0' or skeleton.chars[dpfHour] == hour:
+      return pattern
+    let sourceHour = skeleton.chars[dpfHour]
+    let adjusted = datePatternSkeleton(skeleton).replace($sourceHour, $hour)
+    return generatedDatePattern(data, adjusted, hour, defaultHour)
   var skeleton = options.skeleton
   if skeleton == "": skeleton = "yMd"
   let defaultHour = preferredHourSymbol(locale)
@@ -1254,8 +1352,9 @@ proc datePattern(locale: string; data: int; options: DateOptions): string =
 proc formatDate*(locale: string; value: DateTime;
                  options = DateOptions()): string =
   ## Formats a Gregorian date using CLDR names, patterns, and digits.
-  ## The closest available CLDR skeleton pattern is adjusted to the requested
-  ## field widths; missing date and time fields are composed from CLDR patterns.
+  ## Date and time styles take precedence; otherwise the closest available
+  ## skeleton pattern is adjusted to the requested fields. UTC uses CLDR names;
+  ## other time zones use localized GMT offsets.
   let data = formatLocaleIndex(locale)
   let digits = localizedDigits(locale, data)
   let pattern = datePattern(locale, data, options)
@@ -1289,12 +1388,12 @@ proc formatMessageNumber(locale, value, style: string;
   let options = icuNumberOptions(style)
   formatNumberDecimal(locale, value, options, exact)
 
-proc dateStyleIndex(style: string): int =
+proc dateStyleFromName(style: string): DateStyle =
   case style
-  of "full": 0
-  of "long": 1
-  of "short": 3
-  else: 2
+  of "full": dateStyleFull
+  of "long": dateStyleLong
+  of "short": dateStyleShort
+  else: dateStyleMedium
 
 proc formatMessageDate(locale: string; value: DateTime; kind, style: string):
     string =
@@ -1305,17 +1404,14 @@ proc formatMessageDate(locale: string; value: DateTime; kind, style: string):
     pattern = datePattern(locale, data,
       DateOptions(skeleton: style[2 .. ^1].strip()))
   elif kind == "date":
-    pattern = dateSlot(data, 170 + dateStyleIndex(style))
+    pattern = styledDatePattern(data,
+      DateOptions(dateStyle: dateStyleFromName(style)))
   elif kind == "time":
-    pattern = dateSlot(data, 174 + dateStyleIndex(style))
+    pattern = styledDatePattern(data,
+      DateOptions(timeStyle: dateStyleFromName(style)))
   else:
-    let dateIndex = dateStyleIndex("short")
-    let datePattern = dateSlot(data, 170 + dateIndex)
-    let timePattern = dateSlot(data, 174 + dateIndex)
-    pattern = dateSlot(data, 182 + dateIndex)
-    if pattern == "": pattern = dateSlot(data, 178 + dateIndex)
-    if pattern == "": pattern = "{1} {0}"
-    pattern = pattern.replace("{1}", datePattern).replace("{0}", timePattern)
+    pattern = styledDatePattern(data, DateOptions(
+      dateStyle: dateStyleShort, timeStyle: dateStyleShort))
   formatPattern(locale, data, value, pattern, digits).replace("\u202f", " ")
 
 proc formatInteger*(locale: string; value: int; minDigits = 1): string =
