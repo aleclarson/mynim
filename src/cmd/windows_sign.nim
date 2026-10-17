@@ -207,3 +207,26 @@ proc signWindowsBuild*(projectDir, stage, executable: string;
           signWindowsFile(projectDir, config, path)
       else:
         discard
+
+proc signUninstallerCommand*(file: string): int =
+  ## Hidden NSIS callback used while compiling a signed installer.
+  let settings = getEnv("MYNIM_WINDOWS_SIGN_SETTINGS")
+  if settings.len == 0:
+    stderr.writeLine("nim-xplat: missing Windows uninstaller signing settings")
+    return 2
+  try:
+    let value = parseJson(settings)
+    if value.kind != JObject or not value.hasKey("projectDir") or
+        value["projectDir"].kind != JString:
+      raise newException(ValueError, "invalid uninstaller signing settings")
+    var config = newJObject()
+    config["windows"] = if value.hasKey("windows"):
+      value["windows"] else: newJObject()
+    if not signingEnabled(config):
+      raise newException(ValueError,
+        "uninstaller signing settings contain no Windows signing method")
+    signWindowsFile(value["projectDir"].getStr(), config, file)
+    return 0
+  except CatchableError as error:
+    stderr.writeLine("nim-xplat: could not sign Windows uninstaller: " & error.msg)
+    return 1

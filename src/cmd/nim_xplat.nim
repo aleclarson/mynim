@@ -12,6 +12,7 @@ import ./migrate_ui
 import ./skills
 import ./testing
 import ./vet
+import ./windows_sign as windowsSign
 
 const
   version = "0.1.0"
@@ -89,6 +90,11 @@ proc run(args: seq[string]): int =
     if args.len > 1:
       return runMigrateUI(args[1 .. ^1])
     return runMigrateUI(@[])
+  of "sign-uninstaller":
+    if args.len != 2:
+      stderr.writeLine("nim-xplat: sign-uninstaller expects one file path")
+      return 2
+    return windowsSign.signUninstallerCommand(args[1])
   of "test":
     return runTest(if args.len > 1: args[1 .. ^1] else: @[])
   else:

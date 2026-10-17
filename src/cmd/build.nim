@@ -13,11 +13,13 @@ when hostOS == "linux":
   import ./linux_install_script as linuxInstallScript
 when hostOS == "windows":
   import ./windows_sign as windowsSign
+  import ./windows_installer as windowsInstaller
 
 const usageBuild = """Usage: nim-xplat build [flags] [dir]
 
-Build a native project for this machine. Linux builds also include a tar.gz
-archive, a Debian package, and an install.sh script.
+Build a native project for this machine. Windows builds include a per-user
+Setup installer. Linux builds also include a tar.gz archive, a Debian package,
+and an install.sh script.
 
 Flags:
   -o path             output directory (default: out from mygo.json, or dist)
@@ -436,6 +438,8 @@ proc runBuild*(args: seq[string]): int =
         removeDir(cache)
     when hostOS == "linux":
       var linuxEntries: seq[string]
+    when hostOS == "windows":
+      var windowsPayload: seq[string]
 
     when hostOS == "macosx":
       let bundleName = slug(name) & ".app"
@@ -478,6 +482,7 @@ proc runBuild*(args: seq[string]): int =
         config)
       when hostOS == "windows":
         windowsSign.signWindowsBuild(projectDir, stage, executable, config)
+        windowsPayload = windowsInstaller.stageFiles(stage)
       when hostOS == "linux":
         discard linuxPackage.writeLinuxDesktop(projectDir, stage, name,
           executable, config)
@@ -502,6 +507,9 @@ proc runBuild*(args: seq[string]): int =
     else:
       discard updateArtifacts.writeUpdateArtifacts(config, projectDir, stage,
         name, version, targetName)
+      when hostOS == "windows":
+        discard windowsInstaller.writeWindowsInstaller(projectDir, stage, name,
+          identifier, version, executable, targetArch, config, windowsPayload)
     let targetDir = outputRoot / targetName
     replaceBuildDir(stage, targetDir, outputRoot)
     stdout.writeLine("Built " & name & " for " & hostPlatform & " at " &
