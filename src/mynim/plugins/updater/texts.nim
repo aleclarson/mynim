@@ -4,6 +4,7 @@
 import std/[algorithm, strutils, tables]
 
 import mynim/plugins/updater/frontend as frontend
+import mynim/plugins/updater/markdown as markdown
 
 type
   Strings* = object
@@ -703,3 +704,75 @@ proc megabytes*(text: Text; bytes: int64): string =
   if text.decimalComma:
     number = number.replace('.', ',')
   formatStrings(text.strings.megabytes, [number])
+
+proc okButtons*(text: Text): seq[frontend.Button] =
+  @[frontend.Button(action: frontend.Ok, label: text.strings.ok,
+    default: true, cancel: true)]
+
+proc cancelButtons*(text: Text; disabled: bool): seq[frontend.Button] =
+  @[frontend.Button(action: frontend.Cancel, label: text.strings.cancel,
+    cancel: true, disabled: disabled)]
+
+proc checkingView*(text: Text): frontend.View =
+  frontend.View(title: text.strings.checking, bar: true, progress: -1,
+    buttons: text.cancelButtons(false))
+
+proc upToDateView*(text: Text; appName, version: string): frontend.View =
+  frontend.View(title: text.strings.upToDate,
+    message: formatStrings(text.strings.upToDateMessage, [appName, version]),
+    buttons: text.okButtons())
+
+proc unavailableView*(text: Text; appName: string;
+                      developmentBuild: bool): frontend.View =
+  let message = if developmentBuild:
+      text.strings.developmentBuild
+    else:
+      formatStrings(text.strings.unavailableMessage, [appName])
+  frontend.View(title: text.strings.unavailable, message: message,
+    buttons: text.okButtons())
+
+proc errorView*(text: Text; message: string;
+                error: ref CatchableError): frontend.View =
+  frontend.View(title: text.strings.error, message: message,
+    detail: if error == nil: "" else: error.msg,
+    buttons: text.okButtons())
+
+proc availableView*(text: Text; appName, version, currentVersion,
+                    releaseNotes: string;
+                    automaticDownloads: bool): frontend.View =
+  let notes = markdown.parse(releaseNotes)
+  frontend.View(release: notes.len > 0,
+    title: formatStrings(text.strings.available, [appName]),
+    message: formatStrings(text.strings.availableMessage,
+      [appName, version, currentVersion]),
+    notes: notes, checkbox: true, checked: automaticDownloads,
+    buttons: @[
+      frontend.Button(action: frontend.Skip, label: text.strings.skip,
+        aside: true),
+      frontend.Button(action: frontend.Later, label: text.strings.remindLater,
+        cancel: true),
+      frontend.Button(action: frontend.Install, label: text.strings.install,
+        default: true)
+    ])
+
+proc downloadingView*(text: Text; downloaded, total: int64): frontend.View =
+  result = frontend.View(title: text.strings.downloading, bar: true,
+    progress: -1, buttons: text.cancelButtons(false))
+  if total > 0:
+    result.progress = float64(downloaded) / float64(total)
+    result.message = formatStrings(text.strings.progress,
+      [text.megabytes(downloaded), text.megabytes(total)])
+
+proc installingView*(text: Text): frontend.View =
+  frontend.View(title: text.strings.installing, bar: true, progress: -1,
+    buttons: text.cancelButtons(true))
+
+proc readyView*(text: Text; appName, version: string): frontend.View =
+  frontend.View(title: text.strings.ready,
+    message: formatStrings(text.strings.readyMessage, [appName, version]),
+    buttons: @[
+      frontend.Button(action: frontend.Later, label: text.strings.later,
+        cancel: true),
+      frontend.Button(action: frontend.Relaunch, label: text.strings.relaunch,
+        default: true)
+    ])
