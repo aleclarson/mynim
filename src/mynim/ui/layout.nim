@@ -8,6 +8,8 @@ const
   MaxGridOccupiedCells = 1_048_576
   transitionXKey = "\x00mynim.transition.x"
   transitionYKey = "\x00mynim.transition.y"
+  transitionWidthKey = "\x00mynim.transition.width"
+  transitionHeightKey = "\x00mynim.transition.height"
   transitionBackgroundKey = "\x00mynim.transition.background"
   transitionBorderKey = "\x00mynim.transition.border"
 
@@ -90,16 +92,19 @@ proc shapeText(nodes: var seq[ElementNode]) =
       keepSpaces: true, noWrap: node.textNoWrap,
       spans: node.textSpanStyles))
 
-proc shapeTextToBounds(nodes: var seq[ElementNode]; rects: seq[Rect]): bool =
+proc shapeTextToBounds(nodes: var seq[ElementNode]; rects: seq[Rect];
+                       firstSlot = 0; lastSlot = -1): bool =
   let system = textStack.shared()
-  for slot, node in nodes.mpairs:
-    if not node.hasText or node.textInline:
+  let last = if lastSlot < 0: nodes.high else: min(lastSlot, nodes.high)
+  for slot in firstSlot .. last:
+    var node = addr nodes[slot]
+    if not node[].hasText or node[].textInline:
       continue
-    let width = max(rects[slot].w - node.contentInsetX, 0'f32)
-    if width > 0 and node.shapedText.params.width != width:
-      var params = node.shapedText.params
+    let width = max(rects[slot].w - node[].contentInsetX, 0'f32)
+    if width > 0 and node[].shapedText.params.width != width:
+      var params = node[].shapedText.params
       params.width = width
-      node.shapedText = system.layout(params)
+      node[].shapedText = system.layout(params)
       result = true
 
 proc finiteUi(value: float32): bool =
@@ -547,12 +552,16 @@ proc measureGrid(nodes: seq[ElementNode]; natural: seq[NaturalSize];
   scratch.values.setLen(valuesFirst)
 
 proc measureTree(nodes: seq[ElementNode]; natural: var seq[NaturalSize];
-                 scratch: var GridScratch; constraints: seq[Rect] = @[]): bool =
+                 scratch: var GridScratch; constraints: seq[Rect] = @[];
+                 firstSlot = 0; lastSlot = -1): bool =
   natural.setLen(nodes.len)
   if nodes.len == 0:
     return
+  let last = if lastSlot < 0: nodes.high else: min(lastSlot, nodes.high)
+  if firstSlot > last:
+    return
 
-  for slot in countdown(nodes.high, 0):
+  for slot in countdown(last, firstSlot):
     let previous = natural[slot]
     let node = nodes[slot]
     var contentW, contentH: float32
@@ -2239,15 +2248,20 @@ proc transitionAnimation(value: ElementTransition): Animation =
   result.validateAnimation()
 
 proc transitionMovesPosition(value: ElementTransition): bool =
-  (not value.position and not value.colors) or value.position
+  (not value.position and not value.size and not value.colors) or
+    value.position
+
+proc transitionMovesSize(value: ElementTransition): bool =
+  (not value.position and not value.size and not value.colors) or value.size
 
 proc transitionMovesColors(value: ElementTransition): bool =
-  (not value.position and not value.colors) or value.colors
+  (not value.position and not value.size and not value.colors) or value.colors
 
 proc transition*(element: Element;
                  value: ElementTransition): Element =
-  ## Animates this element's position and background/border colors as layouts
-  ## change. Elements need a stable key or sibling position between builds.
+  ## Animates this element's position, size, and background/border colors as
+  ## layouts change. Size changes reflow descendants at the sampled bounds.
+  ## Elements need a stable key or sibling position between builds.
   result = element
   let node = element.node
   if node == nil:
@@ -2272,6 +2286,11 @@ proc transitioning*(element: Element): bool =
     let value = node[].elementTransition
     if value.transitionMovesPosition:
       for key in [transitionXKey, transitionYKey]:
+        let channel = channels.getOrDefault(key)
+        if channel.moving or channel.pending:
+          return true
+    if value.transitionMovesSize:
+      for key in [transitionWidthKey, transitionHeightKey]:
         let channel = channels.getOrDefault(key)
         if channel.moving or channel.pending:
           return true
@@ -2686,6 +2705,86 @@ proc transitionLocalPosition(nodes: seq[ElementNode]; rects: seq[Rect];
       if follow.scrollX and follow.scrollState != nil:
         result.x += follow.physicalScrollX(follow.scrollState)
 
+proc transitionSubtreeEnd(nodes: seq[ElementNode]; root: int): int =
+  result = root
+  var slot = root
+  while true:
+    let child = int(nodes[slot].firstChild)
+    if child >= 0:
+      slot = child
+      result = slot
+      continue
+    while slot != root and nodes[slot].nextSibling < 0:
+      slot = int(nodes[slot].parent)
+    if slot == root:
+      break
+    slot = int(nodes[slot].nextSibling)
+    result = slot
+
+proc shiftTransitionSubtree(nodes: seq[ElementNode]; rects: var seq[Rect];
+                             root: int) =
+  var pending: seq[int]
+  var child = int(nodes[root].firstChild)
+  while child >= 0:
+    pending.add(child)
+    child = int(nodes[child].nextSibling)
+  while pending.len > 0:
+    let slot = pending.pop()
+    var parent = int(nodes[slot].parent)
+    while parent >= root:
+      let node = nodes[parent]
+      if node.scrollState != nil:
+        if node.scrollX:
+          rects[slot].x -= node.physicalScrollX(node.scrollState)
+        if node.scrollY:
+          rects[slot].y -= node.scrollState.offsetY
+      if node.hasFollowScroll:
+        let followSlot = int(node.followScrollSlot)
+        if followSlot >= 0 and followSlot < nodes.len:
+          let follow = nodes[followSlot]
+          if follow.scrollX and follow.scrollState != nil:
+            rects[slot].x -= follow.physicalScrollX(follow.scrollState)
+      parent = int(node.parent)
+    child = int(nodes[slot].firstChild)
+    while child >= 0:
+      pending.add(child)
+      child = int(nodes[child].nextSibling)
+
+proc relayoutTransitionSubtree(c: Context; layout: var LayoutResult;
+                                slot: int) =
+  let bounds = layout.rects[slot]
+  let last = transitionSubtreeEnd(c.owner.nodes, slot)
+  discard shapeTextToBounds(c.owner.nodes, layout.rects, slot, last)
+  discard measureTree(c.owner.nodes, c.owner.natural, c.owner.gridScratch,
+    layout.rects, slot, last)
+  c.owner.flexSlots.setLen(0)
+  c.owner.flexLines.setLen(0)
+  c.owner.gridScratch.items.setLen(0)
+  c.owner.gridScratch.occupied.setLen(0)
+  c.owner.gridScratch.contributions.setLen(0)
+  c.owner.gridScratch.values.setLen(0)
+  var stable = false
+  for attempt in 0..2:
+    placeNode(c.owner.nodes, c.owner.natural, layout.rects,
+      c.owner.flexSizes, c.owner.flexBases, c.owner.flexMin,
+      c.owner.flexMax, c.owner.flexFactors, c.owner.flexSlots,
+      c.owner.flexLines, c.owner.gridScratch, slot, bounds)
+    let textChanged = shapeTextToBounds(c.owner.nodes, layout.rects, slot, last)
+    let sizesChanged = measureTree(c.owner.nodes, c.owner.natural,
+      c.owner.gridScratch, layout.rects, slot, last)
+    if not textChanged and not sizesChanged:
+      stable = true
+      break
+  if not stable:
+    placeNode(c.owner.nodes, c.owner.natural, layout.rects,
+      c.owner.flexSizes, c.owner.flexBases, c.owner.flexMin,
+      c.owner.flexMax, c.owner.flexFactors, c.owner.flexSlots,
+      c.owner.flexLines, c.owner.gridScratch, slot, bounds)
+  shiftTransitionSubtree(c.owner.nodes, layout.rects, slot)
+  alignFormLabelBaselines(c.owner.nodes, layout.rects)
+  alignSplitHandles(c.owner.nodes, layout.rects)
+  placeInlineText(c.owner.nodes, layout.rects)
+
 proc layoutAt(c: Context; bounds: Rect; now: MonoTime;
               reduceMotion: bool): LayoutResult =
   ## Lays out the latest completed build inside bounds.
@@ -2946,6 +3045,36 @@ proc layoutAt(c: Context; bounds: Rect; now: MonoTime;
       let offsetY = shownY - target.y
       if offsetX != 0 or offsetY != 0:
         node[].transitionTransform = translation(offsetX, offsetY)
+    if value.transitionMovesSize:
+      let targetWidth = result.rects[slot].w
+      let targetHeight = result.rects[slot].h
+      var channels = c.owner.animations.mgetOrPut(node[].identity,
+        initTable[string, ScalarAnimation]())
+      var widthChannel = channels.getOrDefault(transitionWidthKey)
+      var heightChannel = channels.getOrDefault(transitionHeightKey)
+      let shownWidth = if transitionResized:
+          widthChannel = ScalarAnimation(value: float64(targetWidth),
+            fromValue: float64(targetWidth), target: float64(targetWidth),
+            at: now, generation: c.owner.generation, initialized: true)
+          targetWidth
+        else:
+          float32(widthChannel.update(c.owner, float64(targetWidth),
+            animation, respectReduceMotion = true))
+      let shownHeight = if transitionResized:
+          heightChannel = ScalarAnimation(value: float64(targetHeight),
+            fromValue: float64(targetHeight), target: float64(targetHeight),
+            at: now, generation: c.owner.generation, initialized: true)
+          targetHeight
+        else:
+          float32(heightChannel.update(c.owner, float64(targetHeight),
+            animation, respectReduceMotion = true))
+      channels[transitionWidthKey] = widthChannel
+      channels[transitionHeightKey] = heightChannel
+      c.owner.animations[node[].identity] = channels
+      if shownWidth != targetWidth or shownHeight != targetHeight:
+        result.rects[slot].w = max(shownWidth, 0'f32)
+        result.rects[slot].h = max(shownHeight, 0'f32)
+        c.relayoutTransitionSubtree(result, slot)
     if value.transitionMovesColors:
       node[].background = c.owner.animateColor(node[].identity,
         transitionBackgroundKey, node[].background, animation)

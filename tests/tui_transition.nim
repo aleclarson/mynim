@@ -81,6 +81,68 @@ block scrolling_does_not_retarget_element_position:
   let (second, foundSecond) = tester.find("second row")
   doAssert foundSecond and abs(second.y - 10) < 0.01
 
+block size_transition_reflows_descendants:
+  var width = 40'f32
+  var reportsMoving = false
+  let motion = ui.ElementTransition(
+    duration: initDuration(milliseconds = 800), ease: ui.linear,
+    size: true)
+  let tester = ui.newTester(proc(ctx: ui.Context) =
+    reportsMoving = false
+    let panel = ctx.row().absolute().left(0).top(0).size(width, 80)
+      .wrap().label("transition size panel")
+    discard panel.transition(motion)
+    reportsMoving = panel.transitioning
+    discard panel.children(proc() =
+      discard ctx.box().size(30, 20).shrink(0).label("size first item")
+      discard ctx.box().size(30, 20).shrink(0).label("size second item")
+    )
+  , 120, 100)
+  defer: tester.close()
+
+  let (beforePanel, foundBeforePanel) = tester.find("transition size panel")
+  let (beforeSecond, foundBeforeSecond) = tester.find("size second item")
+  doAssert foundBeforePanel and abs(beforePanel.w - 40) < 0.01
+  doAssert foundBeforeSecond and beforeSecond.y > 0
+
+  width = 80
+  tester.frame()
+  sleep(500)
+  tester.frame()
+  let (movingPanel, foundMovingPanel) = tester.find("transition size panel")
+  let (movingSecond, foundMovingSecond) = tester.find("size second item")
+  doAssert foundMovingPanel and movingPanel.w > 60 and movingPanel.w < 80
+  doAssert foundMovingSecond and abs(movingSecond.y) < 0.01
+  doAssert reportsMoving
+  sleep(350)
+  tester.frame()
+  tester.frame()
+  doAssert not reportsMoving
+
+block size_transition_rewraps_text:
+  var width = 30'f32
+  let motion = ui.ElementTransition(
+    duration: initDuration(milliseconds = 800), ease: ui.linear,
+    size: true)
+  let tester = ui.newTester(proc(ctx: ui.Context) =
+    let panel = ctx.column().absolute().left(0).top(0).size(width, 160)
+    discard panel.transition(motion)
+    discard panel.children(proc() =
+      discard ctx.text("alpha beta gamma delta epsilon zeta eta theta iota kappa")
+        .label("transition size text")
+    )
+  , 140, 180)
+  defer: tester.close()
+
+  let (before, foundBefore) = tester.find("transition size text")
+  doAssert foundBefore and before.h > 20
+  width = 100
+  tester.frame()
+  sleep(500)
+  tester.frame()
+  let (moving, foundMoving) = tester.find("transition size text")
+  doAssert foundMoving and moving.h < before.h
+
 block transition_colors_mix_without_reading_pixels:
   let context = ui.newContext()
   var background = ui.rgba(0, 0, 255, 1)
