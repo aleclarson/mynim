@@ -6,7 +6,7 @@
 ## use CLDR data. Message/number formatting and full date pattern matching
 ## are still being ported.
 
-import std/[strutils, tables, times, atomics, unicode]
+import std/[strutils, tables, times, atomics, unicode, math]
 import ./i18n/cldr_regions as cldr
 import ./i18n/cldr_format_data as formatData
 import ./i18n/message as messageFormat
@@ -24,6 +24,19 @@ type
       ## and "yMMMMd"; exact CLDR skeleton patterns are used when present.
     hourCycle*: int
       ## 12 or 24 to override the locale's hour cycle for hour fields.
+
+  NumberOptions* = object
+    ## Options for localized decimal and percent formatting.
+    percent*: bool
+      ## Multiplies by 100 and uses the locale's percent pattern.
+    integer*: bool
+      ## Rounds to an integer, using half-even rounding when requested by ICU.
+    minFractionDigits*: int
+    maxFractionDigits*: int
+      ## A zero maximum selects the locale pattern's default.
+    minIntegerDigits*: int
+    noGrouping*: bool
+    halfEven*: bool
 
   Region* = object
     ## How a reader writes dates, times and numbers: the regional
@@ -393,6 +406,312 @@ proc dateSlot(locale, slot: int): string =
 proc numberSlot(locale, slot: int): string =
   formatSlot(formatData.numberEntries, formatData.numberStarts,
     formatData.numberStrings, locale, slot)
+
+type
+  NumberPattern = object
+    prefix, suffix, negativePrefix, negativeSuffix: string
+    primaryGroup, secondaryGroup: int
+    minimumInteger, minimumFraction, maximumFraction: int
+
+  NumberSystem = object
+    digits: array[10, string]
+    latin: bool
+    decimalSeparator, groupSeparator, minusSign, plusSign, percentSign: string
+    infinity, nan: string
+    minimumGrouping: int
+    decimal, percent: NumberPattern
+
+proc numberAffix(text: string; system: NumberSystem): string =
+  var i = 0
+  var quoted = false
+  while i < text.len:
+    if text[i] == '\'':
+      if i + 1 < text.len and text[i + 1] == '\'':
+        result.add '\''
+        i += 2
+      else:
+        quoted = not quoted
+        inc i
+    elif quoted:
+      let size = text.runeLenAt(i)
+      result.add text[i ..< i + size]
+      i += size
+    else:
+      case text[i]
+      of '%':
+        result.add system.percentSign
+        inc i
+      of '-':
+        result.add system.minusSign
+        inc i
+      of '+':
+        result.add system.plusSign
+        inc i
+      else:
+        let size = text.runeLenAt(i)
+        result.add text[i ..< i + size]
+        i += size
+
+proc splitNumberPattern(text: string; system: NumberSystem):
+    tuple[prefix, number, suffix: string] =
+  var first = -1
+  var past = -1
+  var quoted = false
+  var i = 0
+  while i < text.len:
+    let ch = text[i]
+    if ch == '\'':
+      if i + 1 < text.len and text[i + 1] == '\'':
+        i += 2
+        continue
+      quoted = not quoted
+    elif not quoted and ch in {'#', '0', ',', '.', '@'}:
+      if first < 0: first = i
+      past = i + 1
+    inc i
+  if first < 0:
+    return (numberAffix(text, system), "", "")
+  (numberAffix(text[0 ..< first], system), text[first ..< past],
+    numberAffix(text[past .. ^1], system))
+
+proc parseNumberPattern(text: string; system: NumberSystem): NumberPattern =
+  let splitAt = text.find(';')
+  let positive = if splitAt < 0: text else: text[0 ..< splitAt]
+  let negative = if splitAt < 0: "" else: text[splitAt + 1 .. ^1]
+  let parts = splitNumberPattern(positive, system)
+  result.prefix = parts.prefix
+  result.suffix = parts.suffix
+  let negativeParts = if negative.len > 0:
+      splitNumberPattern(negative, system)
+    else:
+      (prefix: system.minusSign & result.prefix, number: parts.number,
+        suffix: result.suffix)
+  result.negativePrefix = negativeParts.prefix
+  result.negativeSuffix = negativeParts.suffix
+  let decimal = parts.number.find('.')
+  let integerPart = if decimal < 0: parts.number else: parts.number[0 ..< decimal]
+  let fractionPart = if decimal < 0: "" else: parts.number[decimal + 1 .. ^1]
+  result.minimumFraction = fractionPart.count('0')
+  result.maximumFraction = fractionPart.len
+  let lastGroup = integerPart.rfind(',')
+  if lastGroup >= 0:
+    result.primaryGroup = integerPart.len - lastGroup - 1
+    result.secondaryGroup = result.primaryGroup
+    let previousGroup = integerPart[0 ..< lastGroup].rfind(',')
+    if previousGroup >= 0:
+      result.secondaryGroup = lastGroup - previousGroup - 1
+  result.minimumInteger = integerPart.count('0')
+
+proc numberSystem(locale: string; data: int): NumberSystem =
+  var base = 191
+  if unicodeKey(locale, "nu") == "latn" and numberSlot(data, 202) != "":
+    base = 202
+  var digitText = numberSlot(data, base)
+  if digitText == "": digitText = "0123456789"
+  var digitIndex = 0
+  for rune in digitText.runes:
+    if digitIndex < result.digits.len:
+      result.digits[digitIndex] = toUTF8(rune)
+    inc digitIndex
+  if digitIndex != result.digits.len:
+    for i in 0 ..< result.digits.len:
+      result.digits[i] = $(char(ord('0') + i))
+  result.latin = digitText == "0123456789"
+  result.decimalSeparator = numberSlot(data, base + 1)
+  result.groupSeparator = numberSlot(data, base + 2)
+  result.minusSign = numberSlot(data, base + 3)
+  result.plusSign = numberSlot(data, base + 4)
+  result.percentSign = numberSlot(data, base + 5)
+  result.infinity = numberSlot(data, base + 7)
+  result.nan = numberSlot(data, base + 8)
+  if result.decimalSeparator == "": result.decimalSeparator = "."
+  if result.groupSeparator == "": result.groupSeparator = ","
+  if result.minusSign == "": result.minusSign = "-"
+  if result.plusSign == "": result.plusSign = "+"
+  if result.percentSign == "": result.percentSign = "%"
+  if result.infinity == "": result.infinity = "∞"
+  if result.nan == "": result.nan = "NaN"
+  result.minimumGrouping = 1
+  try:
+    let parsed = parseInt(numberSlot(data, 213))
+    if parsed > 0: result.minimumGrouping = parsed
+  except ValueError:
+    discard
+  var decimalPattern = numberSlot(data, base + 9)
+  var percentPattern = numberSlot(data, base + 10)
+  if decimalPattern == "": decimalPattern = "#,##0.###"
+  if percentPattern == "": percentPattern = "#,##0%"
+  result.decimal = parseNumberPattern(decimalPattern, result)
+  result.percent = parseNumberPattern(percentPattern, result)
+
+proc decimalParts(value: string): tuple[negative: bool, integer, fraction: string] =
+  var value = value
+  if value.startsWith("-"):
+    result.negative = true
+    value = value[1 .. ^1]
+  elif value.startsWith("+"):
+    value = value[1 .. ^1]
+  let point = value.find('.')
+  result.integer = if point < 0: value else: value[0 ..< point]
+  result.fraction = if point < 0: "" else: value[point + 1 .. ^1]
+  result.integer = result.integer.strip(leading = true, trailing = false,
+    chars = {'0'})
+  if result.integer.len == 0: result.integer = "0"
+
+proc validDecimal(value: string): bool =
+  if value.len == 0: return false
+  var start = if value[0] in {'-', '+'}: 1 else: 0
+  if start >= value.len: return false
+  var point = false
+  var digits = 0
+  for i in start ..< value.len:
+    let ch = value[i]
+    if ch in {'0'..'9'}:
+      inc digits
+    elif ch == '.' and not point and i > start and i < value.high:
+      point = true
+    else:
+      return false
+  digits > 0
+
+proc roundFraction(integer, fraction: string; maximum: int;
+    halfEven: bool): tuple[integer, fraction: string] =
+  if fraction.len <= maximum:
+    return (integer, fraction)
+  result.integer = integer
+  result.fraction = fraction[0 ..< maximum]
+  let dropped = fraction[maximum .. ^1]
+  let first = dropped[0]
+  var roundUp = first > '5'
+  if first == '5':
+    let laterNonzero = dropped.len > 1 and dropped[1 .. ^1].strip(chars = {'0'}).len > 0
+    if laterNonzero or not halfEven:
+      roundUp = true
+    else:
+      let previous = if result.fraction.len > 0: result.fraction[^1]
+        else: result.integer[^1]
+      roundUp = (ord(previous) - ord('0')) mod 2 != 0
+  if not roundUp: return
+  var digits = result.integer & result.fraction
+  var i = digits.high
+  while i >= 0 and digits[i] == '9':
+    digits[i] = '0'
+    dec i
+  if i < 0:
+    digits = "1" & digits
+  else:
+    inc digits[i]
+  let integerLength = digits.len - result.fraction.len
+  result.integer = digits[0 ..< integerLength]
+  result.fraction = if result.fraction.len == 0: ""
+    else: digits[integerLength .. ^1]
+
+proc writeNumberDigits(system: NumberSystem; digits: string): string =
+  if system.latin: return digits
+  for ch in digits:
+    if ch in {'0'..'9'}:
+      result.add system.digits[ord(ch) - ord('0')]
+    else:
+      result.add ch
+
+proc writeGroupedInteger(system: NumberSystem; pattern: NumberPattern;
+    integer: string; options: NumberOptions): string =
+  var integer = integer
+  let minimum = max(pattern.minimumInteger, options.minIntegerDigits)
+  if integer.len < minimum:
+    integer = repeat('0', minimum - integer.len) & integer
+  let primary = pattern.primaryGroup
+  let secondary = max(1, pattern.secondaryGroup)
+  if options.noGrouping or primary <= 0 or
+      integer.len < primary + system.minimumGrouping:
+    return writeNumberDigits(system, integer)
+  var first = (integer.len - primary) mod secondary
+  if first == 0: first = secondary
+  var position = 0
+  var width = first
+  while position < integer.len:
+    result.add writeNumberDigits(system, integer[position ..< position + width])
+    position += width
+    if position < integer.len:
+      result.add system.groupSeparator
+    if integer.len - position == primary:
+      width = primary
+    else:
+      width = secondary
+
+proc formatNumberDecimal(locale, value, style: string;
+    options: NumberOptions; exact = false): string =
+  let decimalValue = value.strip()
+  if not validDecimal(decimalValue): return value
+  let data = formatLocaleIndex(locale)
+  let system = numberSystem(locale, data)
+  var selected = if options.percent: system.percent else: system.decimal
+  var minFraction = max(0, options.minFractionDigits)
+  var maxFraction = options.maxFractionDigits
+  if options.integer:
+    minFraction = 0
+    maxFraction = 0
+  elif maxFraction <= 0 and minFraction == 0:
+    maxFraction = selected.maximumFraction
+  if maxFraction < minFraction: maxFraction = minFraction
+  if exact and style.len == 0 and options.minFractionDigits == 0 and
+      options.maxFractionDigits == 0 and not options.percent and
+      not options.integer:
+    let point = decimalValue.find('.')
+    let digits = if point < 0: 0 else: decimalValue.len - point - 1
+    minFraction = min(digits, 100)
+    maxFraction = min(digits, 100)
+  var parts = decimalParts(decimalValue)
+  if options.percent:
+    var shift = 2
+    while shift > 0 and parts.fraction.len > 0:
+      parts.integer.add parts.fraction[0]
+      parts.fraction = parts.fraction[1 .. ^1]
+      dec shift
+    if shift > 0: parts.integer.add repeat('0', shift)
+    parts.integer = parts.integer.strip(leading = true, trailing = false,
+      chars = {'0'})
+    if parts.integer.len == 0: parts.integer = "0"
+  let rounded = roundFraction(parts.integer, parts.fraction, maxFraction,
+    options.halfEven)
+  parts.integer = rounded.integer
+  parts.fraction = rounded.fraction
+  while parts.fraction.len > minFraction and parts.fraction[^1] == '0':
+    parts.fraction.setLen(parts.fraction.len - 1)
+  while parts.fraction.len < minFraction:
+    parts.fraction.add '0'
+  result = if parts.negative: selected.negativePrefix else: selected.prefix
+  result.add writeGroupedInteger(system, selected, parts.integer, options)
+  if parts.fraction.len > 0:
+    result.add system.decimalSeparator
+    result.add writeNumberDigits(system, parts.fraction)
+  result.add if parts.negative: selected.negativeSuffix else: selected.suffix
+
+proc formatNumber*(locale: string; value: string;
+    options = NumberOptions()): string =
+  ## Formats a decimal string with CLDR number symbols. Decimal strings
+  ## keep their written fraction digits unless the options round them.
+  formatNumberDecimal(locale, value, "", options, exact = true)
+
+proc formatNumber*[T: SomeInteger](locale: string; value: T;
+    options = NumberOptions()): string =
+  formatNumberDecimal(locale, $value, "", options)
+
+proc formatNumber*[T: SomeFloat](locale: string; value: T;
+    options = NumberOptions()): string =
+  if classify(value) == fcNan:
+    let system = numberSystem(locale, formatLocaleIndex(locale))
+    let pattern = if options.percent: system.percent else: system.decimal
+    return pattern.prefix & system.nan & pattern.suffix
+  if classify(value) in {fcInf, fcNegInf}:
+    let system = numberSystem(locale, formatLocaleIndex(locale))
+    let pattern = if options.percent: system.percent else: system.decimal
+    return if classify(value) == fcNegInf:
+        pattern.negativePrefix & system.infinity & pattern.negativeSuffix
+      else: pattern.prefix & system.infinity & pattern.suffix
+  var decimal = formatFloat(float64(value), ffDecimal, -1)
+  if decimal.endsWith("."): decimal.setLen(decimal.len - 1)
+  formatNumberDecimal(locale, decimal, "", options)
 
 proc monthWidthIndex(width: NameWidth): int =
   case width
