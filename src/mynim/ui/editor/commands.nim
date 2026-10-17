@@ -80,6 +80,7 @@ proc defaultBindings*(): seq[Binding] =
       command: Command.indent),
     Binding(mods: commandMod, key: ui.keyBracketLeft,
       command: Command.outdent),
+    Binding(mods: commandMod, key: ui.keyA, command: Command.selectAll),
     Binding(mods: commandMod, key: ui.keyL, command: Command.selectLine),
     Binding(mods: commandMod, key: ui.keySlash,
       command: Command.toggleComment),

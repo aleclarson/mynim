@@ -364,12 +364,19 @@ doAssert native.frame()
 doAssert editorState.selectedText() == "two",
   "the second key should run the chord command"
 
+editorState.bindings.setLen(0)
+editorState.select(0, 0)
+doAssert native.send(platform.SurfaceEvent(kind: platform.keyPressed,
+  key: platform.keyA, mods: deleteModifier))
+doAssert native.frame()
+doAssert editorState.selectedText() == "one\ntwo",
+  "the platform select-all binding should select the document"
+
 editorState.readOnly = true
 editorState.select(0, 0)
 doAssert not editorState.run(editor.Command.deleteLine)
 doAssert $editorState.buffer == "one\ntwo"
 editorState.readOnly = false
-editorState.bindings.setLen(0)
 
 win.destroy()
 loop.shutdown()

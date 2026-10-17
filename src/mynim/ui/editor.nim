@@ -1299,6 +1299,8 @@ proc run*(state: State; command: Command): bool =
     state.toggleBlockComment()
   of Command.selectLine:
     state.selectCurrentLines()
+  of Command.selectAll:
+    state.select(0, state.buffer.len())
   else:
     return false
   result = state.buffer.version() != beforeVersion or
