@@ -1417,6 +1417,29 @@ proc deleteByCommand(state: State; command: Command): bool =
   state.insert("")
   true
 
+proc transposeAtCaret(state: State): bool =
+  let snapshot = state.buffer.snapshot()
+  let selection = state.caretSelection
+  if not selection.empty():
+    return false
+  var at = snapshot.document.runeOffsetAtByte(selection.head)
+  let line = snapshot.document.lineAt(at)
+  let range = snapshot.document.lineRange(line)
+  if at == range.`end`:
+    at = snapshot.graphemeMove(at, -1)
+  let first = snapshot.graphemeMove(at, -1)
+  let pastLast = snapshot.graphemeMove(at, 1)
+  if first >= at or pastLast <= at or first < range.start:
+    return false
+  let firstByte = snapshot.document.byteOffset(first)
+  let atByte = snapshot.document.byteOffset(at)
+  let pastByte = snapshot.document.byteOffset(pastLast)
+  let edit = Edit(start: firstByte, pastLast: pastByte,
+    text: snapshot.slice(atByte, pastByte) & snapshot.slice(firstByte, atByte))
+  let afterSelection = Selection(anchor: pastByte, head: pastByte)
+  state.applyEditorEdits(snapshot, selection, afterSelection, @[edit])
+  true
+
 proc run*(state: State; command: Command): bool =
   ## Runs a supported editor command; unsupported commands return false.
   state.ensureState()
@@ -1457,6 +1480,20 @@ proc run*(state: State; command: Command): bool =
   case command
   of Command.deleteLine:
     state.deleteSelectedLines()
+  of Command.duplicateSelection:
+    if state.caretSelection.empty():
+      state.duplicateSelectedLines(false)
+    else:
+      let snapshot = state.buffer.snapshot()
+      let selection = state.caretSelection
+      let start = selection.start()
+      let pastLast = selection.pastLast()
+      let selected = snapshot.slice(start, pastLast)
+      let edit = Edit(start: start, pastLast: pastLast,
+        text: selected & selected)
+      let afterSelection = Selection(anchor: start,
+        head: start + selected.len * 2)
+      state.applyEditorEdits(snapshot, selection, afterSelection, @[edit])
   of Command.newline:
     state.insertNewline()
   of Command.newlineAbove:
@@ -1489,6 +1526,8 @@ proc run*(state: State; command: Command): bool =
     state.selectCurrentLines()
   of Command.selectAll:
     state.select(0, state.buffer.len())
+  of Command.transpose:
+    return state.transposeAtCaret()
   else:
     return false
   result = state.buffer.version() != beforeVersion or

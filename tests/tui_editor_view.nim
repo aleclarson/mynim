@@ -429,6 +429,26 @@ doAssert $editorState.buffer == "first\nsecond"
 editorState.select("first\nsec".len, "first\nsec".len)
 doAssert editorState.run(editor.Command.deleteToLineEnd)
 doAssert $editorState.buffer == "first\nsec"
+editorState.buffer.set("one\ntwo")
+editorState.select(4, 7)
+doAssert editorState.run(editor.Command.duplicateSelection)
+doAssert $editorState.buffer == "one\ntwotwo"
+doAssert editorState.selectedText() == "twotwo"
+doAssert editorState.undo()
+doAssert $editorState.buffer == "one\ntwo"
+editorState.select(5, 5)
+doAssert editorState.run(editor.Command.duplicateSelection)
+doAssert $editorState.buffer == "one\ntwo\ntwo"
+doAssert editorState.cursor() == 9
+editorState.buffer.set("ab")
+editorState.select(1, 1)
+doAssert editorState.run(editor.Command.transpose)
+doAssert $editorState.buffer == "ba"
+doAssert editorState.cursor() == 2
+doAssert editorState.undo()
+doAssert $editorState.buffer == "ab"
+editorState.select(0, 0)
+doAssert not editorState.run(editor.Command.transpose)
 editorState.buffer.set("  value")
 editorState.select(2, 2)
 doAssert editorState.run(editor.Command.deleteToLineStart)
