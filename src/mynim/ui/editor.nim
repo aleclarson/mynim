@@ -1354,6 +1354,24 @@ proc smartHome(snapshot: Snapshot; runeOffset: int): int =
   let firstNonIndent = range.start + document.line(line).leadingIndent().runeLen
   if current == firstNonIndent: range.start else: firstNonIndent
 
+proc paragraphMove(snapshot: Snapshot; runeOffset: int; direction: int): int =
+  let document = snapshot.document
+  var line = document.lineAt(max(0, min(runeOffset, document.len())))
+  let lineCount = document.lineCount()
+  let isBlank = proc(index: int): bool =
+    for rune in document.line(index).runes:
+      if not rune.isWhiteSpace:
+        return false
+    true
+  while true:
+    line += direction
+    if line <= 0:
+      return 0
+    if line >= lineCount:
+      return document.len()
+    if isBlank(line) and not isBlank(line - direction):
+      return document.lineRange(line).start
+
 proc moveCaret(state: State; command: Command): bool =
   let snapshot = state.buffer.snapshot()
   let selection = state.caretSelection
@@ -1361,7 +1379,8 @@ proc moveCaret(state: State; command: Command): bool =
     Command.selectLeft, Command.selectRight, Command.selectWordLeft,
     Command.selectWordRight, Command.selectSubwordLeft,
     Command.selectSubwordRight, Command.selectLineStart,
-    Command.selectLineEnd, Command.selectDocStart, Command.selectDocEnd}
+    Command.selectLineEnd, Command.selectDocStart, Command.selectDocEnd,
+    Command.selectParagraphUp, Command.selectParagraphDown}
   let movingLeft = command in {
     Command.moveLeft, Command.selectLeft, Command.moveWordLeft,
     Command.selectWordLeft, Command.moveSubwordLeft,
@@ -1396,6 +1415,10 @@ proc moveCaret(state: State; command: Command): bool =
       targetRune = 0
     of Command.moveDocEnd, Command.selectDocEnd:
       targetRune = snapshot.document.len()
+    of Command.moveParagraphUp, Command.selectParagraphUp:
+      targetRune = snapshot.paragraphMove(currentRune, -1)
+    of Command.moveParagraphDown, Command.selectParagraphDown:
+      targetRune = snapshot.paragraphMove(currentRune, 1)
     else:
       return false
     targetByte = snapshot.document.byteOffset(targetRune)
@@ -1582,10 +1605,12 @@ proc run*(state: State; command: Command): bool =
       Command.moveLineEnd, Command.moveDocStart, Command.moveDocEnd,
       Command.moveWordLeft, Command.moveWordRight,
       Command.moveSubwordLeft, Command.moveSubwordRight,
+      Command.moveParagraphUp, Command.moveParagraphDown,
       Command.selectLeft, Command.selectRight, Command.selectWordLeft,
       Command.selectWordRight, Command.selectSubwordLeft,
       Command.selectSubwordRight, Command.selectLineStart,
-      Command.selectLineEnd, Command.selectDocStart, Command.selectDocEnd:
+      Command.selectLineEnd, Command.selectDocStart, Command.selectDocEnd,
+      Command.selectParagraphUp, Command.selectParagraphDown:
     return state.moveCaret(command)
   of Command.backspace, Command.delete, Command.deleteWordLeft,
       Command.deleteWordRight, Command.deleteSubwordLeft,

@@ -484,6 +484,16 @@ editorState.buffer.set("c\nb\na")
 editorState.select(1, 1)
 doAssert editorState.run(editor.Command.reverseLines)
 doAssert $editorState.buffer == "a\nb\nc"
+let paragraphs = "alpha\n\n beta\n\nomega"
+editorState.buffer.set(paragraphs)
+editorState.select(0, 0)
+doAssert editorState.run(editor.Command.moveParagraphDown)
+doAssert editorState.cursor() == "alpha\n".len
+doAssert editorState.run(editor.Command.moveParagraphDown)
+doAssert editorState.cursor() == "alpha\n\n beta\n".len
+editorState.select(paragraphs.len, paragraphs.len)
+doAssert editorState.run(editor.Command.selectParagraphUp)
+doAssert editorState.selectedText() == "\nomega"
 editorState.buffer.set("a  \nb\t \n")
 editorState.select(3, 3)
 doAssert editorState.run(editor.Command.trimTrailingWhitespace)
