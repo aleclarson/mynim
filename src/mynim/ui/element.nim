@@ -85,6 +85,12 @@ type
     spring*: SpringOptions ## Spring settings when duration is zero.
     delay*: Duration ## Holds the current motion before changing target.
 
+  ElementTransition* = object ## Animates layout position and element colors.
+    duration*: Duration ## Defaults to 200 ms.
+    ease*: Easing ## Defaults to easeOut.
+    animation*: Option[Animation] ## Overrides duration and ease when present.
+    position*, colors*: bool ## If neither is set, both properties animate.
+
   DraggableOptions* = object ## Pointer movement and release behavior.
     axis*: set[DragAxis] ## Empty means both axes.
     bounds*: Option[Rect] ## Offset bounds, if present.

@@ -290,6 +290,8 @@ type
     pendingDropGeneration: uint32
     routers: seq[Router]
     frameNow: MonoTime
+    transitionBounds: Rect
+    hasTransitionBounds: bool
     committedRects: seq[Rect]
     committedTransforms: seq[scene.Affine]
     visibleIdentities: HashSet[uint64]
@@ -457,12 +459,14 @@ type
     dragOffset: Point
     transform: Transform
     poseTransform: Transform
+    transitionTransform: Transform
+    elementTransition: ElementTransition
     poseTarget: Pose
     poseAnimation: Animation
     poseFade: float32
     transformOriginX, transformOriginY: float32
     transformOriginSet: bool
-    poseSet: bool
+    poseSet, transitionSet: bool
     label: string
     accessDescription: string
     accessValue: string

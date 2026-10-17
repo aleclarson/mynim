@@ -6,6 +6,10 @@ type LayoutDimension = enum
 const
   MaxGridTrackIndex = high(int16).int
   MaxGridOccupiedCells = 1_048_576
+  transitionXKey = "\x00mynim.transition.x"
+  transitionYKey = "\x00mynim.transition.y"
+  transitionBackgroundKey = "\x00mynim.transition.background"
+  transitionBorderKey = "\x00mynim.transition.border"
 
 proc pixels(value: float32): UiLength =
   UiLength(value: value, kind: lengthPixels)
@@ -2175,16 +2179,10 @@ proc spring*(e: Element; key: string; target: float32;
   ## Moves a keyed scalar value to target with a spring.
   e.animate(key, target, Animation(spring: options))
 
-proc animateColor*(e: Element; key: string; target: Color;
-                   animation: Animation): Color =
-  ## Moves a keyed color using premultiplied-alpha interpolation. Colors
-  ## continue to animate when reduced motion is enabled.
+proc animateColor(owner: ElementOwner; identity: uint64; key: string;
+                  target: Color; animation: Animation): Color =
   animation.validateAnimation()
-  let node = e.node
-  if node == nil:
-    return target
-  let owner = e.owner
-  var motions = owner.colorMotions.mgetOrPut(node.identity,
+  var motions = owner.colorMotions.mgetOrPut(identity,
     initTable[string, ColorMotion]())
   var motion = motions.getOrDefault(key)
   if not motion.initialized or
@@ -2196,7 +2194,7 @@ proc animateColor*(e: Element; key: string; target: Color;
         at: owner.frameNow, generation: owner.generation, initialized: true),
       generation: owner.generation, initialized: true)
     motions[key] = motion
-    owner.colorMotions[node.identity] = motions
+    owner.colorMotions[identity] = motions
     return target
 
   if target != motion.targetColor:
@@ -2213,8 +2211,76 @@ proc animateColor*(e: Element; key: string; target: Color;
     motion.shown = motion.targetColor
   motion.generation = owner.generation
   motions[key] = motion
-  owner.colorMotions[node.identity] = motions
+  owner.colorMotions[identity] = motions
   motion.shown
+
+proc animateColor*(e: Element; key: string; target: Color;
+                   animation: Animation): Color =
+  ## Moves a keyed color using premultiplied-alpha interpolation. Colors
+  ## continue to animate when reduced motion is enabled.
+  let node = e.node
+  if node == nil:
+    return target
+  e.owner.animateColor(node.identity, key, target, animation)
+
+proc transitionAnimation(value: ElementTransition): Animation =
+  if value.animation.isSome:
+    result = value.animation.get
+  else:
+    if value.duration < DurationZero:
+      raise newException(ValueError,
+        "ui: transition duration must not be negative")
+    result = Animation(
+      duration: if value.duration == DurationZero:
+          initDuration(milliseconds = 200)
+        else:
+          value.duration,
+      ease: if value.ease == nil: easeOut else: value.ease)
+  result.validateAnimation()
+
+proc transitionMovesPosition(value: ElementTransition): bool =
+  (not value.position and not value.colors) or value.position
+
+proc transitionMovesColors(value: ElementTransition): bool =
+  (not value.position and not value.colors) or value.colors
+
+proc transition*(element: Element;
+                 value: ElementTransition): Element =
+  ## Animates this element's position and background/border colors as layouts
+  ## change. Elements need a stable key or sibling position between builds.
+  result = element
+  let node = element.node
+  if node == nil:
+    return
+  discard value.transitionAnimation()
+  node[].elementTransition = value
+  node[].transitionSet = true
+
+proc transitioning*(element: Element): bool =
+  ## Reports whether this element, its pose, or its drag motion was moving.
+  let node = element.node
+  if node == nil:
+    return false
+  if node[].draggableDragging or node[].draggableMoving:
+    return true
+  let channels = element.owner.animations.getOrDefault(node[].identity)
+  for key, channel in channels:
+    if key.startsWith("\x00mynim.pose.") and
+        (channel.moving or channel.pending):
+      return true
+  if node[].transitionSet:
+    let value = node[].elementTransition
+    if value.transitionMovesPosition:
+      for key in [transitionXKey, transitionYKey]:
+        let channel = channels.getOrDefault(key)
+        if channel.moving or channel.pending:
+          return true
+    if value.transitionMovesColors:
+      let motions = element.owner.colorMotions.getOrDefault(node[].identity)
+      for key in [transitionBackgroundKey, transitionBorderKey]:
+        let motion = motions.getOrDefault(key)
+        if motion.progress.moving or motion.progress.pending:
+          return true
 
 proc jump*(e: Element; key: string; value: float32): float32 =
   ## Sets a keyed scalar value immediately and tracks drag velocity for a
@@ -2571,6 +2637,8 @@ proc localTransform(node: ElementNode; box: Rect): scene.Affine =
   var transform = node.transform
   if node.poseTransform.set:
     transform = transform.then(node.poseTransform)
+  if node.transitionTransform.set:
+    transform = transform.then(node.transitionTransform)
   if not transform.set:
     return
   let originX = box.x + box.w *
@@ -2595,6 +2663,28 @@ proc transformedLocalRect(layout: LayoutResult; slot: int;
   let bounds = layout.rects[slot]
   layout.worldTransforms[slot].transformedRect(Rect(
     x: bounds.x + rect.x, y: bounds.y + rect.y, w: rect.w, h: rect.h))
+
+proc transitionLocalPosition(nodes: seq[ElementNode]; rects: seq[Rect];
+                             slot: int): Point =
+  if slot <= 0 or slot >= nodes.len or rects.len != nodes.len:
+    return
+  let parent = int(nodes[slot].parent)
+  if parent < 0 or parent >= nodes.len:
+    return
+  result.x = rects[slot].x - rects[parent].x
+  result.y = rects[slot].y - rects[parent].y
+  let node = nodes[parent]
+  if node.scrollState != nil:
+    if node.scrollX:
+      result.x += node.physicalScrollX(node.scrollState)
+    if node.scrollY:
+      result.y += node.scrollState.offsetY
+  if node.hasFollowScroll:
+    let followSlot = int(node.followScrollSlot)
+    if followSlot >= 0 and followSlot < nodes.len:
+      let follow = nodes[followSlot]
+      if follow.scrollX and follow.scrollState != nil:
+        result.x += follow.physicalScrollX(follow.scrollState)
 
 proc layoutAt(c: Context; bounds: Rect; now: MonoTime;
               reduceMotion: bool): LayoutResult =
@@ -2818,6 +2908,50 @@ proc layoutAt(c: Context; bounds: Rect; now: MonoTime;
         result.rects[descendant].y += delta
   alignSplitHandles(c.owner.nodes, result.rects)
   placeInlineText(c.owner.nodes, result.rects)
+  let transitionResized = c.owner.hasTransitionBounds and
+    (result.root.w != c.owner.transitionBounds.w or
+     result.root.h != c.owner.transitionBounds.h)
+  for slot in 1..<c.owner.nodes.len:
+    var node = addr c.owner.nodes[slot]
+    node[].transitionTransform = Transform()
+    if not node[].transitionSet:
+      continue
+    let value = node[].elementTransition
+    let animation = value.transitionAnimation()
+    if value.transitionMovesPosition:
+      let target = c.owner.nodes.transitionLocalPosition(result.rects, slot)
+      var channels = c.owner.animations.mgetOrPut(node[].identity,
+        initTable[string, ScalarAnimation]())
+      var xChannel = channels.getOrDefault(transitionXKey)
+      var yChannel = channels.getOrDefault(transitionYKey)
+      var shownX, shownY: float32
+      if transitionResized:
+        xChannel = ScalarAnimation(value: float64(target.x),
+          fromValue: float64(target.x), target: float64(target.x),
+          at: now, generation: c.owner.generation, initialized: true)
+        yChannel = ScalarAnimation(value: float64(target.y),
+          fromValue: float64(target.y), target: float64(target.y),
+          at: now, generation: c.owner.generation, initialized: true)
+        shownX = target.x
+        shownY = target.y
+      else:
+        shownX = float32(xChannel.update(c.owner, float64(target.x),
+          animation, respectReduceMotion = true))
+        shownY = float32(yChannel.update(c.owner, float64(target.y),
+          animation, respectReduceMotion = true))
+      channels[transitionXKey] = xChannel
+      channels[transitionYKey] = yChannel
+      c.owner.animations[node[].identity] = channels
+      let offsetX = shownX - target.x
+      let offsetY = shownY - target.y
+      if offsetX != 0 or offsetY != 0:
+        node[].transitionTransform = translation(offsetX, offsetY)
+    if value.transitionMovesColors:
+      node[].background = c.owner.animateColor(node[].identity,
+        transitionBackgroundKey, node[].background, animation)
+      node[].borderColor = c.owner.animateColor(node[].identity,
+        transitionBorderKey, node[].borderColor, animation)
+  result.animating = result.animating or c.owner.animating
   c.owner.draggableOffsetScratch.setLen(c.owner.nodes.len)
   if c.owner.nodes.len > 0:
     c.owner.draggableOffsetScratch[0] = Point()
@@ -2885,6 +3019,8 @@ proc layoutAt(c: Context; bounds: Rect; now: MonoTime;
   c.owner.visibleGeneration = c.owner.generation
   c.owner.committedRects = result.rects
   c.owner.committedTransforms = result.worldTransforms
+  c.owner.transitionBounds = result.root
+  c.owner.hasTransitionBounds = true
   for slot, node in c.owner.nodes:
     if node.identity in c.owner.trackedBounds:
       c.owner.lastBounds[node.identity] = result.rects[slot]
