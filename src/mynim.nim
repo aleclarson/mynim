@@ -46,6 +46,7 @@ include mynim/core/window
 include mynim/core/protocol
 include mynim/core/app
 include mynim/core/deeplink
+include mynim/core/single_instance
 include mynim/core/updater
 include mynim/core/signals
 include mynim/core/clipboard
