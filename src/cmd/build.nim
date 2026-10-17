@@ -343,6 +343,8 @@ proc runBuild*(args: seq[string]): int =
       let entitlements = if entitlementsName.len == 0: ""
         elif isAbsolute(entitlementsName): entitlementsName
         else: projectDir / entitlementsName
+      let helperEntitlements = macCodeSign.helperEntitlements(macosConfig,
+        projectDir)
     var keychainProfile, keychain: string
     var notarize = false
     if macosConfig.hasKey("notarize") and macosConfig["notarize"].kind != JNull:
@@ -424,7 +426,8 @@ proc runBuild*(args: seq[string]): int =
         targetArch, config)
       writeInfoPlist(contents / "Info.plist", name, identifier, version,
         executable)
-      macCodeSign.signBundle(bundle, signingIdentity, entitlements)
+      macCodeSign.signBundle(bundle, signingIdentity, entitlements,
+        helperEntitlements)
       if not skipDmg:
         let dmgTitle = configString(macosConfig, "dmgTitle", name)
         let dmg = dmgPackager.buildDmg(bundle, stage, name, version,
