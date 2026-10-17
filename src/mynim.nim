@@ -27,7 +27,7 @@ elif defined(linux):
   import mynim/internal/linux
 
 export transfer, image, i18n
-export platform except WindowOptions
+export platform except WindowOptions, MenuItem
 
 include mynim/core/color
 include mynim/core/events

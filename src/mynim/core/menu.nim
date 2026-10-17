@@ -16,6 +16,11 @@ proc separator*(): MenuItem =
   ## Returns a separator item.
   MenuItem(`type`: menuItemSeparator)
 
+proc actionMenuItem*(label: string; action: proc() {.closure.}): MenuItem =
+  ## Builds a menu item whose action does not need the item or window.
+  MenuItem(label: label,
+    click: proc(item: MenuItem; win: Window) = action())
+
 ## appLanguage returns the language the app shows, or "" before it
 ## worked out which.
 proc appLanguage(): string =
