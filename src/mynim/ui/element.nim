@@ -85,11 +85,19 @@ type
     spring*: SpringOptions ## Spring settings when duration is zero.
     delay*: Duration ## Holds the current motion before changing target.
 
-  ElementTransition* = object ## Animates layout position, size, and colors.
+  Motion* = object ## Starting motion for an entering element.
+    x*, y*: float32 ## Translation in device-independent pixels.
+    opacity*: float32 ## Starting opacity; zero means transparent.
+    collapse*: bool ## Clips the element while its parent-axis size grows.
+    scale*: float32 ## Starting scale; zero means one.
+    rotate*: float32 ## Starting clockwise rotation in degrees.
+
+  ElementTransition* = object ## Animates layout changes and entering elements.
     duration*: Duration ## Defaults to 200 ms.
     ease*: Easing ## Defaults to easeOut.
     animation*: Option[Animation] ## Overrides duration and ease when present.
     position*, size*, colors*: bool ## If none are set, all three animate.
+    enter*: Option[Motion] ## Starting motion when this element first appears.
 
   DraggableOptions* = object ## Pointer movement and release behavior.
     axis*: set[DragAxis] ## Empty means both axes.

@@ -12,6 +12,13 @@ const
   transitionHeightKey = "\x00mynim.transition.height"
   transitionBackgroundKey = "\x00mynim.transition.background"
   transitionBorderKey = "\x00mynim.transition.border"
+  transitionEnterXKey = "\x00mynim.transition.enter.x"
+  transitionEnterYKey = "\x00mynim.transition.enter.y"
+  transitionEnterWidthKey = "\x00mynim.transition.enter.width"
+  transitionEnterHeightKey = "\x00mynim.transition.enter.height"
+  transitionEnterOpacityKey = "\x00mynim.transition.enter.opacity"
+  transitionEnterScaleKey = "\x00mynim.transition.enter.scale"
+  transitionEnterRotateKey = "\x00mynim.transition.enter.rotate"
 
 proc pixels(value: float32): UiLength =
   UiLength(value: value, kind: lengthPixels)
@@ -2257,16 +2264,68 @@ proc transitionMovesSize(value: ElementTransition): bool =
 proc transitionMovesColors(value: ElementTransition): bool =
   (not value.position and not value.size and not value.colors) or value.colors
 
+proc startTransitionChannel(owner: ElementOwner;
+                            channels: var Table[string, ScalarAnimation];
+                            key: string; initial, target: float64;
+                            animation: Animation; animate: bool): float32 =
+  var channel = ScalarAnimation(value: initial, fromValue: initial,
+    target: initial, at: owner.frameNow, generation: owner.generation,
+    initialized: true)
+  if animate:
+    result = float32(channel.update(owner, target, animation,
+      respectReduceMotion = false))
+  else:
+    channel = ScalarAnimation(value: target, fromValue: target,
+      target: target, at: owner.frameNow, generation: owner.generation,
+      initialized: true)
+    result = float32(target)
+  channels[key] = channel
+
+proc sampleTransitionChannel(owner: ElementOwner;
+                             channels: var Table[string, ScalarAnimation];
+                             key: string; target: float64;
+                             animation: Animation;
+                             snapForReduceMotion: bool;
+                             forceSnap = false): float32 =
+  var channel = channels.getOrDefault(key)
+  if forceSnap or (owner.reduceMotion and snapForReduceMotion):
+    channel = ScalarAnimation(value: target, fromValue: target,
+      target: target, at: owner.frameNow, generation: owner.generation,
+      restedGeneration: owner.generation, initialized: true)
+    result = float32(target)
+  else:
+    result = float32(channel.update(owner, target, animation,
+      respectReduceMotion = snapForReduceMotion))
+  channels[key] = channel
+
+proc transitionEnterMoving(channels: Table[string, ScalarAnimation]): bool =
+  for key in [transitionEnterXKey, transitionEnterYKey,
+      transitionEnterWidthKey, transitionEnterHeightKey,
+      transitionEnterOpacityKey, transitionEnterScaleKey,
+      transitionEnterRotateKey]:
+    let channel = channels.getOrDefault(key)
+    if channel.moving or channel.pending:
+      return true
+
 proc transition*(element: Element;
                  value: ElementTransition): Element =
-  ## Animates this element's position, size, and background/border colors as
-  ## layouts change. Size changes reflow descendants at the sampled bounds.
-  ## Elements need a stable key or sibling position between builds.
+  ## Animates layout changes and optionally moves new elements in from `enter`.
+  ## Size changes reflow descendants at the sampled bounds. Elements need a
+  ## stable key or sibling position between builds.
   result = element
   let node = element.node
   if node == nil:
     return
   discard value.transitionAnimation()
+  if value.enter.isSome:
+    let motion = value.enter.get
+    if not finiteMotion(float64(motion.x)) or
+        not finiteMotion(float64(motion.y)) or
+        not finiteMotion(float64(motion.opacity)) or
+        not finiteMotion(float64(motion.scale)) or
+        not finiteMotion(float64(motion.rotate)):
+      raise newException(ValueError,
+        "ui: transition motion values must be finite")
   node[].elementTransition = value
   node[].transitionSet = true
 
@@ -2284,6 +2343,14 @@ proc transitioning*(element: Element): bool =
       return true
   if node[].transitionSet:
     let value = node[].elementTransition
+    if value.enter.isSome:
+      for key in [transitionEnterXKey, transitionEnterYKey,
+          transitionEnterWidthKey, transitionEnterHeightKey,
+          transitionEnterOpacityKey, transitionEnterScaleKey,
+          transitionEnterRotateKey]:
+        let channel = channels.getOrDefault(key)
+        if channel.moving or channel.pending:
+          return true
     if value.transitionMovesPosition:
       for key in [transitionXKey, transitionYKey]:
         let channel = channels.getOrDefault(key)
@@ -3017,6 +3084,34 @@ proc layoutAt(c: Context; bounds: Rect; now: MonoTime;
       continue
     let value = node[].elementTransition
     let animation = value.transitionAnimation()
+    var enterMotion = Motion()
+    let enterHasMotion = value.enter.isSome
+    var enterAxis = 0'i8
+    var enterCanRun = false
+    var startEnter = false
+    var enterMovingBefore = false
+    if enterHasMotion:
+      enterMotion = value.enter.get
+      let parentSlot = int(node[].parent)
+      if enterMotion.collapse and not reduceMotion and
+          parentSlot >= 0 and parentSlot < c.owner.nodes.len:
+        let parent = c.owner.nodes[parentSlot]
+        enterAxis = if parent.row and parent.listState == nil and
+            not parent.grid and parent.gridViewState == nil and
+            parent.gridCellState == nil:
+            1'i8
+          else:
+            2'i8
+      let fades = enterMotion.opacity < 1 and not enterMotion.collapse
+      enterCanRun = not reduceMotion or fades
+      startEnter = node[].transitionFresh and
+        node[].transitionParentPresent and not transitionResized and
+        enterCanRun
+      let previousChannels = c.owner.animations.getOrDefault(node[].identity)
+      enterMovingBefore = previousChannels.transitionEnterMoving
+    let preserveEnterContent = enterCanRun and not transitionResized and
+      enterAxis != 0 and
+      (startEnter or enterMovingBefore)
     if value.transitionMovesPosition:
       let target = c.owner.nodes.transitionLocalPosition(result.rects, slot)
       var channels = c.owner.animations.mgetOrPut(node[].identity,
@@ -3074,12 +3169,105 @@ proc layoutAt(c: Context; bounds: Rect; now: MonoTime;
       if shownWidth != targetWidth or shownHeight != targetHeight:
         result.rects[slot].w = max(shownWidth, 0'f32)
         result.rects[slot].h = max(shownHeight, 0'f32)
-        c.relayoutTransitionSubtree(result, slot)
+        if not preserveEnterContent:
+          c.relayoutTransitionSubtree(result, slot)
     if value.transitionMovesColors:
       node[].background = c.owner.animateColor(node[].identity,
         transitionBackgroundKey, node[].background, animation)
       node[].borderColor = c.owner.animateColor(node[].identity,
         transitionBorderKey, node[].borderColor, animation)
+    if enterHasMotion and (startEnter or
+        (not node[].transitionFresh and enterMovingBefore)):
+      var channels = c.owner.animations.mgetOrPut(node[].identity,
+        initTable[string, ScalarAnimation]())
+      let targetWidth = float64(result.rects[slot].w)
+      let targetHeight = float64(result.rects[slot].h)
+      let fadeOnly = reduceMotion and enterMotion.opacity < 1 and
+        not enterMotion.collapse
+      var shownX, shownY, shownWidth, shownHeight: float32
+      var shownOpacity, shownScale, shownRotate: float32
+      if startEnter:
+        let animateMotion = not reduceMotion
+        shownX = c.owner.startTransitionChannel(channels,
+          transitionEnterXKey,
+          if animateMotion: float64(enterMotion.x) else: 0,
+          0, animation, animateMotion)
+        shownY = c.owner.startTransitionChannel(channels,
+          transitionEnterYKey,
+          if animateMotion: float64(enterMotion.y) else: 0,
+          0, animation, animateMotion)
+        shownWidth = c.owner.startTransitionChannel(channels,
+          transitionEnterWidthKey,
+          if enterAxis == 1: 0'f64 else: targetWidth,
+          targetWidth, animation, animateMotion)
+        shownHeight = c.owner.startTransitionChannel(channels,
+          transitionEnterHeightKey,
+          if enterAxis == 2: 0'f64 else: targetHeight,
+          targetHeight, animation, animateMotion)
+        shownOpacity = c.owner.startTransitionChannel(channels,
+          transitionEnterOpacityKey,
+          if animateMotion or fadeOnly:
+            float64(min(max(enterMotion.opacity, 0'f32), 1'f32))
+          else:
+            1,
+          1, animation, animateMotion or fadeOnly)
+        shownScale = c.owner.startTransitionChannel(channels,
+          transitionEnterScaleKey,
+          if animateMotion and enterMotion.scale != 0:
+            float64(enterMotion.scale)
+          else:
+            1,
+          1, animation, animateMotion)
+        shownRotate = c.owner.startTransitionChannel(channels,
+          transitionEnterRotateKey,
+          if animateMotion: float64(enterMotion.rotate) else: 0,
+          0, animation, animateMotion)
+      else:
+        shownX = c.owner.sampleTransitionChannel(channels,
+          transitionEnterXKey, 0, animation,
+          reduceMotion, forceSnap = transitionResized)
+        shownY = c.owner.sampleTransitionChannel(channels,
+          transitionEnterYKey, 0, animation,
+          reduceMotion, forceSnap = transitionResized)
+        shownWidth = c.owner.sampleTransitionChannel(channels,
+          transitionEnterWidthKey, targetWidth, animation,
+          reduceMotion, forceSnap = transitionResized)
+        shownHeight = c.owner.sampleTransitionChannel(channels,
+          transitionEnterHeightKey, targetHeight, animation,
+          reduceMotion, forceSnap = transitionResized)
+        shownOpacity = c.owner.sampleTransitionChannel(channels,
+          transitionEnterOpacityKey, 1, animation,
+          reduceMotion and not fadeOnly, forceSnap = transitionResized)
+        shownScale = c.owner.sampleTransitionChannel(channels,
+          transitionEnterScaleKey, 1, animation,
+          reduceMotion, forceSnap = transitionResized)
+        shownRotate = c.owner.sampleTransitionChannel(channels,
+          transitionEnterRotateKey, 0, animation,
+          reduceMotion, forceSnap = transitionResized)
+      c.owner.animations[node[].identity] = channels
+      let enterActive = channels.transitionEnterMoving
+      if enterActive:
+        if shownOpacity < 1:
+          let baseOpacity = if node[].opacitySet: node[].opacity else: 1'f32
+          node[].opacity = baseOpacity * max(shownOpacity, 0'f32)
+          node[].opacitySet = true
+        if enterAxis == 1:
+          result.rects[slot].w = max(shownWidth, 0'f32)
+          node[].clipX = true
+        elif enterAxis == 2:
+          result.rects[slot].h = max(shownHeight, 0'f32)
+          node[].clipY = true
+        var enterTransform = Transform()
+        if shownScale != 1:
+          enterTransform = enterTransform.then(
+            scaling(shownScale, shownScale))
+        if shownRotate != 0:
+          enterTransform = enterTransform.then(rotation(shownRotate))
+        if shownX != 0 or shownY != 0:
+          enterTransform = enterTransform.then(translation(shownX, shownY))
+        if enterTransform.set:
+          node[].transitionTransform = enterTransform.then(
+            node[].transitionTransform)
   result.animating = result.animating or c.owner.animating
   c.owner.draggableOffsetScratch.setLen(c.owner.nodes.len)
   if c.owner.nodes.len > 0:

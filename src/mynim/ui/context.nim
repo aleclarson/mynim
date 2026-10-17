@@ -292,6 +292,7 @@ type
     frameNow: MonoTime
     transitionBounds: Rect
     hasTransitionBounds: bool
+    transitionSeen: HashSet[uint64]
     committedRects: seq[Rect]
     committedTransforms: seq[scene.Affine]
     visibleIdentities: HashSet[uint64]
@@ -467,6 +468,7 @@ type
     transformOriginX, transformOriginY: float32
     transformOriginSet: bool
     poseSet, transitionSet: bool
+    transitionFresh, transitionParentPresent: bool
     label: string
     accessDescription: string
     accessValue: string
@@ -673,6 +675,7 @@ proc newContext*(): Context =
   new(result.owner)
   result.owner.idSlots = initTable[uint64, int]()
   result.owner.identityParents = initTable[uint64, uint64]()
+  result.owner.transitionSeen = initHashSet[uint64]()
   result.owner.lastBounds = initTable[uint64, Rect]()
   result.owner.lastTransforms = initTable[uint64, scene.Affine]()
   result.owner.trackedBounds = initHashSet[uint64]()
@@ -1511,6 +1514,7 @@ proc build*(c: Context; view: proc(c: Context) {.closure.}) =
     new(c.owner)
     c.owner.idSlots = initTable[uint64, int]()
     c.owner.identityParents = initTable[uint64, uint64]()
+    c.owner.transitionSeen = initHashSet[uint64]()
     c.owner.lastBounds = initTable[uint64, Rect]()
     c.owner.lastTransforms = initTable[uint64, scene.Affine]()
     c.owner.trackedBounds = initHashSet[uint64]()
@@ -1629,6 +1633,14 @@ proc build*(c: Context; view: proc(c: Context) {.closure.}) =
       if node.parent >= 0:
         c.owner.identityParents[node.identity] =
           c.owner.nodes[int(node.parent)].identity
+    for slot in 0..<c.owner.nodes.len:
+      var node = addr c.owner.nodes[slot]
+      node[].transitionFresh = node[].identity notin c.owner.transitionSeen
+      node[].transitionParentPresent = false
+      let parent = int(node[].parent)
+      if parent >= 0 and parent < c.owner.nodes.len:
+        let parentIdentity = c.owner.nodes[parent].identity
+        node[].transitionParentPresent = parentIdentity in c.owner.transitionSeen
     c.owner.updateRouterPageState()
     var staleBounds: seq[uint64]
     for identity in c.owner.trackedBounds:
@@ -1772,6 +1784,9 @@ proc build*(c: Context; view: proc(c: Context) {.closure.}) =
         staleLocals.add(identity)
     for identity in staleLocals:
       c.owner.localStates.del(identity)
+    c.owner.transitionSeen.clear()
+    for node in c.owner.nodes:
+      c.owner.transitionSeen.incl(node.identity)
     built = true
   finally:
     c.owner.themeSnapshot = c.theme

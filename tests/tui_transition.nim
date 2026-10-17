@@ -1,4 +1,4 @@
-import std/[assertions, os, times]
+import std/[assertions, options, os, times]
 
 import mynim/internal/scene as scene
 import mynim/ui as ui
@@ -219,3 +219,141 @@ block transitioning_includes_pose_motion:
   pose = ui.Pose(x: 30)
   tester.frame()
   doAssert reportsMoving
+
+block new_children_enter_from_their_motion:
+  var showChild = false
+  var reportsMoving = false
+  let motion = ui.ElementTransition(
+    duration: initDuration(milliseconds = 600), ease: ui.linear,
+    enter: some(ui.Motion(x: 32)))
+  let tester = ui.newTester(proc(ctx: ui.Context) =
+    let parent = ctx.box().absolute().left(0).top(0).size(100, 70)
+    discard parent.children(proc() =
+      if showChild:
+        let child = ctx.box().absolute().left(0).top(0).size(20, 20)
+          .label("enter motion child")
+        discard child.transition(motion)
+        reportsMoving = child.transitioning
+    )
+  , 100, 80)
+  defer: tester.close()
+
+  showChild = true
+  tester.frame()
+  let (start, foundStart) = tester.find("enter motion child")
+  doAssert foundStart and start.x >= 31
+  sleep(300)
+  tester.frame()
+  let (moving, foundMoving) = tester.find("enter motion child")
+  doAssert foundMoving and moving.x > 0 and moving.x < start.x
+  doAssert reportsMoving
+  sleep(350)
+  tester.frame()
+  tester.frame()
+  let (finished, foundFinished) = tester.find("enter motion child")
+  doAssert foundFinished and abs(finished.x) < 0.01
+  doAssert not reportsMoving
+
+block resizing_snaps_enter_motion:
+  var showChild = false
+  let motion = ui.ElementTransition(
+    duration: initDuration(milliseconds = 600), ease: ui.linear,
+    enter: some(ui.Motion(x: 32)))
+  let tester = ui.newTester(proc(ctx: ui.Context) =
+    let parent = ctx.box().absolute().left(0).top(0).size(100, 70)
+    discard parent.children(proc() =
+      if showChild:
+        let child = ctx.box().absolute().left(0).top(0).size(20, 20)
+          .label("resized enter child")
+        discard child.transition(motion)
+    )
+  , 100, 80)
+  defer: tester.close()
+
+  showChild = true
+  tester.frame()
+  let (start, foundStart) = tester.find("resized enter child")
+  doAssert foundStart and start.x >= 31
+  tester.setSize(110, 80)
+  let (bounds, found) = tester.find("resized enter child")
+  doAssert found and abs(bounds.x) < 0.01
+
+block children_of_a_new_parent_do_not_enter:
+  var showSubtree = false
+  let motion = ui.ElementTransition(
+    duration: initDuration(milliseconds = 400), ease: ui.linear,
+    enter: some(ui.Motion(x: 40)))
+  let tester = ui.newTester(proc(ctx: ui.Context) =
+    if showSubtree:
+      let parent = ctx.box().absolute().left(0).top(0).size(80, 60)
+      discard parent.children(proc() =
+        let child = ctx.box().absolute().left(0).top(0).size(20, 20)
+          .label("new subtree child")
+        discard child.transition(motion)
+      )
+  , 100, 80)
+  defer: tester.close()
+
+  showSubtree = true
+  tester.frame()
+  let (bounds, found) = tester.find("new subtree child")
+  doAssert found and abs(bounds.x) < 0.01
+
+block reduced_motion_keeps_fade_but_snaps_position:
+  var showChild = false
+  var reportsMoving = false
+  let motion = ui.ElementTransition(
+    duration: initDuration(milliseconds = 400), ease: ui.linear,
+    enter: some(ui.Motion(x: 40)))
+  let tester = ui.newTester(proc(ctx: ui.Context) =
+    let parent = ctx.box().absolute().left(0).top(0).size(100, 70)
+    discard parent.children(proc() =
+      if showChild:
+        let child = ctx.box().absolute().left(0).top(0).size(20, 20)
+          .label("reduced enter child")
+        discard child.transition(motion)
+        reportsMoving = child.transitioning
+    )
+  , 100, 80)
+  defer: tester.close()
+
+  tester.setPreferences(ui.Preferences(reduceMotion: true))
+  showChild = true
+  tester.frame()
+  let (bounds, found) = tester.find("reduced enter child")
+  doAssert found and abs(bounds.x) < 0.01
+  sleep(50)
+  tester.frame()
+  doAssert reportsMoving
+
+block collapse_enter_clips_without_reflowing_content:
+  var showChild = false
+  var child: ui.Element
+  var content: ui.Element
+  let context = ui.newContext()
+  let motion = ui.ElementTransition(
+    duration: initDuration(milliseconds = 500), ease: ui.linear,
+    enter: some(ui.Motion(opacity: 1, collapse: true)))
+  let view = proc(ctx: ui.Context) =
+    let parent = ctx.row().absolute().left(0).top(0).size(100, 50)
+    discard parent.children(proc() =
+      if showChild:
+        child = ctx.box().size(60, 30)
+        discard child.transition(motion)
+        discard child.children(proc() =
+          content = ctx.box().absolute().left(0).top(0).size(80, 10)
+        )
+    )
+  context.build(view)
+  discard context.layout(100, 60)
+  showChild = true
+  context.build(view)
+  let start = context.layout(100, 60)
+  doAssert start.bounds(child).w == 0
+  doAssert abs(start.bounds(content).w - 80) < 0.01
+  sleep(150)
+  context.build(view)
+  let moving = context.layout(100, 60)
+  doAssert moving.bounds(child).w > 0 and moving.bounds(child).w < 60
+  doAssert abs(moving.bounds(content).w - 80) < 0.01
+  context.close()
