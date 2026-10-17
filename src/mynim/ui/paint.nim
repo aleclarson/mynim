@@ -648,6 +648,28 @@ proc imageRegion*(painter: var Painter; bitmap: Bitmap; source, destination: Rec
   painter.frame.paintBitmap(node, destination, painter.root, painter.scale,
     painter.opacity)
 
+proc scale*(painter: Painter): float32 =
+  ## Returns physical pixels per device-independent pixel for this surface.
+  painter.scale
+
+proc clip*(painter: var Painter; rect: Rect; radius: float32;
+           callback: proc(painter: var Painter) {.closure.}) =
+  ## Clips drawing in `callback` to `rect`, with rounded corners of `radius`.
+  if callback == nil:
+    raise newException(ValueError, "ui: painter clip callback is nil")
+  if painter.frame == nil:
+    callback(painter)
+    return
+  let corner = max(radius, 0'f32)
+  painter.frame.ops.add(scene.Op(kind: scene.opPushClip,
+    rect: rect.sceneRect(painter.root, painter.scale),
+    radii: [corner, corner, corner, corner].scaledEdges(painter.scale),
+    continuous: continuousCorners))
+  try:
+    callback(painter)
+  finally:
+    painter.frame.ops.add(scene.Op(kind: scene.opPopClip))
+
 proc focusRing*(painter: var Painter; rect: Rect; radius: array[4, float32]) =
   ## Draws a theme-colored keyboard focus ring around a rectangle.
   if painter.frame == nil:
