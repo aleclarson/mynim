@@ -249,6 +249,27 @@ let unicodeLines = "😀x\néy\nz"
 doAssert lineKey(unicodeLines, "😀x\né".len, "😀x\né".len,
   platform.keyUp, platform.modAlt) == "éy\n😀x\nz"
 doAssert editorState.cursor() == "é".len
+let deleteModifier = when defined(macosx): platform.modSuper
+  else: platform.modCtrl
+doAssert lineKey(lines, 5, 5, platform.keyK,
+  deleteModifier or platform.modShift) == "one\nthree"
+doAssert editorState.cursor() == 5
+doAssert editorState.undo()
+doAssert $editorState.buffer == lines
+doAssert editorState.cursor() == 5
+doAssert editorState.redo()
+doAssert $editorState.buffer == "one\nthree"
+doAssert lineKey(lines, 10, 10, platform.keyK,
+  deleteModifier or platform.modShift) == "one\ntwo"
+doAssert editorState.cursor() == 6
+doAssert lineKey("only line", 4, 4, platform.keyK,
+  deleteModifier or platform.modShift) == ""
+doAssert editorState.cursor() == 0
+let unicodeDelete = "αβ\n😀z\nq"
+let afterEmoji = "αβ\n😀".len
+doAssert lineKey(unicodeDelete, afterEmoji, afterEmoji, platform.keyK,
+  deleteModifier or platform.modShift) == "αβ\nq"
+doAssert editorState.cursor() == "αβ\nq".len
 
 win.destroy()
 loop.shutdown()

@@ -833,6 +833,46 @@ proc duplicateSelectedLines(state: State; keepOriginal: bool) =
     head: selection.head + shift)
   state.applyEditorEdits(snapshot, selection, afterSelection, @[edit])
 
+proc deleteSelectedLines(state: State) =
+  state.ensureState()
+  if state.readOnly:
+    return
+  let snapshot = state.buffer.snapshot()
+  let selection = state.caretSelection
+  let span = snapshot.selectedLineSpan(selection)
+  let deletesToEnd = span.last + 1 >= snapshot.lineCount()
+  var edit = Edit(start: snapshot.lineStart(span.first),
+    pastLast: if deletesToEnd: snapshot.len
+      else: snapshot.lineStart(span.last + 1))
+  if deletesToEnd and span.first > 0:
+    edit.start = snapshot.lineEnd(span.first - 1)
+  if edit.start == edit.pastLast:
+    return
+
+  let caretLine = snapshot.pos(selection.head).line
+  let caretRune = snapshot.document.runeOffsetAtByte(selection.head)
+  let caretLineStart = snapshot.lineStart(caretLine)
+  let caretColumn = caretRune -
+    snapshot.document.runeOffsetAtByte(caretLineStart)
+  let replacementLine = if deletesToEnd:
+      (if span.first > 0: span.first - 1 else: -1)
+    else:
+      span.last + 1
+  var caret: int
+  if replacementLine >= 0:
+    let replacementStart = snapshot.lineStart(replacementLine)
+    let replacementText = snapshot.line(replacementLine)
+    let startRune = snapshot.document.runeOffsetAtByte(replacementStart)
+    let endRune = snapshot.document.runeOffsetAtByte(
+      replacementStart + replacementText.len)
+    let column = min(caretColumn, endRune - startRune)
+    let columnBytes = snapshot.document.byteOffset(startRune + column) -
+      snapshot.document.byteOffset(startRune)
+    let newLineStart = if deletesToEnd: replacementStart else: edit.start
+    caret = newLineStart + columnBytes
+  let afterSelection = Selection(anchor: caret, head: caret)
+  state.applyEditorEdits(snapshot, selection, afterSelection, @[edit])
+
 proc indentSelection(state: State; outdent: bool) =
   state.ensureState()
   if state.readOnly:
@@ -1103,10 +1143,14 @@ proc view*(c: ui.Context; state: State): ui.Element =
       state.selectionPending = false
   discard result.textAreaHistory(recordAreaEdit, undoArea, redoArea)
   discard result.onTextKey(proc(key: ui.TextKey): bool =
-    let commentModifier = when defined(macosx): platform.modSuper
+    let commandModifier = when defined(macosx): platform.modSuper
       else: platform.modCtrl
-    if key.key == platform.keySlash and key.mods == commentModifier:
+    if key.key == platform.keySlash and key.mods == commandModifier:
       state.toggleComment()
+      return true
+    if key.key == platform.keyK and
+        key.mods == (commandModifier or platform.modShift):
+      state.deleteSelectedLines()
       return true
     if key.key in {platform.keyUp, platform.keyDown}:
       if key.mods == platform.modAlt:
