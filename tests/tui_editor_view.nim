@@ -449,6 +449,32 @@ doAssert editorState.undo()
 doAssert $editorState.buffer == "ab"
 editorState.select(0, 0)
 doAssert not editorState.run(editor.Command.transpose)
+editorState.buffer.set("c\nb\na")
+editorState.select(0, editorState.buffer.len())
+doAssert editorState.run(editor.Command.sortLines)
+doAssert $editorState.buffer == "a\nb\nc"
+doAssert editorState.selectedText() == "a\nb\nc"
+doAssert editorState.undo()
+doAssert $editorState.buffer == "c\nb\na"
+editorState.buffer.set("b\nA\na\nB")
+editorState.select(0, editorState.buffer.len())
+doAssert editorState.run(editor.Command.sortLinesCaseInsensitive)
+doAssert $editorState.buffer == "A\na\nb\nB"
+editorState.buffer.set("a\nb\na\nc")
+editorState.select(0, editorState.buffer.len())
+doAssert editorState.run(editor.Command.uniqueLines)
+doAssert $editorState.buffer == "a\nb\nc"
+editorState.buffer.set("c\nb\na")
+editorState.select(1, 1)
+doAssert editorState.run(editor.Command.reverseLines)
+doAssert $editorState.buffer == "a\nb\nc"
+editorState.buffer.set("a  \nb\t \n")
+editorState.select(3, 3)
+doAssert editorState.run(editor.Command.trimTrailingWhitespace)
+doAssert $editorState.buffer == "a\nb\n"
+doAssert editorState.cursor() == 1
+doAssert editorState.undo()
+doAssert $editorState.buffer == "a  \nb\t \n"
 editorState.buffer.set("  value")
 editorState.select(2, 2)
 doAssert editorState.run(editor.Command.deleteToLineStart)
@@ -467,6 +493,7 @@ editorState.buffer.set("one\ntwo")
 editorState.select(0, 0)
 doAssert not editorState.run(editor.Command.deleteLine)
 doAssert not editorState.run(editor.Command.backspace)
+doAssert not editorState.run(editor.Command.trimTrailingWhitespace)
 doAssert $editorState.buffer == "one\ntwo"
 editorState.readOnly = false
 

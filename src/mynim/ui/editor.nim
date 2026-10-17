@@ -1,6 +1,6 @@
 ## Persistent text buffers and byte-based positions for native code editors.
 
-import std/[algorithm, locks, monotimes, strutils, times, unicode]
+import std/[algorithm, locks, monotimes, sets, strutils, times, unicode]
 import mynim/internal/platform as platform
 import mynim/internal/text as textStack
 import mynim/ui as ui
@@ -1440,6 +1440,86 @@ proc transposeAtCaret(state: State): bool =
   state.applyEditorEdits(snapshot, selection, afterSelection, @[edit])
   true
 
+proc splitLinesPreservingEmpty(text: string): seq[string] =
+  var start = 0
+  for index, ch in text:
+    if ch == '\n':
+      result.add(text[start ..< index])
+      start = index + 1
+  result.add(text[start ..< text.len])
+
+proc manipulateLines(state: State; command: Command): bool =
+  let snapshot = state.buffer.snapshot()
+  let selection = state.caretSelection
+  let span = snapshot.selectedLineSpan(selection)
+  let firstLine = if span.first == span.last: 0 else: span.first
+  let lastLine = if span.first == span.last:
+      snapshot.lineCount() - 1 else: span.last
+  let start = snapshot.lineStart(firstLine)
+  let pastLast = snapshot.lineEnd(lastLine)
+  let original = snapshot.slice(start, pastLast)
+  var lines = splitLinesPreservingEmpty(original)
+  case command
+  of Command.sortLines:
+    lines.sort()
+  of Command.sortLinesCaseInsensitive:
+    for index in 1 ..< lines.len:
+      let value = lines[index]
+      let folded = value.toLowerAscii()
+      var insertAt = index
+      while insertAt > 0 and
+          cmp(lines[insertAt - 1].toLowerAscii(), folded) > 0:
+        lines[insertAt] = lines[insertAt - 1]
+        dec insertAt
+      lines[insertAt] = value
+  of Command.reverseLines:
+    lines.reverse()
+  of Command.uniqueLines:
+    var seen = initHashSet[string]()
+    var unique: seq[string]
+    for line in lines:
+      if line notin seen:
+        seen.incl(line)
+        unique.add(line)
+    lines = unique
+  else:
+    return false
+  let replacement = lines.join("\n")
+  if replacement == original:
+    return false
+  let edit = Edit(start: start, pastLast: pastLast, text: replacement)
+  var afterSelection = selection
+  if not selection.empty():
+    let endOfChangedLines = start + replacement.len
+    let hasTrailingNewline = pastLast < snapshot.len and
+      snapshot.slice(pastLast, pastLast + 1) == "\n"
+    let selectionEnd = endOfChangedLines + (if hasTrailingNewline: 1 else: 0)
+    if selection.head >= selection.anchor:
+      afterSelection = Selection(anchor: start, head: selectionEnd)
+    else:
+      afterSelection = Selection(anchor: selectionEnd, head: start)
+  state.applyEditorEdits(snapshot, selection, afterSelection, @[edit])
+  true
+
+proc trimTrailingWhitespace(state: State): bool =
+  let snapshot = state.buffer.snapshot()
+  let selection = state.caretSelection
+  var edits: seq[Edit]
+  for lineIndex in 0 ..< snapshot.lineCount():
+    let line = snapshot.line(lineIndex)
+    let trimmedEnd = line.trailingSpaceStart()
+    if trimmedEnd < line.len:
+      let lineStart = snapshot.lineStart(lineIndex)
+      edits.add(Edit(start: lineStart + trimmedEnd,
+        pastLast: lineStart + line.len))
+  if edits.len == 0:
+    return false
+  let afterSelection = Selection(
+    anchor: moveEditOffset(selection.anchor, true, edits),
+    head: moveEditOffset(selection.head, false, edits))
+  state.applyEditorEdits(snapshot, selection, afterSelection, edits)
+  true
+
 proc run*(state: State; command: Command): bool =
   ## Runs a supported editor command; unsupported commands return false.
   state.ensureState()
@@ -1451,6 +1531,9 @@ proc run*(state: State; command: Command): bool =
       Command.moveLinesUp, Command.moveLinesDown,
       Command.duplicateLinesUp, Command.duplicateLinesDown,
       Command.duplicateSelection, Command.joinLines, Command.transpose,
+      Command.sortLines, Command.sortLinesCaseInsensitive,
+      Command.reverseLines, Command.uniqueLines,
+      Command.trimTrailingWhitespace,
       Command.indent, Command.outdent, Command.tab, Command.backtab,
       Command.toggleComment, Command.toggleBlockComment}:
     return false
@@ -1528,6 +1611,11 @@ proc run*(state: State; command: Command): bool =
     state.select(0, state.buffer.len())
   of Command.transpose:
     return state.transposeAtCaret()
+  of Command.sortLines, Command.sortLinesCaseInsensitive,
+      Command.reverseLines, Command.uniqueLines:
+    discard state.manipulateLines(command)
+  of Command.trimTrailingWhitespace:
+    discard state.trimTrailingWhitespace()
   else:
     return false
   result = state.buffer.version() != beforeVersion or
