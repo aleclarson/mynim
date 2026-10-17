@@ -10,11 +10,12 @@ when hostOS == "macosx":
   import ./codesign as macCodeSign
 when hostOS == "linux":
   import ./linux_package as linuxPackage
+  import ./linux_install_script as linuxInstallScript
 
 const usageBuild = """Usage: nim-xplat build [flags] [dir]
 
 Build a native project for this machine. Linux builds also include a tar.gz
-archive and a Debian package.
+archive, a Debian package, and an install.sh script.
 
 Flags:
   -o path             output directory (default: out from mygo.json, or dist)
@@ -492,6 +493,8 @@ proc runBuild*(args: seq[string]): int =
       discard linuxPackage.writeLinuxArtifacts(projectDir, stage, name,
         executable, version, targetArch, config, linuxEntries,
         reuseSignedArchive)
+      discard linuxInstallScript.writeInstallScript(stage, config, name,
+        version, targetArch)
     else:
       discard updateArtifacts.writeUpdateArtifacts(config, projectDir, stage,
         name, version, targetName)

@@ -327,6 +327,9 @@ proc debVersion(version: string): string =
 
 proc validateLinuxArtifactNames*(appName, version, arch: string;
     entries: openArray[string]) =
+  if "install.sh" in entries:
+    raise newException(ValueError,
+      "Linux installer conflicts with staged resource install.sh")
   for ch in version:
     if ch in {'/', '\\', '\0'}:
       raise newException(ValueError,
