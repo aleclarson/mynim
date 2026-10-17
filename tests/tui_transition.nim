@@ -3,6 +3,9 @@ import std/[assertions, options, os, times]
 import mynim/internal/scene as scene
 import mynim/ui as ui
 
+type PhotoMatchId = object
+  id: int
+
 proc findFill(frame: scene.Scene; color: scene.Color):
     tuple[op: scene.Op, found: bool] =
   for op in frame.ops:
@@ -522,3 +525,164 @@ block collapse_enter_clips_without_reflowing_content:
   doAssert moving.bounds(child).w > 0 and moving.bounds(child).w < 60
   doAssert abs(moving.bounds(content).w - 80) < 0.01
   context.close()
+
+block shared_element_match_moves_across_parents:
+  let photo = ui.matchKey(PhotoMatchId(id: 7))
+  doAssert photo == ui.matchKey(PhotoMatchId(id: 7))
+  doAssert photo != ui.matchKey(7)
+  let red = ui.rgb(255, 0, 0)
+  let blue = ui.rgb(0, 0, 255)
+  let motion = ui.ElementTransition(
+    duration: initDuration(milliseconds = 240), ease: ui.linear,
+    position: true, size: true, match: some(photo))
+  var detail = false
+  var shared: ui.Element
+  var stable: ui.Element
+  var firstChild: ui.Element
+  var secondChild: ui.Element
+  var reportsMoving = false
+  let context = ui.newContext()
+  defer: context.close()
+  let view = proc(ctx: ui.Context) =
+    reportsMoving = false
+    if detail:
+      let parent = ctx.row().absolute().left(70).top(20).size(100, 60)
+        .alignItems(ui.Align.Start)
+      discard parent.children(proc() =
+        shared = ctx.row().size(80, 40).wrap().background(blue)
+          .label("matched hero")
+        discard shared.transition(motion)
+        discard shared.children(proc() =
+          firstChild = ctx.box().size(30, 10).shrink(0)
+          secondChild = ctx.box().size(30, 10).shrink(0)
+        )
+        reportsMoving = shared.transitioning
+        stable = ctx.box().size(10, 10).label("matched sibling")
+      )
+    else:
+      let parent = ctx.column().absolute().left(5).top(7).size(40, 30)
+      discard parent.children(proc() =
+        shared = ctx.row().size(20, 10).wrap().background(red)
+          .label("matched thumbnail")
+        discard shared.transition(motion)
+      )
+
+  context.build(view)
+  let sourceLayout = context.layout(180, 100)
+  let sourceRect = sourceLayout.bounds(shared)
+  let (sourceFill, foundSourceFill) = findFill(sourceLayout.paintScene(),
+    scene.Color(r: 255, g: 0, b: 0, a: 255))
+  doAssert foundSourceFill
+
+  doAssertRaises ValueError:
+    context.build(proc(ctx: ui.Context) =
+      raise newException(ValueError, "failed build before shared match")
+    )
+  detail = true
+  context.build(view)
+  let startLayout = context.layout(180, 100)
+  let startRect = startLayout.bounds(shared)
+  let startSibling = startLayout.bounds(stable)
+  let startFirst = startLayout.bounds(firstChild)
+  let startSecond = startLayout.bounds(secondChild)
+  let (startFill, foundStartFill) = findFill(startLayout.paintScene(),
+    scene.Color(r: 255, g: 0, b: 0, a: 255))
+  doAssert foundStartFill
+  doAssert abs(startRect.x - sourceRect.x) < 0.01
+  doAssert abs(startRect.y - sourceRect.y) < 0.01
+  doAssert abs(startRect.w - sourceRect.w) < 0.01
+  doAssert abs(startRect.h - sourceRect.h) < 0.01
+  doAssert startSibling.x > startRect.x + startRect.w
+  doAssert startSecond.y > startFirst.y
+  doAssert startFill.color == sourceFill.color
+
+  sleep(70)
+  context.build(view)
+  doAssert reportsMoving
+  let movingLayout = context.layout(180, 100)
+  let movingRect = movingLayout.bounds(shared)
+  let movingSibling = movingLayout.bounds(stable)
+  var movingColor: scene.Color
+  var foundMovingColor = false
+  for op in movingLayout.paintScene().ops:
+    if op.kind == scene.opFill and op.color.r > 0 and op.color.r < 255 and
+        op.color.b > 0 and op.color.b < 255:
+      movingColor = op.color
+      foundMovingColor = true
+      break
+  doAssert movingRect.x > sourceRect.x and movingRect.x < 70
+  doAssert movingRect.w > sourceRect.w and movingRect.w < 80
+  doAssert abs(movingSibling.x - startSibling.x) < 0.01
+  doAssert foundMovingColor
+  doAssert movingColor.r > 0 and movingColor.r < 255
+  doAssert movingColor.b > 0 and movingColor.b < 255
+
+  sleep(220)
+  context.build(view)
+  let finishedLayout = context.layout(180, 100)
+  let finishedRect = finishedLayout.bounds(shared)
+  let finishedFirst = finishedLayout.bounds(firstChild)
+  let finishedSecond = finishedLayout.bounds(secondChild)
+  doAssert abs(finishedRect.x - 70) < 0.01
+  doAssert abs(finishedRect.y - 20) < 0.01
+  doAssert abs(finishedRect.w - 80) < 0.01
+  doAssert abs(finishedRect.h - 40) < 0.01
+  doAssert abs(finishedSecond.y - finishedFirst.y) < 0.01
+  doAssert finishedSecond.x > finishedFirst.x
+  context.build(view)
+  discard context.layout(180, 100)
+  doAssert not reportsMoving
+
+block reduced_motion_snaps_shared_element_match:
+  let photo = ui.matchKey(PhotoMatchId(id: 9))
+  let motion = ui.ElementTransition(
+    duration: initDuration(milliseconds = 500), ease: ui.linear,
+    match: some(photo))
+  var detail = false
+  let tester = ui.newTester(proc(ctx: ui.Context) =
+    if detail:
+      discard ctx.box().key("match-target").absolute().left(70).top(20)
+        .size(80, 40)
+        .label("reduced match target").transition(motion)
+    else:
+      discard ctx.box().key("match-source").absolute().left(5).top(7)
+        .size(20, 10)
+        .label("reduced match source").transition(motion)
+  , 180, 100)
+  defer: tester.close()
+
+  tester.setPreferences(ui.Preferences(reduceMotion: true))
+  detail = true
+  tester.frame()
+  let (rect, found) = tester.find("reduced match target")
+  doAssert found and abs(rect.x - 70) < 0.01 and abs(rect.y - 20) < 0.01
+  doAssert abs(rect.w - 80) < 0.01 and abs(rect.h - 40) < 0.01
+
+block resize_snaps_shared_element_match:
+  let photo = ui.matchKey(PhotoMatchId(id: 10))
+  let motion = ui.ElementTransition(
+    duration: initDuration(milliseconds = 500), ease: ui.linear,
+    match: some(photo))
+  var detail = false
+  let tester = ui.newTester(proc(ctx: ui.Context) =
+    if detail:
+      discard ctx.box().key("match-target").absolute().left(70).top(20)
+        .size(80, 40)
+        .label("resize match target").transition(motion)
+    else:
+      discard ctx.box().key("match-source").absolute().left(5).top(7)
+        .size(20, 10)
+        .label("resize match source").transition(motion)
+  , 180, 100)
+  defer: tester.close()
+
+  detail = true
+  tester.frame()
+  let (start, foundStart) = tester.find("resize match target")
+  doAssert foundStart and start.x > 5 and start.x < 70
+  doAssert start.w > 20 and start.w < 80
+  tester.setSize(200, 120)
+  let (resized, foundResized) = tester.find("resize match target")
+  doAssert foundResized and abs(resized.x - 70) < 0.01
+  doAssert abs(resized.y - 20) < 0.01 and abs(resized.w - 80) < 0.01
+  doAssert abs(resized.h - 40) < 0.01

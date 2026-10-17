@@ -130,6 +130,12 @@ type
     transition: ElementTransition
     animation: Animation
 
+  TransitionMatchRecord = object
+    generation: uint32
+    identity: uint64
+    rect: Rect
+    colors: array[2, Color]
+
   ScalarSequence = object
     frames: seq[Keyframe]
     options: KeyframeOptions
@@ -274,6 +280,7 @@ type
     textInputClients: Table[uint64, platform.TextInputClient]
     animations: Table[uint64, Table[string, ScalarAnimation]]
     transitionReentries: Table[uint64, TransitionReentry]
+    transitionMatches: Table[MatchKey, TransitionMatchRecord]
     draggableStates: Table[uint64, DraggableState]
     draggableGesture: DraggableGesture
     colorMotions: Table[uint64, Table[string, ColorMotion]]
@@ -730,6 +737,8 @@ proc newContext*(): Context =
     initTable[uint64, Table[string, ScalarAnimation]]()
   result.owner.transitionReentries =
     initTable[uint64, TransitionReentry]()
+  result.owner.transitionMatches =
+    initTable[MatchKey, TransitionMatchRecord]()
   result.owner.draggableStates = initTable[uint64, DraggableState]()
   result.owner.colorMotions =
     initTable[uint64, Table[string, ColorMotion]]()
@@ -1132,6 +1141,7 @@ proc retire(owner: ElementOwner) =
   owner.pendingTextSubmitCallbacks.clear()
   owner.textInputClients.clear()
   owner.animations.clear()
+  owner.transitionMatches.clear()
   owner.draggableStates.clear()
   owner.draggableGesture = DraggableGesture()
   owner.colorMotions.clear()
@@ -1852,6 +1862,8 @@ proc build*(c: Context; view: proc(c: Context) {.closure.}) =
       initTable[uint64, Table[string, ScalarAnimation]]()
     c.owner.transitionReentries =
       initTable[uint64, TransitionReentry]()
+    c.owner.transitionMatches =
+      initTable[MatchKey, TransitionMatchRecord]()
     c.owner.draggableStates = initTable[uint64, DraggableState]()
     c.owner.colorMotions =
       initTable[uint64, Table[string, ColorMotion]]()

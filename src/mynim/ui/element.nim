@@ -92,6 +92,38 @@ type
     scale*: float32 ## Scale; zero means one.
     rotate*: float32 ## Clockwise rotation in degrees.
 
+  MatchValueEquals = proc(a, b: RootRef): bool {.nimcall.}
+
+  MatchValue[T] = ref object of RootObj
+    value: T
+
+  MatchKey* = object ## A typed, value-compared shared-element identity.
+    payload: RootRef
+    valueHash: Hash
+    equals: MatchValueEquals
+    valid: bool
+
+proc matchValueEquals[T](a, b: RootRef): bool {.nimcall.} =
+  cast[MatchValue[T]](a).value == cast[MatchValue[T]](b).value
+
+proc matchKey*[T](value: T): MatchKey =
+  ## Wraps a hashable, equality-comparable value as a shared-element identity.
+  var payload: MatchValue[T]
+  new(payload)
+  payload.value = value
+  MatchKey(payload: RootRef(payload), valueHash: hash(value),
+    equals: matchValueEquals[T], valid: true)
+
+proc `==`*(a, b: MatchKey): bool =
+  if not a.valid or not b.valid:
+    return a.valid == b.valid
+  a.equals == b.equals and a.valueHash == b.valueHash and
+    a.equals(a.payload, b.payload)
+
+proc hash*(key: MatchKey): Hash =
+  if key.valid: key.valueHash else: 0
+
+type
   ElementTransition* = object ## Animates layout changes and element lifecycle.
     duration*: Duration ## Defaults to 200 ms.
     ease*: Easing ## Defaults to easeOut.
@@ -99,6 +131,7 @@ type
     position*, size*, colors*: bool ## If none are set, all three animate.
     enter*: Option[Motion] ## Starting motion when this element first appears.
     exit*: Option[Motion] ## Ending motion as a removed subtree leaves.
+    match*: Option[MatchKey] ## Shared-element identity from a prior frame.
 
   DraggableOptions* = object ## Pointer movement and release behavior.
     axis*: set[DragAxis] ## Empty means both axes.

@@ -26,6 +26,12 @@ const
   transitionExitOpacityKey = "\x00mynim.transition.exit.opacity"
   transitionExitScaleKey = "\x00mynim.transition.exit.scale"
   transitionExitRotateKey = "\x00mynim.transition.exit.rotate"
+  transitionMatchXKey = "\x00mynim.transition.match.x"
+  transitionMatchYKey = "\x00mynim.transition.match.y"
+  transitionMatchWidthKey = "\x00mynim.transition.match.width"
+  transitionMatchHeightKey = "\x00mynim.transition.match.height"
+  transitionMatchBackgroundKey = "\x00mynim.transition.match.background"
+  transitionMatchBorderKey = "\x00mynim.transition.match.border"
 
 proc pixels(value: float32): UiLength =
   UiLength(value: value, kind: lengthPixels)
@@ -2246,6 +2252,17 @@ proc animateColor*(e: Element; key: string; target: Color;
     return target
   e.owner.animateColor(node.identity, key, target, animation)
 
+proc seedTransitionMatchColor(owner: ElementOwner; identity: uint64;
+                              key: string; fromColor, targetColor: Color) =
+  var motions = owner.colorMotions.mgetOrPut(identity,
+    initTable[string, ColorMotion]())
+  motions[key] = ColorMotion(fromColor: fromColor,
+    targetColor: targetColor, shown: fromColor,
+    progress: ScalarAnimation(value: 0, fromValue: 0, target: 0,
+      at: owner.frameNow, generation: owner.generation, initialized: true),
+    generation: owner.generation, initialized: true)
+  owner.colorMotions[identity] = motions
+
 proc transitionAnimation(value: ElementTransition): Animation =
   if value.animation.isSome:
     result = value.animation.get
@@ -2323,6 +2340,13 @@ proc transitionExitMoving(channels: Table[string, ScalarAnimation]): bool =
     if channel.moving or channel.pending:
       return true
 
+proc transitionMatchMoving(channels: Table[string, ScalarAnimation]): bool =
+  for key in [transitionMatchXKey, transitionMatchYKey,
+      transitionMatchWidthKey, transitionMatchHeightKey]:
+    let channel = channels.getOrDefault(key)
+    if channel.moving or channel.pending:
+      return true
+
 proc transition*(element: Element;
                  value: ElementTransition): Element =
   ## Animates layout changes, entering elements, and removed subtrees.
@@ -2345,6 +2369,9 @@ proc transition*(element: Element;
     validateMotion(value.enter.get)
   if value.exit.isSome:
     validateMotion(value.exit.get)
+  if value.match.isSome and not value.match.get.valid:
+    raise newException(ValueError,
+      "ui: transition match key must come from matchKey")
   node[].elementTransition = value
   node[].elementTransitionAnimation = animation
   node[].transitionSet = true
@@ -2378,6 +2405,15 @@ proc transitioning*(element: Element): bool =
           transitionExitRotateKey]:
         let channel = channels.getOrDefault(key)
         if channel.moving or channel.pending:
+          return true
+    if value.match.isSome:
+      if channels.transitionMatchMoving:
+        return true
+      let colors = element.owner.colorMotions.getOrDefault(node[].identity)
+      for key in [transitionMatchBackgroundKey, transitionMatchBorderKey]:
+        let motion = colors.getOrDefault(key)
+        if motion.initialized and
+            (motion.progress.moving or motion.progress.pending):
           return true
     if value.transitionMovesPosition:
       for key in [transitionXKey, transitionYKey]:
@@ -2880,6 +2916,19 @@ proc relayoutTransitionSubtree(c: Context; layout: var LayoutResult;
   alignSplitHandles(c.owner.nodes, layout.rects)
   placeInlineText(c.owner.nodes, layout.rects)
 
+proc offsetTransitionSubtree(nodes: var seq[ElementNode]; rects: var seq[Rect];
+                             root: int; dx, dy: float32) =
+  if (dx == 0 and dy == 0) or root < 0 or root >= nodes.len or
+      rects.len != nodes.len:
+    return
+  let last = transitionSubtreeEnd(nodes, root)
+  for slot in root..last:
+    rects[slot].x += dx
+    rects[slot].y += dy
+    for rect in mitems(nodes[slot].textInlineRects):
+      rect.x += dx
+      rect.y += dy
+
 proc layoutAt(c: Context; bounds: Rect; now: MonoTime;
               reduceMotion: bool): LayoutResult =
   ## Lays out the latest completed build inside bounds.
@@ -3105,6 +3154,8 @@ proc layoutAt(c: Context; bounds: Rect; now: MonoTime;
   let transitionResized = c.owner.hasTransitionBounds and
     (result.root.w != c.owner.transitionBounds.w or
      result.root.h != c.owner.transitionBounds.h)
+  var matchColorTargets: seq[array[2, Color]]
+  var matchColorSeen = initHashSet[MatchKey]()
   for slot in 1..<c.owner.nodes.len:
     var node = addr c.owner.nodes[slot]
     if node[].transitionGhost:
@@ -3115,6 +3166,30 @@ proc layoutAt(c: Context; bounds: Rect; now: MonoTime;
       continue
     let value = node[].elementTransition
     let animation = value.transitionAnimation()
+    if value.match.isSome:
+      if matchColorTargets.len == 0:
+        matchColorTargets.setLen(c.owner.nodes.len)
+      matchColorTargets[slot] = [node[].background, node[].borderColor]
+    var startsMatchFromPrevious = false
+    if value.match.isSome and value.match.get notin matchColorSeen:
+      let key = value.match.get
+      matchColorSeen.incl(key)
+      if c.owner.transitionMatches.hasKey(key):
+        let previous = c.owner.transitionMatches[key]
+        startsMatchFromPrevious =
+          previous.generation == c.owner.visibleGeneration and
+          previous.identity != node[].identity
+        if startsMatchFromPrevious:
+          if previous.colors != [Color(), Color()]:
+            c.owner.seedTransitionMatchColor(node[].identity,
+              transitionMatchBackgroundKey, previous.colors[0],
+              matchColorTargets[slot][0])
+            c.owner.seedTransitionMatchColor(node[].identity,
+              transitionMatchBorderKey, previous.colors[1],
+              matchColorTargets[slot][1])
+    let matchChannels = c.owner.animations.getOrDefault(node[].identity)
+    let matchOverridesLayout = startsMatchFromPrevious or
+      matchChannels.transitionMatchMoving
     var enterMotion = Motion()
     let enterHasMotion = value.enter.isSome
     var enterAxis = 0'i8
@@ -3143,7 +3218,7 @@ proc layoutAt(c: Context; bounds: Rect; now: MonoTime;
     let preserveEnterContent = enterCanRun and not transitionResized and
       enterAxis != 0 and
       (startEnter or enterMovingBefore)
-    if value.transitionMovesPosition:
+    if value.transitionMovesPosition and not matchOverridesLayout:
       let target = c.owner.nodes.transitionLocalPosition(result.rects, slot)
       var channels = c.owner.animations.mgetOrPut(node[].identity,
         initTable[string, ScalarAnimation]())
@@ -3171,7 +3246,7 @@ proc layoutAt(c: Context; bounds: Rect; now: MonoTime;
       let offsetY = shownY - target.y
       if offsetX != 0 or offsetY != 0:
         node[].transitionTransform = translation(offsetX, offsetY)
-    if value.transitionMovesSize:
+    if value.transitionMovesSize and not matchOverridesLayout:
       let targetWidth = result.rects[slot].w
       let targetHeight = result.rects[slot].h
       var channels = c.owner.animations.mgetOrPut(node[].identity,
@@ -3449,6 +3524,92 @@ proc layoutAt(c: Context; bounds: Rect; now: MonoTime;
     else:
       node[].opacity = 0
       node[].opacitySet = true
+  var matchedThisLayout = initHashSet[MatchKey]()
+  for slot in 1..<c.owner.nodes.len:
+    var node = addr c.owner.nodes[slot]
+    if node[].transitionGhost or not node[].transitionSet or
+        node[].elementTransition.match.isNone:
+      continue
+    let key = node[].elementTransition.match.get
+    if key in matchedThisLayout:
+      continue
+    matchedThisLayout.incl(key)
+    let targetRect = result.rects[slot]
+    let hasPrevious = c.owner.transitionMatches.hasKey(key)
+    let previous = c.owner.transitionMatches.getOrDefault(key)
+    let startsMatch = hasPrevious and
+      previous.generation == c.owner.visibleGeneration and
+      previous.identity != node[].identity
+    let animation = node[].elementTransitionAnimation
+    var channels = c.owner.animations.getOrDefault(node[].identity)
+    let wasMoving = channels.transitionMatchMoving
+    var shownRect = targetRect
+    if startsMatch:
+      let animateGeometry = not reduceMotion and not transitionResized
+      shownRect.x = c.owner.startTransitionChannel(channels,
+        transitionMatchXKey, float64(previous.rect.x),
+        float64(targetRect.x), animation, animateGeometry)
+      shownRect.y = c.owner.startTransitionChannel(channels,
+        transitionMatchYKey, float64(previous.rect.y),
+        float64(targetRect.y), animation, animateGeometry)
+      shownRect.w = c.owner.startTransitionChannel(channels,
+        transitionMatchWidthKey, float64(previous.rect.w),
+        float64(targetRect.w), animation, animateGeometry)
+      shownRect.h = c.owner.startTransitionChannel(channels,
+        transitionMatchHeightKey, float64(previous.rect.h),
+        float64(targetRect.h), animation, animateGeometry)
+    elif wasMoving:
+      shownRect.x = c.owner.sampleTransitionChannel(channels,
+        transitionMatchXKey, float64(targetRect.x), animation, true,
+        forceSnap = transitionResized)
+      shownRect.y = c.owner.sampleTransitionChannel(channels,
+        transitionMatchYKey, float64(targetRect.y), animation, true,
+        forceSnap = transitionResized)
+      shownRect.w = c.owner.sampleTransitionChannel(channels,
+        transitionMatchWidthKey, float64(targetRect.w), animation, true,
+        forceSnap = transitionResized)
+      shownRect.h = c.owner.sampleTransitionChannel(channels,
+        transitionMatchHeightKey, float64(targetRect.h), animation, true,
+        forceSnap = transitionResized)
+    c.owner.animations[node[].identity] = channels
+    shownRect.w = max(shownRect.w, 0'f32)
+    shownRect.h = max(shownRect.h, 0'f32)
+    if startsMatch or wasMoving:
+      let dx = shownRect.x - targetRect.x
+      let dy = shownRect.y - targetRect.y
+      let sizeChanged = shownRect.w != targetRect.w or
+        shownRect.h != targetRect.h
+      if sizeChanged:
+        result.rects[slot] = shownRect
+        c.relayoutTransitionSubtree(result, slot)
+      elif dx != 0 or dy != 0:
+        c.owner.nodes.offsetTransitionSubtree(result.rects, slot, dx, dy)
+    let sourceColors = hasPrevious and startsMatch and
+      previous.colors != [Color(), Color()]
+    let colorMotions = c.owner.colorMotions.getOrDefault(node[].identity)
+    let backgroundColorMotion = colorMotions.getOrDefault(
+      transitionMatchBackgroundKey)
+    if sourceColors or backgroundColorMotion.initialized:
+      node[].background = c.owner.animateColor(node[].identity,
+        transitionMatchBackgroundKey, matchColorTargets[slot][0], animation)
+    let borderColorMotion = colorMotions.getOrDefault(
+      transitionMatchBorderKey)
+    if sourceColors or borderColorMotion.initialized:
+      node[].borderColor = c.owner.animateColor(node[].identity,
+        transitionMatchBorderKey, matchColorTargets[slot][1], animation)
+    c.owner.transitionMatches[key] = TransitionMatchRecord(
+      generation: c.owner.generation, identity: node[].identity,
+      rect: result.rects[slot],
+      colors: [node[].background, node[].borderColor])
+  if matchColorTargets.len == 0:
+    c.owner.transitionMatches.clear()
+  else:
+    var staleMatches: seq[MatchKey]
+    for key, record in c.owner.transitionMatches:
+      if record.generation != c.owner.generation:
+        staleMatches.add(key)
+    for key in staleMatches:
+      c.owner.transitionMatches.del(key)
   result.animating = result.animating or c.owner.animating
   c.owner.draggableOffsetScratch.setLen(c.owner.nodes.len)
   if c.owner.nodes.len > 0:
