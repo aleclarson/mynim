@@ -23,7 +23,7 @@ type
   Point* = object ## An offset in device independent pixels.
     x*, y*: float32
 
-  Transform* = object ## A visual 2D transform for Painter drawing.
+  Transform* = object ## A visual 2D transform for Painter drawing or an element.
                        ## The zero value is identity.
     value: scene.Affine
 
@@ -353,6 +353,7 @@ type
 
   ScrollbarDrag = object
     state: ScrollState
+    slot: int
     horizontal, rightToLeft: bool
     pointerStart, offsetStart, rangeStart, travel: float32
 

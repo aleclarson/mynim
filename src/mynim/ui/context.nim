@@ -291,12 +291,14 @@ type
     routers: seq[Router]
     frameNow: MonoTime
     committedRects: seq[Rect]
+    committedTransforms: seq[scene.Affine]
     visibleIdentities: HashSet[uint64]
     visibleGeneration: uint32
     visibleClipScratch: seq[Rect]
     visibilityBlockedScratch: seq[bool]
     draggableOffsetScratch: seq[Point]
     lastBounds: Table[uint64, Rect]
+    lastTransforms: Table[uint64, scene.Affine]
     trackedBounds: HashSet[uint64]
     focusIdentity: uint64
     pointerX, pointerY: float32
@@ -453,6 +455,9 @@ type
       valueChangedInBuild, trackPointer: bool
     draggable, draggableDragging, draggableMoving: bool
     dragOffset: Point
+    transform: Transform
+    transformOriginX, transformOriginY: float32
+    transformOriginSet: bool
     label: string
     accessDescription: string
     accessValue: string
@@ -551,6 +556,8 @@ type
     owner: ElementOwner
     generation: uint32
     rects: seq[Rect]
+    worldTransforms: seq[scene.Affine]
+    visualRects: seq[Rect]
     animating: bool
 
   LocalCell*[T] = ref object of RootObj
@@ -656,6 +663,7 @@ proc newContext*(): Context =
   result.owner.idSlots = initTable[uint64, int]()
   result.owner.identityParents = initTable[uint64, uint64]()
   result.owner.lastBounds = initTable[uint64, Rect]()
+  result.owner.lastTransforms = initTable[uint64, scene.Affine]()
   result.owner.trackedBounds = initHashSet[uint64]()
   result.owner.visibleIdentities = initHashSet[uint64]()
   result.owner.previousInteraction = initTable[uint64, uint8]()
@@ -1114,6 +1122,7 @@ proc retire(owner: ElementOwner) =
   owner.visibleClipScratch.setLen(0)
   owner.visibilityBlockedScratch.setLen(0)
   owner.lastBounds.clear()
+  owner.lastTransforms.clear()
   owner.trackedBounds.clear()
   owner.focusIdentity = 0
   owner.pointerX = 0
@@ -1492,6 +1501,7 @@ proc build*(c: Context; view: proc(c: Context) {.closure.}) =
     c.owner.idSlots = initTable[uint64, int]()
     c.owner.identityParents = initTable[uint64, uint64]()
     c.owner.lastBounds = initTable[uint64, Rect]()
+    c.owner.lastTransforms = initTable[uint64, scene.Affine]()
     c.owner.trackedBounds = initHashSet[uint64]()
     c.owner.visibleIdentities = initHashSet[uint64]()
     c.owner.previousInteraction = initTable[uint64, uint8]()
@@ -1615,6 +1625,7 @@ proc build*(c: Context; view: proc(c: Context) {.closure.}) =
     for identity in staleBounds:
       c.owner.trackedBounds.excl(identity)
       c.owner.lastBounds.del(identity)
+      c.owner.lastTransforms.del(identity)
     var staleAccordions: seq[uint64]
     for identity in c.accordionHeaders.keys:
       if not c.owner.idSlots.hasKey(identity) and

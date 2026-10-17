@@ -15,7 +15,7 @@ proc dropCandidates(layout: LayoutResult; x, y: float32): seq[int] =
         owner.inActiveModalScope(slot) and
         not owner.effectivelyToolbarCollapsed(slot) and
         not layout.pointerTransparent(slot) and
-        layout.rects[slot].contains(x, y) and
+        layout.containsPointer(slot, x, y) and
         layout.insideClips(slot, x, y):
       result.add(slot)
     dec orderIndex

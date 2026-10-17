@@ -2551,6 +2551,32 @@ proc childClip(clip: Rect; node: ElementNode; box: Rect): Rect =
     result.y = top
     result.h = max(bottom - top, 0'f32)
 
+proc localTransform(node: ElementNode; box: Rect): scene.Affine =
+  if not node.transform.value.`set`:
+    return
+  let originX = box.x + box.w *
+    (if node.transformOriginSet: node.transformOriginX else: 0.5'f32)
+  let originY = box.y + box.h *
+    (if node.transformOriginSet: node.transformOriginY else: 0.5'f32)
+  validateTransformValues(originX, originY)
+  result = scene.translation(originX, originY).mul(node.transform.value)
+    .mul(scene.translation(-originX, -originY))
+  validateTransform(result)
+
+proc transformedRect(transform: scene.Affine; box: Rect): Rect =
+  let mapped = transform.bounds(scene.Rect(x: box.x, y: box.y,
+    w: box.w, h: box.h))
+  Rect(x: mapped.x, y: mapped.y, w: mapped.w, h: mapped.h)
+
+proc transformedLocalRect(layout: LayoutResult; slot: int;
+                          rect: Rect): Rect =
+  if slot < 0 or slot >= layout.rects.len or
+      slot >= layout.worldTransforms.len:
+    return
+  let bounds = layout.rects[slot]
+  layout.worldTransforms[slot].transformedRect(Rect(
+    x: bounds.x + rect.x, y: bounds.y + rect.y, w: rect.w, h: rect.h))
+
 proc layoutAt(c: Context; bounds: Rect; now: MonoTime;
               reduceMotion: bool): LayoutResult =
   ## Lays out the latest completed build inside bounds.
@@ -2795,6 +2821,18 @@ proc layoutAt(c: Context; bounds: Rect; now: MonoTime;
       rect.x += inherited.x
       rect.y += inherited.y
     c.owner.draggableOffsetScratch[slot] = inherited
+  result.worldTransforms = newSeq[scene.Affine](c.owner.nodes.len)
+  result.visualRects = newSeq[Rect](c.owner.nodes.len)
+  for slot in 0..<c.owner.nodes.len:
+    let local = c.owner.nodes[slot].localTransform(result.rects[slot])
+    let parent = int(c.owner.nodes[slot].parent)
+    result.worldTransforms[slot] = if parent >= 0:
+        scene.mul(result.worldTransforms[parent], local)
+      else:
+        local
+    validateTransform(result.worldTransforms[slot])
+    result.visualRects[slot] = transformedRect(result.worldTransforms[slot],
+      result.rects[slot])
   c.owner.visibleIdentities.clear()
   c.owner.visibleClipScratch.setLen(c.owner.nodes.len)
   c.owner.visibilityBlockedScratch.setLen(c.owner.nodes.len)
@@ -2807,15 +2845,17 @@ proc layoutAt(c: Context; bounds: Rect; now: MonoTime;
     let inheritedClip = c.owner.visibleClipScratch[parent]
     let blocked = c.owner.visibilityBlockedScratch[parent] or node.inert
     c.owner.visibilityBlockedScratch[slot] = blocked
-    if not blocked and hasVisibleArea(result.rects[slot], inheritedClip):
+    if not blocked and hasVisibleArea(result.visualRects[slot], inheritedClip):
       c.owner.visibleIdentities.incl(c.owner.nodes[slot].identity)
     c.owner.visibleClipScratch[slot] = childClip(inheritedClip, node,
-      result.rects[slot])
+      result.visualRects[slot])
   c.owner.visibleGeneration = c.owner.generation
   c.owner.committedRects = result.rects
+  c.owner.committedTransforms = result.worldTransforms
   for slot, node in c.owner.nodes:
     if node.identity in c.owner.trackedBounds:
       c.owner.lastBounds[node.identity] = result.rects[slot]
+      c.owner.lastTransforms[node.identity] = result.worldTransforms[slot]
 
 proc layout*(c: Context; bounds: Rect): LayoutResult =
   ## Lays out the latest completed build inside bounds.
@@ -2861,8 +2901,13 @@ proc pointerPosition*(e: Element): tuple[x, y: float32, over: bool] =
   let rect = e.bounds()
   if not e.owner.hasPointer:
     return
-  result.x = e.owner.pointerX - rect.x
-  result.y = e.owner.pointerY - rect.y
+  let transform = e.owner.lastTransforms.getOrDefault(n[].identity)
+  let (inverse, ok) = transform.inverse()
+  if not ok:
+    return
+  let (x, y) = inverse.point(e.owner.pointerX, e.owner.pointerY)
+  result.x = x - rect.x
+  result.y = y - rect.y
   result.over = n[].hovered
 
 proc local*[T](e: Element; key: string;
@@ -2895,11 +2940,31 @@ proc bounds*(handle: Handle; c: Context): Rect =
   if slot >= 0 and slot < c.owner.committedRects.len:
     result = c.owner.committedRects[slot]
 
+proc localPoint(layout: LayoutResult; slot: int; x, y: float32):
+    tuple[x, y: float32, ok: bool] =
+  if slot < 0 or slot >= layout.worldTransforms.len:
+    return
+  let (inverse, ok) = layout.worldTransforms[slot].inverse()
+  if not ok:
+    return
+  let (x, y) = inverse.point(x, y)
+  (x, y, true)
+
+proc localVector(layout: LayoutResult; slot: int; x, y, dx, dy: float32):
+    tuple[x, y: float32, ok: bool] =
+  let (x0, y0, ok0) = layout.localPoint(slot, x, y)
+  let (x1, y1, ok1) = layout.localPoint(slot, x + dx, y + dy)
+  if ok0 and ok1:
+    result = (x1 - x0, y1 - y0, true)
+
 proc insideClips(layout: LayoutResult; slot: int; x, y: float32): bool =
   var parent = int(layout.owner.nodes[slot].parent)
   while parent >= 0:
     let node = layout.owner.nodes[parent]
     if node.clipsChildren:
+      let (localX, localY, ok) = layout.localPoint(parent, x, y)
+      if not ok:
+        return false
       let box = layout.rects[parent]
       let left = box.x + node.border[3]
       let top = box.y + node.border[0]
@@ -2907,8 +2972,8 @@ proc insideClips(layout: LayoutResult; slot: int; x, y: float32): bool =
       let bottom = box.y + box.h - node.border[2]
       let clipsX = node.scrollState != nil or node.clipX
       let clipsY = node.scrollState != nil or node.clipY
-      if (clipsX and (x < left or x >= right)) or
-          (clipsY and (y < top or y >= bottom)):
+      if (clipsX and (localX < left or localX >= right)) or
+          (clipsY and (localY < top or localY >= bottom)):
         return false
     parent = int(node.parent)
   true
@@ -2923,12 +2988,15 @@ proc pointerTransparent(layout: LayoutResult; slot: int): bool =
 proc containsPointer(layout: LayoutResult; slot: int;
                      x, y: float32): bool =
   let node = layout.owner.nodes[slot]
+  let (localX, localY, ok) = layout.localPoint(slot, x, y)
+  if not ok:
+    return false
   if node.textInline:
     for rect in node.textInlineRects:
-      if rect.contains(x, y):
+      if rect.contains(localX, localY):
         return true
     return false
-  layout.rects[slot].contains(x, y)
+  layout.rects[slot].contains(localX, localY)
 
 proc targetAt(layout: LayoutResult; x, y: float32): Element =
   if layout.owner == nil or layout.owner.closed or layout.owner.inBuild or
@@ -3100,33 +3168,39 @@ proc scrollbarPress(layout: LayoutResult; x, y: float32;
     let node = layout.owner.nodes[slot]
     let state = node.scrollState
     if state != nil:
+      let (localX, localY, ok) = layout.localPoint(slot, x, y)
+      if not ok:
+        slot = int(node.parent)
+        continue
       let geometry = layout.scrollbars(slot)
-      if geometry.vertical and geometry.verticalTrack.contains(x, y):
+      if geometry.vertical and geometry.verticalTrack.contains(localX, localY):
         state.stopScrollMotion()
-        if geometry.verticalThumb.contains(x, y):
-          drag = ScrollbarDrag(state: state, pointerStart: y,
+        if geometry.verticalThumb.contains(localX, localY):
+          drag = ScrollbarDrag(state: state, slot: slot,
+            pointerStart: localY,
             offsetStart: state.offsetY, rangeStart: state.maxY,
             travel: max(geometry.verticalTrack.h - 4 -
               geometry.verticalThumb.h, 0'f32))
           state.scrollbarDragging = true
-        elif y < geometry.verticalThumb.y:
+        elif localY < geometry.verticalThumb.y:
           state.offsetY = max(0'f32, state.offsetY -
             layout.rects[slot].h * 0.9'f32)
         else:
           state.offsetY = min(state.maxY, state.offsetY +
             layout.rects[slot].h * 0.9'f32)
         return true
-      if geometry.horizontal and geometry.horizontalTrack.contains(x, y):
+      if geometry.horizontal and geometry.horizontalTrack.contains(localX,
+          localY):
         state.stopScrollMotion()
-        if geometry.horizontalThumb.contains(x, y):
-          drag = ScrollbarDrag(state: state, horizontal: true,
+        if geometry.horizontalThumb.contains(localX, localY):
+          drag = ScrollbarDrag(state: state, slot: slot, horizontal: true,
             rightToLeft: node.rightToLeft,
-            pointerStart: x, offsetStart: state.offsetX,
+            pointerStart: localX, offsetStart: state.offsetX,
             rangeStart: state.maxX,
             travel: max(geometry.horizontalTrack.w - 4 -
               geometry.horizontalThumb.w, 0'f32))
           state.scrollbarDragging = true
-        elif (x < geometry.horizontalThumb.x) != node.rightToLeft:
+        elif (localX < geometry.horizontalThumb.x) != node.rightToLeft:
           state.offsetX = max(0'f32, state.offsetX -
             layout.rects[slot].w * 0.9'f32)
         else:
@@ -3136,13 +3210,17 @@ proc scrollbarPress(layout: LayoutResult; x, y: float32;
     slot = int(node.parent)
   false
 
-proc dragScrollbar(drag: ScrollbarDrag; x, y: float32): bool =
+proc dragScrollbar(layout: LayoutResult; drag: ScrollbarDrag;
+                   x, y: float32): bool =
   let state = drag.state
   if state == nil or drag.travel <= 0 or drag.rangeStart <= 0:
     return false
+  let (localX, localY, ok) = layout.localPoint(drag.slot, x, y)
+  if not ok:
+    return false
   state.stopScrollMotion()
   let maxOffset = if drag.horizontal: state.maxX else: state.maxY
-  let coordinate = if drag.horizontal: x else: y
+  let coordinate = if drag.horizontal: localX else: localY
   let movement = if drag.horizontal and drag.rightToLeft:
       drag.pointerStart - coordinate
     else:
@@ -3179,15 +3257,19 @@ proc scrollAt(layout: LayoutResult; x, y, dx, dy: float32): bool =
     let node = layout.owner.nodes[slot]
     let state = node.scrollState
     if state != nil:
+      let (localDx, localDy, ok) = layout.localVector(slot, x, y, dx, dy)
+      if not ok:
+        slot = int(node.parent)
+        continue
       let oldX = state.offsetX
       let oldY = state.offsetY
       if dx != 0 or dy != 0:
         state.stopScrollMotion()
       if node.scrollX:
-        let deltaX = if node.rightToLeft: -dx else: dx
+        let deltaX = if node.rightToLeft: -localDx else: localDx
         state.offsetX = min(max(oldX + deltaX, 0'f32), state.maxX)
       if node.scrollY:
-        state.offsetY = min(max(oldY + dy, 0'f32), state.maxY)
+        state.offsetY = min(max(oldY + localDy, 0'f32), state.maxY)
       if state.offsetX != oldX or state.offsetY != oldY:
         return true
     slot = int(node.parent)

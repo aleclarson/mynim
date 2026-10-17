@@ -541,9 +541,10 @@ proc dismissPopoverOutside(rt: Runtime; x, y: float32): bool =
       continue
     let anchorSlot = owner.idSlots.getOrDefault(state.anchorIdentity, -1)
     let inPanel = slot < layout.rects.len and
-      layout.rects[slot].contains(x, y)
+      layout.containsPointer(slot, x, y) and
+      layout.insideClips(slot, x, y)
     let inAnchor = anchorSlot > 0 and anchorSlot < layout.rects.len and
-      layout.rects[anchorSlot].contains(x, y) and
+      layout.containsPointer(anchorSlot, x, y) and
       layout.insideClips(anchorSlot, x, y)
     if inPanel or inAnchor:
       return false
@@ -635,7 +636,7 @@ proc accessibilityTree(layout: LayoutResult;
         parentSlot < owner.nodes.len and owner.nodes[parentSlot].label.len > 0:
       label = owner.nodes[parentSlot].label & " " & label
     let parent = if parentSlot >= 0: accessIndex[parentSlot] else: -1
-    let rect = layout.rects[slot]
+    let rect = layout.visualRects[slot]
     var accessible = platform.AccessNode(id: uint64(slot + 1),
       parent: parent, role: role, label: label,
       bounds: platform.RectF(x: rect.x.float64, y: rect.y.float64,
@@ -1106,17 +1107,24 @@ method boundsForRange*(adapter: TextInputAdapter; r: platform.TextRange):
     return (platform.RectF(), platform.TextRange(), false)
   result = client.boundsForRange(r)
   if result.ok:
-    let rect = adapter.runtime.frameLayout.rects[adapter.slot]
-    result.bounds.x += float64(rect.x)
-    result.bounds.y += float64(rect.y)
+    let layout = adapter.runtime.frameLayout
+    let bounds = layout.transformedLocalRect(adapter.slot, Rect(
+      x: float32(result.bounds.x), y: float32(result.bounds.y),
+      w: float32(result.bounds.w), h: float32(result.bounds.h)))
+    result.bounds = platform.RectF(x: float64(bounds.x),
+      y: float64(bounds.y), w: float64(bounds.w), h: float64(bounds.h))
 
 method indexForPoint*(adapter: TextInputAdapter; x, y: float64):
     tuple[i: int, ok: bool] =
   let client = adapter.inputTarget()
   if client == nil:
     return (0, false)
+  let (localX, localY, ok) = adapter.runtime.frameLayout.localPoint(
+    adapter.slot, float32(x), float32(y))
+  if not ok:
+    return (0, false)
   let rect = adapter.runtime.frameLayout.rects[adapter.slot]
-  client.indexForPoint(x - float64(rect.x), y - float64(rect.y))
+  client.indexForPoint(float64(localX - rect.x), float64(localY - rect.y))
 
 proc release(adapter: TextInputAdapter) =
   if adapter == nil or adapter.client == nil:
@@ -1228,8 +1236,10 @@ proc updateTextInput(rt: Runtime) =
       state.caret = bounds
     else:
       let rect = rt.frameLayout.rects[focusedSlot]
-      state.caret = platform.RectF(x: float64(rect.x), y: float64(rect.y),
-        w: 1, h: max(float64(rect.h), 1))
+      let caret = rt.frameLayout.transformedLocalRect(focusedSlot,
+        Rect(w: 1, h: max(rect.h, 1'f32)))
+      state.caret = platform.RectF(x: float64(caret.x),
+        y: float64(caret.y), w: float64(caret.w), h: float64(caret.h))
 
   if not rt.hasTextInputState and not state.active:
     return
@@ -1671,12 +1681,16 @@ proc beginSplitPointer(rt: Runtime; slot: int) =
     return
   let node = owner.nodes[slot]
   let bounds = layout.rects[rootSlot]
+  let (pointerX, pointerY, ok) = layout.localPoint(rootSlot,
+    rt.pointerX, rt.pointerY)
+  if not ok:
+    return
   let raw = if node.splitVertical:
-      rt.pointerY - bounds.y - 0.5'f32
+      pointerY - bounds.y - 0.5'f32
     elif node.rightToLeft:
-      bounds.x + bounds.w - rt.pointerX - 0.5'f32
+      bounds.x + bounds.w - pointerX - 0.5'f32
     else:
-      rt.pointerX - bounds.x - 0.5'f32
+      pointerX - bounds.x - 0.5'f32
   let current = owner.pendingSliderValues.getOrDefault(node.identity,
     node.sliderValue)
   rt.splitPointerOffset = float64(raw) - current
@@ -1709,11 +1723,15 @@ proc queueRangeSliderPointer(rt: Runtime; slot: int;
     return false
 
   let bounds = layout.rects[rootSlot]
+  let (pointerX, _, ok) = layout.localPoint(rootSlot, rt.pointerX,
+    rt.pointerY)
+  if not ok:
+    return false
   let left = bounds.x + root.border[3] + root.pad[3]
   let width = bounds.w - root.contentInsetX
   if width <= 0:
     return false
-  var fraction = (rt.pointerX - left) / width
+  var fraction = (pointerX - left) / width
   if root.rightToLeft:
     fraction = 1'f32 - fraction
   fraction = max(0'f32, min(1'f32, fraction))
@@ -1776,16 +1794,24 @@ proc queueSliderPointer(rt: Runtime; slot: int;
     let ancestor = owner.splitRootSlot(slot)
     if ancestor <= 0 or ancestor >= layout.rects.len:
       return false
+    let (pointerX, pointerY, ok) = layout.localPoint(ancestor,
+      rt.pointerX, rt.pointerY)
+    if not ok:
+      return false
     let bounds = layout.rects[ancestor]
     let position = if node.splitVertical:
-        rt.pointerY - bounds.y
+        pointerY - bounds.y
       elif node.rightToLeft:
-        bounds.x + bounds.w - rt.pointerX
+        bounds.x + bounds.w - pointerX
       else:
-        rt.pointerX - bounds.x
+        pointerX - bounds.x
     return rt.queueSliderValue(slot,
       float64(position - 0.5'f32) - rt.splitPointerOffset)
   if node.stepper or (node.rating and not activatePointer):
+    return false
+  let (pointerX, pointerY, ok) = layout.localPoint(slot,
+    rt.pointerX, rt.pointerY)
+  if not ok:
     return false
   let bounds = layout.rects[slot]
   var fraction: float32
@@ -1794,13 +1820,13 @@ proc queueSliderPointer(rt: Runtime; slot: int;
     let height = bounds.h - node.contentInsetY
     if height <= 0:
       return false
-    fraction = 1 - (rt.pointerY - top) / height
+    fraction = 1 - (pointerY - top) / height
   else:
     let left = bounds.x + node.border[3] + node.pad[3]
     let width = bounds.w - node.contentInsetX
     if width <= 0:
       return false
-    fraction = (rt.pointerX - left) / width
+    fraction = (pointerX - left) / width
     if node.rightToLeft:
       fraction = 1 - fraction
   fraction = max(0'f32, min(1'f32, fraction))
@@ -1831,6 +1857,10 @@ proc queueColorPlanePointer(rt: Runtime; slot: int): bool =
       classify(rt.pointerX) in {fcNan, fcInf, fcNegInf} or
       classify(rt.pointerY) in {fcNan, fcInf, fcNegInf}:
     return false
+  let (pointerX, pointerY, ok) = layout.localPoint(slot,
+    rt.pointerX, rt.pointerY)
+  if not ok:
+    return false
   let bounds = layout.rects[slot]
   let left = bounds.x + node.border[3] + node.pad[3]
   let top = bounds.y + node.border[0] + node.pad[0]
@@ -1842,8 +1872,8 @@ proc queueColorPlanePointer(rt: Runtime; slot: int): bool =
     ColorPlaneValue(saturation: node.colorPlaneSaturation,
                     brightness: node.colorPlaneBrightness))
   let next = ColorPlaneValue(
-    saturation: min(max(float64((rt.pointerX - left) / width), 0), 1),
-    brightness: min(max(float64(1 - (rt.pointerY - top) / height), 0), 1))
+    saturation: min(max(float64((pointerX - left) / width), 0), 1),
+    brightness: min(max(float64(1 - (pointerY - top) / height), 0), 1))
   if next == current:
     return false
   owner.pendingColorPlanes[node.identity] = next
@@ -2110,7 +2140,7 @@ proc renderFrame(rt: Runtime; presentFrame = true) =
     rt.context.owner.pointerX = rt.pointerX
     rt.context.owner.pointerY = rt.pointerY
     rt.context.owner.hasPointer = rt.hasPointer
-    rt.context.owner.draggableGesture = DraggableGesture(
+    var gesture = DraggableGesture(
       identity: rt.pointerDraggableIdentity,
       serial: rt.pointerDraggableSerial,
       pressX: rt.pressX, pressY: rt.pressY,
@@ -2122,6 +2152,27 @@ proc renderFrame(rt: Runtime; presentFrame = true) =
       moved: rt.pointerDraggableMoved,
       released: rt.pointerDraggableReleasePending,
       canceled: rt.pointerDraggableCanceled)
+    let owner = rt.frameLayout.owner
+    if rt.pointerDraggableIdentity != 0 and owner != nil:
+      let slot = owner.idSlots.getOrDefault(rt.pointerDraggableIdentity, -1)
+      if slot > 0 and slot < owner.nodes.len:
+        let parent = int(owner.nodes[slot].parent)
+        if parent >= 0:
+          let (pressX, pressY, pressOk) = rt.frameLayout.localPoint(parent,
+            gesture.pressX, gesture.pressY)
+          let (x, y, pointOk) = rt.frameLayout.localPoint(parent,
+            gesture.x, gesture.y)
+          let (velocityX, velocityY, velocityOk) =
+            rt.frameLayout.localVector(parent, gesture.x, gesture.y,
+              gesture.velocityX, gesture.velocityY)
+          if pressOk and pointOk and velocityOk:
+            gesture.pressX = pressX
+            gesture.pressY = pressY
+            gesture.x = x
+            gesture.y = y
+            gesture.velocityX = velocityX
+            gesture.velocityY = velocityY
+    rt.context.owner.draggableGesture = gesture
   rt.context.build(rt.view)
   let currentOwner = rt.context.owner
   currentOwner.draggableGesture = DraggableGesture()
@@ -2235,11 +2286,13 @@ proc beginListReorder(rt: Runtime; target: Element) =
   var slot = int(target.slot)
   while slot > 0 and slot < target.owner.nodes.len:
     let node = target.owner.nodes[slot]
-    if node.listState != nil and node.listRowIndex >= 0 and
-        node.listState.beginListReorder(node.listRowIndex,
-          rt.pointerX, rt.pointerY):
-      rt.listReorder = node.listState
-      return
+    if node.listState != nil and node.listRowIndex >= 0:
+      let listSlot = int(node.listState.frameSlot)
+      let (x, y, ok) = rt.frameLayout.localPoint(listSlot,
+        rt.pointerX, rt.pointerY)
+      if ok and node.listState.beginListReorder(node.listRowIndex, x, y):
+        rt.listReorder = node.listState
+        return
     slot = int(node.parent)
 
 proc beginGridReorder(rt: Runtime; target: Element) =
@@ -2249,10 +2302,13 @@ proc beginGridReorder(rt: Runtime; target: Element) =
   var slot = int(target.slot)
   while slot > 0 and slot < target.owner.nodes.len:
     let node = target.owner.nodes[slot]
-    if node.gridCellState != nil and node.gridCellState.beginGridReorder(
-        node.gridItemIndex, rt.pointerX, rt.pointerY):
-      rt.gridReorder = node.gridCellState
-      return
+    if node.gridCellState != nil:
+      let gridSlot = int(node.gridCellState.rows.frameSlot)
+      let (x, y, ok) = rt.frameLayout.localPoint(gridSlot,
+        rt.pointerX, rt.pointerY)
+      if ok and node.gridCellState.beginGridReorder(node.gridItemIndex, x, y):
+        rt.gridReorder = node.gridCellState
+        return
     slot = int(node.parent)
 
 proc beginTableReorder(rt: Runtime; target: Element) =
@@ -2264,11 +2320,13 @@ proc beginTableReorder(rt: Runtime; target: Element) =
     let node = target.owner.nodes[slot]
     if node.tableState != nil and node.tableColumnHeader and
         node.tableColumnId.len > 0 and
-        not node.tableColumnFixed and
-        node.tableState.beginTableColumnDrag(node.tableColumnId,
-          rt.pointerX):
-      rt.tableReorder = node.tableState
-      return
+        not node.tableColumnFixed:
+      let tableSlot = int(node.tableState.frameSlot)
+      let (x, _, ok) = rt.frameLayout.localPoint(tableSlot,
+        rt.pointerX, rt.pointerY)
+      if ok and node.tableState.beginTableColumnDrag(node.tableColumnId, x):
+        rt.tableReorder = node.tableState
+        return
     slot = int(node.parent)
 
 proc beginTableResize(rt: Runtime; target: Element): bool =
@@ -2278,11 +2336,14 @@ proc beginTableResize(rt: Runtime; target: Element): bool =
   var slot = int(target.slot)
   while slot > 0 and slot < target.owner.nodes.len:
     let node = target.owner.nodes[slot]
-    if node.tableResizeHandle and node.tableState != nil and
-        node.tableState.beginTableColumnResize(node.tableColumnId,
-          rt.pointerX, target.owner.nodes, rt.frameLayout.rects):
-      rt.tableReorder = node.tableState
-      return true
+    if node.tableResizeHandle and node.tableState != nil:
+      let tableSlot = int(node.tableState.frameSlot)
+      let (x, _, ok) = rt.frameLayout.localPoint(tableSlot,
+        rt.pointerX, rt.pointerY)
+      if ok and node.tableState.beginTableColumnResize(node.tableColumnId,
+          x, target.owner.nodes, rt.frameLayout.rects):
+        rt.tableReorder = node.tableState
+        return true
     slot = int(node.parent)
   false
 
@@ -2381,7 +2442,7 @@ proc showMenuButton(rt: Runtime; identity: uint64;
       owner.effectivelyToolbarCollapsed(slot):
     return
   let node = owner.nodes[slot]
-  let bounds = rt.frameLayout.rects[slot]
+  let bounds = rt.frameLayout.visualRects[slot]
   let menu = newUiMenu(0, "", node.rightToLeft)
   build(menu)
   if menu.snapshot.items.len == 0:
@@ -2433,8 +2494,7 @@ proc autoScrollListReorder(rt: Runtime; state: ListState): bool =
   let top = box.y + node.border[0] + node.pad[0]
   let bottom = box.y + box.h - node.border[2] - node.pad[2]
   if state.reorderPointerX < left or state.reorderPointerX >= right or
-      not rt.frameLayout.insideClips(slot, state.reorderPointerX,
-        state.reorderPointerY):
+      not rt.frameLayout.insideClips(slot, rt.pointerX, rt.pointerY):
     return false
   const edge = 32'f32
   let y = state.reorderPointerY
@@ -2464,8 +2524,7 @@ proc gridReorderTarget(rt: Runtime; state: GridState) =
     return
   let rootBox = rt.frameLayout.rects[rootSlot]
   if not rootBox.contains(state.reorderPointerX, state.reorderPointerY) or
-      not rt.frameLayout.insideClips(rootSlot, state.reorderPointerX,
-        state.reorderPointerY):
+      not rt.frameLayout.insideClips(rootSlot, rt.pointerX, rt.pointerY):
     state.reorderTargetValid = false
     state.reorderTargetCell = -1
     return
@@ -2529,8 +2588,7 @@ proc autoScrollGridReorder(rt: Runtime; state: GridState): bool =
   let top = box.y + node.border[0] + node.pad[0]
   let bottom = box.y + box.h - node.border[2] - node.pad[2]
   if state.reorderPointerX < left or state.reorderPointerX >= right or
-      not rt.frameLayout.insideClips(slot, state.reorderPointerX,
-        state.reorderPointerY):
+      not rt.frameLayout.insideClips(slot, rt.pointerX, rt.pointerY):
     return false
   const edge = 32'f32
   var delta = 0'f32
@@ -2564,7 +2622,7 @@ proc dragPreview(rt: Runtime; slot: int; startX, startY: float32):
   let layout = rt.frameLayout
   if slot <= 0 or slot >= layout.rects.len or not rt.hasScene:
     return
-  let rect = layout.rects[slot]
+  let rect = layout.visualRects[slot]
   let left = max(0'f32, rect.x)
   let top = max(0'f32, rect.y)
   let right = min(rect.x + rect.w, layout.root.w)
@@ -2931,7 +2989,8 @@ proc event(rt: Runtime; ev: platform.SurfaceEvent): bool =
       rt.pointerX = float32(ev.x)
       rt.pointerY = float32(ev.y)
       rt.hasPointer = true
-      discard rt.scrollbarDrag.dragScrollbar(rt.pointerX, rt.pointerY)
+      discard rt.frameLayout.dragScrollbar(rt.scrollbarDrag,
+        rt.pointerX, rt.pointerY)
       rt.refreshPointer()
       rt.requestFrame()
       return false
@@ -2952,30 +3011,43 @@ proc event(rt: Runtime; ev: platform.SurfaceEvent): bool =
       if slot >= 0:
         let node = owner.nodes[slot]
         if node.textClient of TextFieldClient:
+          let (pointerX, pointerY, ok) = rt.frameLayout.localPoint(slot,
+            rt.pointerX, rt.pointerY)
+          if not ok:
+            return false
           let rect = rt.frameLayout.rects[slot]
           let client = TextFieldClient(node.textClient)
           client.insetX = node.pad[3] + node.border[3]
           client.insetY = node.pad[0] + node.border[0]
           if client.fieldPointerSelection(
-              float64(rt.pointerX - rect.x), float64(rt.pointerY - rect.y),
+              float64(pointerX - rect.x), float64(pointerY - rect.y),
               extend = true):
             rt.updateTextInput()
             rt.requestFrame()
-    if rt.listReorder != nil and
-        rt.listReorder.updateListReorder(rt.pointerX, rt.pointerY):
-      rt.listReorderTarget(rt.listReorder)
-      discard rt.autoScrollListReorder(rt.listReorder)
-      rt.requestFrame()
-      return false
-    if rt.gridReorder != nil and
-        rt.gridReorder.updateGridReorder(rt.pointerX, rt.pointerY):
-      rt.gridReorderTarget(rt.gridReorder)
-      discard rt.autoScrollGridReorder(rt.gridReorder)
-      rt.requestFrame()
-      return false
+    if rt.listReorder != nil:
+      let state = rt.listReorder
+      let (x, y, ok) = rt.frameLayout.localPoint(int(state.frameSlot),
+        rt.pointerX, rt.pointerY)
+      if ok and state.updateListReorder(x, y):
+        rt.listReorderTarget(state)
+        discard rt.autoScrollListReorder(state)
+        rt.requestFrame()
+        return false
+    if rt.gridReorder != nil:
+      let state = rt.gridReorder
+      let (x, y, ok) = rt.frameLayout.localPoint(
+        int(state.rows.frameSlot), rt.pointerX, rt.pointerY)
+      if ok and state.updateGridReorder(x, y):
+        rt.gridReorderTarget(state)
+        discard rt.autoScrollGridReorder(state)
+        rt.requestFrame()
+        return false
     if rt.tableReorder != nil:
-      if rt.tableReorder.updateTableColumnDrag(rt.frameLayout.owner.nodes,
-          rt.frameLayout.rects, rt.pointerX):
+      let state = rt.tableReorder
+      let (x, _, ok) = rt.frameLayout.localPoint(int(state.frameSlot),
+        rt.pointerX, rt.pointerY)
+      if ok and state.updateTableColumnDrag(rt.frameLayout.owner.nodes,
+          rt.frameLayout.rects, x):
         rt.requestFrame()
       return false
     if rt.startDragFromPress():
@@ -3121,12 +3193,16 @@ proc event(rt: Runtime; ev: platform.SurfaceEvent): bool =
         rt.focusSlot = slot
         rt.keyboardFocusVisible = false
         if targetNode.textClient of TextFieldClient:
+          let (pointerX, pointerY, ok) = rt.frameLayout.localPoint(slot,
+            rt.pointerX, rt.pointerY)
+          if not ok:
+            return rt.pressTarget.owner != nil
           let rect = rt.frameLayout.rects[slot]
           let client = TextFieldClient(targetNode.textClient)
           client.insetX = targetNode.pad[3] + targetNode.border[3]
           client.insetY = targetNode.pad[0] + targetNode.border[0]
           if client.fieldPointerSelection(
-              float64(rt.pointerX - rect.x), float64(rt.pointerY - rect.y),
+              float64(pointerX - rect.x), float64(pointerY - rect.y),
               (ev.mods and platform.modShift) != 0):
             rt.updateTextInput()
     rt.refreshPointer()
@@ -3185,7 +3261,9 @@ proc event(rt: Runtime; ev: platform.SurfaceEvent): bool =
       return true
     if rt.listReorder != nil:
       let state = rt.listReorder
-      if state.updateListReorder(rt.pointerX, rt.pointerY):
+      let (x, y, ok) = rt.frameLayout.localPoint(int(state.frameSlot),
+        rt.pointerX, rt.pointerY)
+      if ok and state.updateListReorder(x, y):
         rt.listReorderTarget(state)
         let slot = int(state.frameSlot)
         let owner = rt.frameLayout.owner
@@ -3206,7 +3284,9 @@ proc event(rt: Runtime; ev: platform.SurfaceEvent): bool =
       rt.listReorder = nil
     if rt.gridReorder != nil:
       let state = rt.gridReorder
-      if state.updateGridReorder(rt.pointerX, rt.pointerY):
+      let (x, y, ok) = rt.frameLayout.localPoint(
+        int(state.rows.frameSlot), rt.pointerX, rt.pointerY)
+      if ok and state.updateGridReorder(x, y):
         rt.gridReorderTarget(state)
         let slot = int(state.rows.frameSlot)
         let owner = rt.frameLayout.owner
@@ -3214,7 +3294,7 @@ proc event(rt: Runtime; ev: platform.SurfaceEvent): bool =
           slot < owner.nodes.len and
           state.rows.frameOwner == cast[pointer](owner) and
           state.rows.generation == rt.frameLayout.generation and
-          rt.frameLayout.rects[slot].contains(rt.pointerX, rt.pointerY) and
+          rt.frameLayout.containsPointer(slot, rt.pointerX, rt.pointerY) and
           rt.frameLayout.insideClips(slot, rt.pointerX, rt.pointerY)
         discard state.finishGridReorder(commit = canDrop)
         rt.gridReorder = nil
@@ -3228,8 +3308,11 @@ proc event(rt: Runtime; ev: platform.SurfaceEvent): bool =
       rt.gridReorder = nil
     if rt.tableReorder != nil:
       let state = rt.tableReorder
-      discard state.updateTableColumnDrag(rt.frameLayout.owner.nodes,
-        rt.frameLayout.rects, rt.pointerX)
+      let (x, _, ok) = rt.frameLayout.localPoint(int(state.frameSlot),
+        rt.pointerX, rt.pointerY)
+      if ok:
+        discard state.updateTableColumnDrag(rt.frameLayout.owner.nodes,
+          rt.frameLayout.rects, x)
       let moved = state.finishTableColumnDrag()
       rt.tableReorder = nil
       if moved:

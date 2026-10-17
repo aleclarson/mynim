@@ -332,6 +332,51 @@ proc draw*(element: Element;
   if node != nil:
     node.drawFn = callback
 
+proc transform*(element: Element; value: Transform): Element =
+  ## Transforms this element visually without changing its layout space.
+  result = element
+  let node = element.node
+  if node != nil:
+    node[].transform = value
+
+proc translate*(element: Element; x, y: float32): Element =
+  ## Moves the element after its current transform.
+  let node = element.node
+  if node != nil:
+    node[].transform = node[].transform.then(translation(x, y))
+  element
+
+proc scale*(element: Element; x, y: float32): Element =
+  ## Scales the element after its current transform, around its origin.
+  let node = element.node
+  if node != nil:
+    node[].transform = node[].transform.then(scaling(x, y))
+  element
+
+proc rotate*(element: Element; degrees: float32): Element =
+  ## Rotates the element clockwise around its transform origin.
+  let node = element.node
+  if node != nil:
+    node[].transform = node[].transform.then(rotation(degrees))
+  element
+
+proc transformOrigin*(element: Element; x, y: float32): Element =
+  ## Sets the transform origin as fractions of the border box.
+  validateTransformValues(x, y)
+  let node = element.node
+  if node != nil:
+    node[].transformOriginX = x
+    node[].transformOriginY = y
+    node[].transformOriginSet = true
+  element
+
+proc skew*(element: Element; x, y: float32): Element =
+  ## Skews the element after its current transform around its origin.
+  let node = element.node
+  if node != nil:
+    node[].transform = node[].transform.then(skewing(x, y))
+  element
+
 proc painterTransform(painter: Painter; value: Transform;
                       originX, originY: float32): scene.Affine =
   validateTransformValues(originX, originY, painter.root.x, painter.root.y,
@@ -1071,6 +1116,32 @@ proc paintBitmap(s: scene.Scene; node: ElementNode; rect, root: Rect;
     color: sceneColor(node.imageTint), grayscale: node.grayscale,
     opacity: opacity))
 
+proc pixelTransform(layout: LayoutResult; slot: int;
+                    scale: float32): scene.Affine =
+  if slot >= layout.worldTransforms.len:
+    return
+  let world = layout.worldTransforms[slot]
+  if not world.`set`:
+    return
+  let x = scale * (world.a * layout.root.x + world.c * layout.root.y +
+    world.x - layout.root.x)
+  let y = scale * (world.b * layout.root.x + world.d * layout.root.y +
+    world.y - layout.root.y)
+  validateTransformValues(x, y)
+  result = scene.matrix(world.a, world.b, world.c, world.d, x, y)
+
+proc applyLayoutTransform(frame: scene.Scene; first: int;
+                          layout: LayoutResult; slot: int; scale: float32) =
+  let transform = layout.pixelTransform(slot, scale)
+  if not transform.`set`:
+    return
+  for i in first ..< frame.ops.len:
+    if frame.ops[i].kind in {scene.opPushClip, scene.opPopClip}:
+      continue
+    let composed = scene.mul(transform, frame.ops[i].transform)
+    validateTransform(composed)
+    frame.ops[i].transform = composed
+
 proc clipOp(layout: LayoutResult; slot: int; scale: float32): scene.Op =
   let node = layout.owner.nodes[slot]
   let box = layout.rects[slot]
@@ -1093,9 +1164,10 @@ proc clipOp(layout: LayoutResult; slot: int; scale: float32): scene.Op =
     clip.h = 2_000_000'f32
   if not (clipsX and clipsY):
     radii = [0'f32, 0, 0, 0]
-  scene.Op(kind: scene.opPushClip,
+  result = scene.Op(kind: scene.opPushClip,
     rect: clip.sceneRect(layout.root, scale),
     radii: radii.scaledEdges(scale), continuous: continuousCorners)
+  result.transform = layout.pixelTransform(slot, scale)
 
 proc opacityOf(nodes: seq[ElementNode]; slot: int): float32 =
   result = 1
@@ -1314,6 +1386,7 @@ proc paintScene*(layout: LayoutResult; scale = 1'f32;
             result.ops.add(layout.clipOp(parent, scale))
             inc clipCount
           parent = int(layout.owner.nodes[parent].parent)
+        let firstNodeOp = result.ops.len
         for shadow in node.shadows:
           if not node.textInline and not shadow.inset:
             result.paintShadow(node, layout.rects[slot], layout.root,
@@ -1368,6 +1441,7 @@ proc paintScene*(layout: LayoutResult; scale = 1'f32;
             localeTag: layout.owner.localeSnapshot, root: layout.root,
             scale: scale, opacity: opacity)
           node.drawFn(painter, layout.rects[slot])
+        result.applyLayoutTransform(firstNodeOp, layout, slot, scale)
         for _ in 0..<clipCount:
           result.ops.add(scene.Op(kind: scene.opPopClip))
 
@@ -1378,10 +1452,12 @@ proc paintScene*(layout: LayoutResult; scale = 1'f32;
         let client = TextFieldClient(node.textClient)
         if not client.multiline or not (node.clipX or node.clipY):
           continue
+        let firstCaretOp = result.ops.len
         result.ops.add(layout.clipOp(slot, scale))
         result.paintTextCaret(node, layout.rects[slot], layout.root,
                               scale, opacityOf(layout.owner.nodes, slot))
         result.ops.add(scene.Op(kind: scene.opPopClip))
+        result.applyLayoutTransform(firstCaretOp, layout, slot, scale)
 
       for slot in layout.owner.paintSlots:
         let node = layout.owner.nodes[slot]
@@ -1392,15 +1468,18 @@ proc paintScene*(layout: LayoutResult; scale = 1'f32;
           continue
         let bars = layout.scrollbars(slot)
         let opacity = opacityOf(layout.owner.nodes, slot)
+        let firstScrollbarOp = result.ops.len
         if bars.vertical:
           paintScrollbar(result, layout, slot, bars.verticalThumb, scale,
             opacity)
         if bars.horizontal:
           paintScrollbar(result, layout, slot, bars.horizontalThumb, scale,
             opacity)
+        result.applyLayoutTransform(firstScrollbarOp, layout, slot, scale)
 
       for slot in layout.owner.paintSlots:
         let node = layout.owner.nodes[slot]
+        let firstDecorationOp = result.ops.len
         if node.listState != nil and node.listRowIndex == -1:
           result.paintListReorderIndicator(layout, slot, scale)
         if node.listRowFocusVisible:
@@ -1408,6 +1487,7 @@ proc paintScene*(layout: LayoutResult; scale = 1'f32;
         elif node.focusVisible and node.focusable and
             not node.focusRingDisabled:
           result.paintFocusRing(layout, slot, scale)
+        result.applyLayoutTransform(firstDecorationOp, layout, slot, scale)
 
       if not system.full() or attempt == 2:
         break
