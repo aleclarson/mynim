@@ -78,6 +78,7 @@ proc changedFiles(before, after: DevSnapshot): seq[string] =
 
 proc stableChanges(projectDir: string; previous: DevSnapshot):
     tuple[snapshot: DevSnapshot, paths: seq[string]] =
+  sleep(250)
   var current = fileSnapshot(projectDir)
   if current == previous:
     return (current, @[])
