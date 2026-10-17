@@ -3,6 +3,9 @@
 type
   Context* = ref ContextObj ## Stable context for one window's UI builds.
 
+  Material* = ref object of RootObj
+    ## A fill that paints itself using a Painter and the element's shape.
+
   ContextObj = object
     owner: ElementOwner
     serviceState: UiServiceState
@@ -588,6 +591,7 @@ type
       justifySelf: Align
     cols, rows: seq[Track]
     background, borderColor, listSelectedTextColor, focusRingColor: Color
+    material: Material
     opacity: float32
     opacitySet: bool
     scrollState: ScrollState
@@ -1318,6 +1322,10 @@ proc node(e: Element): ptr ElementNode =
       e.generation != e.owner.generation or int(e.slot) >= e.owner.nodes.len:
     return nil
   addr e.owner.nodes[int(e.slot)]
+
+method buildMaterial*(material: Material; element: Element): Material {.base.} =
+  ## Lets a material derive a frame-specific version from its element state.
+  material
 
 proc inActiveModalScope(owner: ElementOwner; slot: int): bool =
   owner != nil and slot > 0 and slot < owner.nodes.len and

@@ -61,6 +61,17 @@ proc background*(e: Element; color: Color): Element =
     n.background = color
     n.backgroundSet = true
     n.hasGradient = false
+    n.material = nil
+
+proc material*(e: Element; value: Material): Element =
+  ## Fills the element with a custom material instead of its background.
+  result = e
+  let n = e.node
+  if n != nil:
+    n.material = if value == nil: nil else: value.buildMaterial(e)
+    n.background = transparent
+    n.backgroundSet = false
+    n.hasGradient = false
 
 proc opacity*(e: Element; value: float32): Element =
   ## Multiplies the opacity of this element and all its descendants.
@@ -77,6 +88,7 @@ proc gradient*(e: Element; value: LinearGradient): Element =
   if n != nil:
     n.gradient = value
     n.hasGradient = true
+    n.material = nil
 
 proc gradient*(e: Element; fromColor, toColor: Color;
                angle: float32): Element =
@@ -651,6 +663,42 @@ proc imageRegion*(painter: var Painter; bitmap: Bitmap; source, destination: Rec
 proc scale*(painter: Painter): float32 =
   ## Returns physical pixels per device-independent pixel for this surface.
   painter.scale
+
+proc theme*(painter: Painter): Theme =
+  ## Returns the theme used to paint the current frame.
+  painter.theme
+
+proc effectColor*(painter: Painter; color: Color):
+    tuple[srgb, wide: array[4, float32]] =
+  ## Returns straight sRGB and extended-sRGB values for an effect parameter.
+  result.srgb = [color.r.float32 / 255, color.g.float32 / 255,
+    color.b.float32 / 255, color.a.float32 / 255]
+  result.wide = result.srgb
+  discard color.wideRgba(result.wide)
+
+method paintMaterial*(material: Material; painter: var Painter; box: Rect;
+                      radii: array[4, float32]) {.base.} =
+  ## Paints this material under the element's border and children.
+  discard
+
+proc effect*(painter: var Painter; effect: ref scene.Effect; rect: Rect;
+             radii: array[4, float32]; blur: float32;
+             params: array[5, array[4, float32]]) =
+  ## Adds a custom scene effect in DIPs. Blur and effect parameters use
+  ## device pixels, matching the renderer contract.
+  if effect == nil or painter.frame == nil or rect.w <= 0 or rect.h <= 0:
+    return
+  if not blur.finite:
+    raise newException(ValueError, "ui: effect blur must be finite")
+  if painter.frame.effects.len >= high(int32).int:
+    raise newException(ValueError, "ui: too many effects in one frame")
+  let op = scene.Op(kind: scene.opEffect,
+    rect: sceneRect(rect, painter.root, painter.scale),
+    radii: radii.scaledEdges(painter.scale), continuous: continuousCorners,
+    first: int32(painter.frame.effects.len), opacity: painter.opacity)
+  painter.frame.ops.add(op)
+  painter.frame.effects.add(scene.EffectOp(effect: effect,
+    blur: blur, params: params))
 
 proc clip*(painter: var Painter; rect: Rect; radius: float32;
            callback: proc(painter: var Painter) {.closure.}) =
@@ -1489,7 +1537,8 @@ proc paintScene*(layout: LayoutResult; scale = 1'f32;
           continue
         let fill = if node.hasGradient: node.gradient.fromColor else: node.background
         let fill2 = if node.hasGradient: node.gradient.toColor else: transparent
-        let fillVisible = if node.textInline:
+        let materialVisible = node.material != nil and not node.textInline
+        let fillVisible = if node.textInline or materialVisible:
             false
           elif node.hasGradient:
             fill.a > 0 or fill2.a > 0
@@ -1498,8 +1547,8 @@ proc paintScene*(layout: LayoutResult; scale = 1'f32;
         let borderVisible = not node.textInline and
           node.borderColor.a > 0 and scene.hasBorder(node.border)
         if not fillVisible and not borderVisible and node.shadows.len == 0 and
-            not node.hasText and node.bitmap == nil and node.vector == nil and
-            node.drawFn == nil:
+            node.material == nil and not node.hasText and node.bitmap == nil and
+            node.vector == nil and node.drawFn == nil:
           continue
 
         let rect = layout.rects[slot].sceneRect(layout.root, scale)
@@ -1520,6 +1569,12 @@ proc paintScene*(layout: LayoutResult; scale = 1'f32;
           if not node.textInline and not shadow.inset:
             result.paintShadow(node, layout.rects[slot], layout.root,
                                scale, opacity, shadow)
+        if materialVisible:
+          var painter = Painter(frame: result, textSystem: system,
+            theme: layout.owner.themeSnapshot,
+            localeTag: layout.owner.localeSnapshot, root: layout.root,
+            scale: scale, opacity: opacity)
+          node.material.paintMaterial(painter, layout.rects[slot], node.radius)
         if fillVisible or borderVisible:
           var op = scene.Op(kind: scene.opFill, rect: rect,
             color: sceneColor(fill), color2: sceneColor(fill2),

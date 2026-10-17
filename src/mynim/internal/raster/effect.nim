@@ -69,27 +69,26 @@ proc average(bd: var backdrop; dst: ptr Image; j: int) =
   ## area, those along its far edges repeating its last pixels, as a
   ## texture's edges do.
   let
-    img = bd.img
-    k = img.backdrop.down
+    k = bd.img.backdrop.down
     inv = 1 / float32(k * k)
-  for i in 0 ..< img.w:
+  for i in 0 ..< bd.img.w:
     var c: array[4, float32]
     for dy in 0 ..< k:
-      let y = min(img.backdrop.area.min.y + j * k + dy,
-                  img.backdrop.area.max.y - 1)
+      let y = min(bd.img.backdrop.area.min.y + j * k + dy,
+                  bd.img.backdrop.area.max.y - 1)
       let row = y * dst.stride
       for dx in 0 ..< k:
-        let x = min(img.backdrop.area.min.x + i * k + dx,
-                    img.backdrop.area.max.x - 1)
+        let x = min(bd.img.backdrop.area.min.x + i * k + dx,
+                    bd.img.backdrop.area.max.x - 1)
         let p = row + 4 * x
         ## BGRA to RGBA.
         c[0] += float32(dst.pix[p + 2]) / 255
         c[1] += float32(dst.pix[p + 1]) / 255
         c[2] += float32(dst.pix[p]) / 255
         c[3] += float32(dst.pix[p + 3]) / 255
-    let o = 4 * (j * img.w + i)
+    let o = 4 * (j * bd.img.w + i)
     for ch in 0 ..< 4:
-      img.pix[o + ch] = texel(c[ch] * inv)
+      bd.img.pix[o + ch] = texel(c[ch] * inv)
 
 proc blur(bd: var backdrop; dst, src: var seq[float32]; step, next, n,
           line: int) =
@@ -97,26 +96,26 @@ proc blur(bd: var backdrop; dst, src: var seq[float32]; step, next, n,
   ## clamping at its ends.
   let
     rad = bd.img.backdrop.radius
-    w = bd.weights
+    weights = cast[ptr UncheckedArray[float32]](unsafeAddr bd.weights[0])
   ## Every texel takes every weight, those past the ends on the last
   ## texel.
-  var sum = w[0]
+  var sum = weights[0]
   for o in 1 .. rad:
-    sum += 2 * w[o]
+    sum += 2 * weights[o]
   let base = line * next
   for i in 0 ..< n:
     let p = base + i * step
     var
-      c0 = src[p] * w[0]
-      c1 = src[p + 1] * w[0]
-      c2 = src[p + 2] * w[0]
-      c3 = src[p + 3] * w[0]
+      c0 = src[p] * weights[0]
+      c1 = src[p + 1] * weights[0]
+      c2 = src[p + 2] * weights[0]
+      c3 = src[p + 3] * weights[0]
     if i >= rad and i + rad < n:
       for o in 1 .. rad:
         let
           a = base + (i - o) * step
           b = base + (i + o) * step
-          wo = w[o]
+          wo = weights[o]
         c0 += (src[a] + src[b]) * wo
         c1 += (src[a + 1] + src[b + 1]) * wo
         c2 += (src[a + 2] + src[b + 2]) * wo
@@ -126,7 +125,7 @@ proc blur(bd: var backdrop; dst, src: var seq[float32]; step, next, n,
         let
           a = base + max(i - o, 0) * step
           b = base + min(i + o, n - 1) * step
-          wo = w[o]
+          wo = weights[o]
         c0 += (src[a] + src[b]) * wo
         c1 += (src[a + 1] + src[b + 1]) * wo
         c2 += (src[a + 2] + src[b + 2]) * wo
@@ -139,14 +138,13 @@ proc blur(bd: var backdrop; dst, src: var seq[float32]; step, next, n,
 
 proc line(bd: var backdrop; member, i: int) =
   ## Does line i of the pass.
-  let img = bd.img
   case bd.pass
   of averagePass:
     bd.average(bd.dst, i)
   of rowsPass:
-    bd.blur(bd.tmp, img.pix, 4, 4 * img.w, img.w, i)
+    bd.blur(bd.tmp, bd.img.pix, 4, 4 * bd.img.w, bd.img.w, i)
   else:
-    bd.blur(img.pix, bd.tmp, 4 * img.w, 4, img.h, i)
+    bd.blur(bd.img.pix, bd.tmp, 4 * bd.img.w, 4, bd.img.h, i)
 
 proc backdropLineWork(context: pointer; member, part: int)
     {.gcsafe, nimcall.} =
@@ -173,6 +171,8 @@ proc run(bd: var backdrop; pass, n, work: int) =
 
 proc read(bd: var backdrop; dst: ptr Image; b: scene.Backdrop) =
   ## Computes the backdrop b of dst.
+  if bd.img.isNil:
+    new(bd.img)
   let img = bd.img
   img.backdrop = b
   (img.w, img.h) = b.size()

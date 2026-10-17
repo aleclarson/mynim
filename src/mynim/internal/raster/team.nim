@@ -15,10 +15,10 @@ type
     member: int
 
 proc work(t: ptr team, member: int) {.gcsafe.} =
-  var p = t.next.fetchAdd(1, moRelaxed) - 1
+  var p = t.next.fetchAdd(1, moRelaxed)
   while p < t.parts:
     t.work(t.context, member, p)
-    p = t.next.fetchAdd(1, moRelaxed) - 1
+    p = t.next.fetchAdd(1, moRelaxed)
 
 proc help(s: share) {.thread.} =
   {.cast(gcsafe).}:
