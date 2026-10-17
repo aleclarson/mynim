@@ -221,6 +221,22 @@ proc parseNamedFacts(tokens: seq[GoToken]; pairs: seq[int];
         result.names.add name
         result.facts.add fact
 
+proc isFunctionDeclaration(tokens: seq[GoToken]; pairs: seq[int]; index: int;
+                           topLevel: bool): bool =
+  if not topLevel or index + 1 >= tokens.len: return false
+  if tokens[index + 1].kind == tokenIdentifier: return true
+  if tokens[index + 1].text == "(":
+    let receiverClose = pairs[index + 1]
+    return receiverClose > index + 1 and receiverClose + 2 < tokens.len and
+      tokens[receiverClose + 1].kind == tokenIdentifier and
+      tokens[receiverClose + 2].text == "("
+
+proc isFunctionLiteral(tokens: seq[GoToken]; index: int): bool =
+  if index == 0: return false
+  tokens[index - 1].text in ["(", ",", "=", ":=", "return", ":", "!",
+                             "go", "defer", "if", "switch", "case", "{",
+                             "<-", "&&", "||"]
+
 proc functionInfo(tokens: seq[GoToken]; pairs: seq[int]; index: int;
                   alias: string; declaration: bool): FunctionInfo =
   result.bodyOpen = -1
@@ -253,6 +269,7 @@ proc functionInfo(tokens: seq[GoToken]; pairs: seq[int]; index: int;
     body = endResults + 1
   else:
     while body < tokens.len:
+      if tokens[body].text in [")", "}", ";"]: return
       if tokens[body].text == "{":
         if body > 0 and tokens[body - 1].text in ["interface", "struct"] and
             pairs[body] > body:
@@ -275,7 +292,9 @@ proc prepareScopes(tokens: seq[GoToken]; pairs: seq[int]; alias: string):
   result = makeScopeTree(tokens)
   for i, token in tokens:
     if token.text != "func": continue
-    let isDeclaration = result.tokenScope[i] == 0
+    let isDeclaration = isFunctionDeclaration(tokens, pairs, i,
+                                               result.tokenScope[i] == 0)
+    if not isDeclaration and not isFunctionLiteral(tokens, i): continue
     let fn = functionInfo(tokens, pairs, i, alias, isDeclaration)
     if fn.bodyOpen < 0 or fn.bodyOpen >= result.openScope.len: continue
     let scopeId = result.openScope[fn.bodyOpen]
@@ -375,6 +394,23 @@ proc assignmentEnd(tokens: seq[GoToken]; pairs: seq[int]; first: int): int =
                                  "*", "/", "(", "[", "{"]:
       break
     if tokens[i].text in [",", ";", "}"]:
+      break
+    if tokens[i].text in ["(", "[", "{"] and pairs[i] > i:
+      i = pairs[i] + 1
+    else:
+      inc i
+  result = i
+
+proc statementEnd(tokens: seq[GoToken]; pairs: seq[int]; first: int): int =
+  result = first
+  var i = first
+  while i < tokens.len:
+    if i > first and tokens[i].line > tokens[i - 1].line and
+        tokens[i - 1].text notin [".", ",", "=", ":=", "&", "|", "+",
+                                 "-", "*", "/", "(", "[", "{", "&&",
+                                 "||"]:
+      break
+    if tokens[i].text in [";", "}"]:
       break
     if tokens[i].text in ["(", "[", "{"] and pairs[i] > i:
       i = pairs[i] + 1
@@ -847,6 +883,19 @@ proc migrateSource(source: string; facts: PackageFacts): MigrationResult =
       replacement: move.contextText & ".Key(" & move.keys.join(").Key(") & ")")
 
   for i, token in tokens:
+    if token.text == "return" and i + 1 < tokens.len:
+      let returns = functionReturn(scopes.scopes, scopes.tokenScope[i])
+      if returns.len > 0:
+        let endIndex = statementEnd(tokens, pairs, i + 1)
+        let values = splitTopLevel(tokens, pairs, i + 1, endIndex, ",")
+        for valueIndex, (first, past) in values:
+          if valueIndex < returns.len and past == first + 1 and
+              tokens[first].text == "nil" and returns[valueIndex].kind.len > 0 and
+              returns[valueIndex].kind != "Context":
+            edits.add Edit(first: tokens[first].first,
+              past: tokens[first].past,
+              replacement: alias & "." & returns[valueIndex].kind & "{}")
+
     if token.text in ["==", "!="] and i > 0 and i + 1 < tokens.len:
       if tokens[i + 1].text == "nil":
         let endIndex = i - 1
@@ -876,15 +925,11 @@ proc migrateSource(source: string; facts: PackageFacts): MigrationResult =
     if token.text == "nil" and i > 0:
       if tokens[i - 1].text in ["=", ":="] and i >= 2:
         let lhsEnd = i - 2
-        if expressionFact(tokens, pairs, lhsEnd, alias, facts,
-                          scopes.scopes, scopes.tokenScope).kind == "Element":
+        let kind = expressionFact(tokens, pairs, lhsEnd, alias, facts,
+                                  scopes.scopes, scopes.tokenScope).kind
+        if kind.len > 0 and kind != "Context":
           edits.add Edit(first: token.first, past: token.past,
-                        replacement: alias & ".Element{}")
-      elif tokens[i - 1].text == "return":
-        let returns = functionReturn(scopes.scopes, scopes.tokenScope[i - 1])
-        if returns.len > 0 and returns[0].kind == "Element":
-          edits.add Edit(first: token.first, past: token.past,
-                        replacement: alias & ".Element{}")
+                        replacement: alias & "." & kind & "{}")
 
   if edits.len > 0:
     result.source = applyEdits(source, edits)

@@ -51,12 +51,25 @@ block scoped_nil_migration:
   let source = """package app
 import native "github.com/egoist/mygo/ui"
 func missing() *native.Element { return nil }
+func contextNil() *native.Context { return nil }
+func pair() (*native.Element, *native.TabsParts) { return nil, nil }
+func one() (int, *native.Element) { return 0, nil }
+func closureFacts(c *native.Context) *int {
+  callback := func(element *native.Element) *native.Element {
+    if element != nil { element.Focus() }
+    return nil
+  }
+  _ = callback
+  return nil
+}
 func view(c *native.Context) {
   element := native.Text(c, "Hello")
   if element != nil { element.Focus() }
   var stored *native.Element
+  var parts *native.TabsParts
   if stored == nil { stored = element }
   stored = nil
+  parts = nil
   var other *int
   if other == nil { _ = other }
 }
@@ -64,10 +77,20 @@ func view(c *native.Context) {
   let migrated = migrateFile("view.go", source)
   doAssert "func missing() native.Element { return native.Element{} }" in
     migrated.source
+  doAssert "func contextNil() *native.Context { return nil }" in
+    migrated.source
+  doAssert "return native.Element{}, native.TabsParts{}" in migrated.source
+  doAssert "return 0, native.Element{}" in migrated.source
   doAssert "if element.Valid()" in migrated.source
   doAssert "if !stored.Valid()" in migrated.source
   doAssert "stored = native.Element{}" in migrated.source
+  doAssert "parts = native.TabsParts{}" in migrated.source
   doAssert "if other == nil" in migrated.source
+  doAssert "if element.Valid()" in migrated.source
+  doAssert "callback := func(element native.Element) native.Element {\n    if element.Valid() { element.Focus() }\n    return native.Element{}\n  }" in
+    migrated.source, migrated.source
+  doAssert "return native.Element{}" in migrated.source
+  doAssert "return nil" in migrated.source
 
 block package_facts:
   let sources = {
