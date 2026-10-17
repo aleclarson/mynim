@@ -11,6 +11,8 @@ when hostOS == "macosx":
 when hostOS == "linux":
   import ./linux_package as linuxPackage
   import ./linux_install_script as linuxInstallScript
+when hostOS == "windows":
+  import ./windows_sign as windowsSign
 
 const usageBuild = """Usage: nim-xplat build [flags] [dir]
 
@@ -474,6 +476,8 @@ proc runBuild*(args: seq[string]): int =
         return 1
       projectResources.copyResources(projectDir, stage, targetOs, targetArch,
         config)
+      when hostOS == "windows":
+        windowsSign.signWindowsBuild(projectDir, stage, executable, config)
       when hostOS == "linux":
         discard linuxPackage.writeLinuxDesktop(projectDir, stage, name,
           executable, config)
