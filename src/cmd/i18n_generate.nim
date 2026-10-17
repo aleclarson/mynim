@@ -409,7 +409,10 @@ proc generateCatalogModules*(projectDir, sourcePath: string;
     if kind == pcFile and path.endsWith(".json") and
         not path.lastPathPart().startsWith("."):
       paths.add path
-  paths.sort()
+  paths.sort(proc(a, b: string): int =
+    let aName = a.lastPathPart()
+    let bName = b.lastPathPart()
+    cmp(aName[0 ..< aName.len - 5], bName[0 ..< bName.len - 5]))
 
   var tags, contents: seq[string]
   var sourceDocument: JsonNode
