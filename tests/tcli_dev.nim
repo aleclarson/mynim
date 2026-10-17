@@ -51,10 +51,12 @@ if getEnv("NIM_XPLAT_GENERATE").len == 0:
 
   let nimble = findExe("nimble")
   doAssert nimble.len > 0, "nimble was not found on PATH"
+  let nim = findExe("nim")
+  doAssert nim.len > 0, "nim was not found on PATH"
   let cli = temporary / "nim-xplat"
-  let builtCli = run(nimble, @[
-    "c", "--out:" & cli, getCurrentDir() / "src" / "cmd" / "nim_xplat.nim"],
-    getCurrentDir())
+  let builtCli = run(nim, @[
+    "c", "--path:src", "--out:" & cli,
+    getCurrentDir() / "src" / "cmd" / "nim_xplat.nim"], getCurrentDir())
   doAssert builtCli.code == 0, builtCli.output
 
   var env = newStringTable(modeCaseSensitive)
@@ -62,7 +64,22 @@ if getEnv("NIM_XPLAT_GENERATE").len == 0:
     env[key] = value
   env["MYNIM_DEV_TEST_MARKER"] = marker
   env.del("NIM_XPLAT_GENERATE")
-  let process = startProcess(cli, args = @["dev", "-lang", "en-XA", project],
+  var devArgs = @[
+    "dev", "-lang", "en-XA", project]
+  when hostOS == "macosx":
+    let fakeBin = temporary / "fake-bin"
+    createDir(fakeBin)
+    let fakeCodesign = fakeBin / "codesign"
+    writeFile(fakeCodesign, """#!/bin/sh
+printf '%s\n' "$*" >> "$MYNIM_TEST_CODESIGN_LOG"
+exit 0
+""")
+    setFilePermissions(fakeCodesign, {fpUserRead, fpUserWrite, fpUserExec})
+    env["PATH"] = fakeBin & ":" & getEnv("PATH")
+    env["MYNIM_TEST_CODESIGN_LOG"] = temporary / "codesign-calls.txt"
+    devArgs.insert("Development Identity", 1)
+    devArgs.insert("-sign", 1)
+  let process = startProcess(cli, args = devArgs,
     workingDir = project, env = env, options = {poUsePath, poStdErrToStdOut})
   try:
     if not waitForRuns(marker, process, 1, 60_000):
@@ -86,6 +103,9 @@ if getEnv("NIM_XPLAT_GENERATE").len == 0:
     doAssert "Dev integration Dev" in output, output
     doAssert "en-XA" in output, output
     doAssert "Running updated Dev Reloaded Dev" in output, output
+    when hostOS == "macosx":
+      let signingCalls = readFile(env["MYNIM_TEST_CODESIGN_LOG"])
+      doAssert "--sign Development Identity" in signingCalls, signingCalls
   finally:
     if process.peekExitCode() == -1:
       process.terminate()

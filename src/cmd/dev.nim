@@ -3,6 +3,8 @@
 import std/[algorithm, hashes, httpclient, json, os, osproc, streams, strtabs,
   strutils, tables, tempfiles]
 import ./build as nativeBuild
+when hostOS == "macosx":
+  import ./codesign as macCodeSign
 import ./generate
 import ./resources as projectResources
 
@@ -17,7 +19,7 @@ catalogs, or project configuration changes.
 
 Flags:
   -skip-dev-command  do not start devCommand from mygo.json
-  -sign identity     custom signing is not ported yet
+  -sign identity     macOS signing identity (default: ad hoc)
   -lang tag          run in a language such as de or zh-Hant
   -web               browser development is not ported yet
   -h, --help         show this help
@@ -155,7 +157,8 @@ proc appExecutable(stage, name: string):
     result = (stage / binary, stage)
 
 proc buildDevApp(projectDir, source, devRoot, name, identifier, version: string;
-    config: JsonNode): tuple[stage, executable: string, code: int, log: string] =
+    config: JsonNode; signingIdentity: string):
+    tuple[stage, executable: string, code: int, log: string] =
   result.stage = createTempDir(".mynim-dev-", "", devRoot)
   try:
     let nimble = findExe("nimble")
@@ -184,6 +187,24 @@ proc buildDevApp(projectDir, source, devRoot, name, identifier, version: string;
     when hostOS == "macosx":
       nativeBuild.writeInfoPlist(resourceDir.parentDir() / "Info.plist",
         name & " Dev", identifier & ".dev", version, executable.lastPathPart())
+      var macosConfig = newJObject()
+      if config.hasKey("macos") and config["macos"].kind != JNull:
+        if config["macos"].kind != JObject:
+          raise newException(ValueError, "mygo.json: macos must be an object")
+        macosConfig = config["macos"]
+      let entitlementsName = nativeBuild.configString(macosConfig,
+        "entitlements", "")
+      let entitlements = if entitlementsName.len == 0: ""
+        elif isAbsolute(entitlementsName): entitlementsName
+        else: projectDir / entitlementsName
+      let helpers = macCodeSign.helperEntitlements(macosConfig, projectDir)
+      macCodeSign.signBundle(result.stage / (nativeBuild.slug(name) &
+        "-dev.app"), signingIdentity, entitlements, helpers,
+        production = false)
+    else:
+      if signingIdentity != "-":
+        stderr.writeLine("nim-xplat dev: not signing " & name &
+          " Dev; code signing needs macOS")
     result.executable = executable
     result.code = 0
   except CatchableError as error:
@@ -254,7 +275,8 @@ proc waitForDevUrl(url: string; server: Process): bool =
 proc runDev*(args: seq[string]): int =
   var skipDevCommand = false
   var web = false
-  var lang, sign = ""
+  var lang = ""
+  var sign = "-"
   var paths: seq[string]
   var index = 0
   while index < args.len:
@@ -301,10 +323,6 @@ proc runDev*(args: seq[string]): int =
   if web:
     stderr.writeLine("nim-xplat dev: browser development is not ported yet")
     return 1
-  if sign.len > 0 and sign != "-":
-    stderr.writeLine("nim-xplat dev: code signing is not ported yet")
-    return 1
-
   var app: Process
   var server: Process
   var currentStage = ""
@@ -343,7 +361,7 @@ proc runDev*(args: seq[string]): int =
     createDir(devDir)
     let (_, _, platformName) = nativeBuild.hostTarget()
     var built = buildDevApp(projectDir, source, devDir, settings.name,
-      settings.identifier, settings.version, config)
+      settings.identifier, settings.version, config, sign)
     if built.code != 0:
       stderr.writeLine("nim-xplat dev: app compilation failed")
       stderr.writeLine(built.log)
@@ -389,7 +407,7 @@ proc runDev*(args: seq[string]): int =
         stderr.writeLine("nim-xplat dev: keeping the current app after generation failed")
         continue
       let next = buildDevApp(projectDir, source, devDir, nextSettings.name,
-        nextSettings.identifier, nextSettings.version, nextConfig)
+        nextSettings.identifier, nextSettings.version, nextConfig, sign)
       if next.code != 0:
         stderr.writeLine("nim-xplat dev: app compilation failed; keeping the current app")
         stderr.writeLine(next.log)
