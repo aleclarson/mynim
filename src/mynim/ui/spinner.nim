@@ -39,3 +39,4 @@ proc spinner*(c: Context): Element =
     node.accessNow = -1
   if not c.owner.reduceMotion:
     c.owner.animating = true
+    c.owner.otherAnimating = true

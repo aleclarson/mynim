@@ -1762,7 +1762,9 @@ proc keyframes*(e: Element; key: string; frames: openArray[Keyframe];
     sequence.done = sampled.done
     if sequence.done:
       sequence.restedGeneration = owner.generation
-    owner.animating = owner.animating or not sequence.done
+    if not sequence.done:
+      owner.animating = true
+      owner.otherAnimating = true
   sequence.generation = owner.generation
   sequences[key] = sequence
   owner.keyframes[node.identity] = sequences
@@ -1881,9 +1883,11 @@ proc timelineCue(state: TimelineState; owner: ElementOwner;
   state.restedGeneration = 0
   if held and not state.built:
     owner.animating = true
+    owner.otherAnimating = true
     return
   if state.moving:
     owner.animating = true
+    owner.otherAnimating = true
 
 proc timelineTick(state: TimelineState; owner: ElementOwner;
                   options: TimelineOptions) =
@@ -2017,6 +2021,7 @@ proc tween*(timeline: Timeline; value: Tween;
         ending > timeline.state.duration:
       timeline.state.moving = true
       timeline.owner.animating = true
+      timeline.owner.otherAnimating = true
   timeline.previousStart = start
   timeline.previousEnd = ending
   timeline.tweenValue(segment)
@@ -2077,7 +2082,8 @@ proc cubicEaseOut(progress: float32): float32 =
   1'f32 - inverse * inverse * inverse
 
 proc update(channel: var ScalarAnimation; owner: ElementOwner; target: float64;
-            animation: Animation; respectReduceMotion = true): float64 =
+            animation: Animation; respectReduceMotion = true;
+            poseChannel = false): float64 =
   if not channel.initialized or
       (channel.generation != owner.generation and
        channel.generation + 1 != owner.generation):
@@ -2120,6 +2126,10 @@ proc update(channel: var ScalarAnimation; owner: ElementOwner; target: float64;
       channel.precision = physics.precision
     if channel.moving or channel.pending:
       owner.animating = true
+      if poseChannel:
+        owner.poseAnimating = true
+      else:
+        owner.otherAnimating = true
     elif moving:
       channel.restedGeneration = owner.generation
 
@@ -2128,7 +2138,7 @@ proc update(channel: var ScalarAnimation; owner: ElementOwner; target: float64;
 
 proc animateValue(e: Element; key: string; target: float32;
                   animation: Animation;
-                  respectReduceMotion: bool): float32 =
+                  respectReduceMotion: bool; poseChannel = false): float32 =
   if not finiteMotion(float64(target)):
     raise newException(ValueError, "ui: animation values must be finite")
   animation.validateAnimation()
@@ -2140,7 +2150,7 @@ proc animateValue(e: Element; key: string; target: float32;
     initTable[string, ScalarAnimation]())
   var channel = channels.getOrDefault(key)
   let value = channel.update(owner, float64(target), animation,
-    respectReduceMotion)
+    respectReduceMotion, poseChannel)
   channels[key] = channel
   owner.animations[node.identity] = channels
   float32(value)
@@ -2689,20 +2699,25 @@ proc layoutAt(c: Context; bounds: Rect; now: MonoTime;
                 Align.Start)
           state.columns = columns
           result.animating = true
+          c.owner.otherAnimating = true
       if node.listState != nil and
           node.listState.frameOwner == cast[pointer](c.owner) and
           node.listState.frameSlot == int32(slot) and
           node.listState.generation == c.owner.generation:
         if node.listRowIndex >= 0:
-          result.animating = node.listState.observeListHeight(
-            node.listRowIndex, c.owner.rectScratch[slot].h) or
-            result.animating
+          let observing = node.listState.observeListHeight(
+            node.listRowIndex, c.owner.rectScratch[slot].h)
+          result.animating = observing or result.animating
+          c.owner.otherAnimating = c.owner.otherAnimating or observing
         else:
-          result.animating = node.listState.observeListViewport(
-            max(c.owner.rectScratch[slot].h - node.contentInsetY, 0'f32)) or
-            result.animating
-    result.animating = updateScrollRanges(c.owner.nodes, c.owner.rectScratch,
-      now, reduceMotion) or result.animating
+          let observing = node.listState.observeListViewport(
+            max(c.owner.rectScratch[slot].h - node.contentInsetY, 0'f32))
+          result.animating = observing or result.animating
+          c.owner.otherAnimating = c.owner.otherAnimating or observing
+    let scrollAnimating = updateScrollRanges(c.owner.nodes,
+      c.owner.rectScratch, now, reduceMotion)
+    result.animating = scrollAnimating or result.animating
+    c.owner.otherAnimating = c.owner.otherAnimating or scrollAnimating
     revealInScrollContainers(c.owner.nodes, c.owner.rectScratch)
     shiftScrolledRects(c.owner.nodes, result.rects)
     alignFormLabelBaselines(c.owner.nodes, result.rects)
@@ -2717,11 +2732,12 @@ proc layoutAt(c: Context; bounds: Rect; now: MonoTime;
       var first = high(int)
       var last = -1
       let viewport = result.rects[slot]
-      result.animating = state.applyListFollowAnimation(
+      let followAnimating = state.applyListFollowAnimation(
         c.owner.nodes, result.rects, slot,
         max(viewport.w - node.contentInsetX, 0'f32),
-        max(viewport.h - node.contentInsetY, 0'f32), now, reduceMotion) or
-        result.animating
+        max(viewport.h - node.contentInsetY, 0'f32), now, reduceMotion)
+      result.animating = followAnimating or result.animating
+      c.owner.otherAnimating = c.owner.otherAnimating or followAnimating
       pinActiveListHeaders(c.owner.nodes, result.rects, state, slot)
       let top = viewport.y + node.border[0] + node.pad[0]
       let bottom = viewport.y + viewport.h - node.border[2] - node.pad[2]
@@ -2735,7 +2751,9 @@ proc layoutAt(c: Context; bounds: Rect; now: MonoTime;
           last = max(last, row.listRowIndex)
       if first == high(int):
         first = 0
-      result.animating = state.finishList(first, last) or result.animating
+      let finishing = state.finishList(first, last)
+      result.animating = finishing or result.animating
+      c.owner.otherAnimating = c.owner.otherAnimating or finishing
       updateListReorderTarget(c.owner.nodes, result.rects, state, slot)
   for slot in 1..<c.owner.nodes.len:
     let anchorIdentity = c.owner.nodes[slot].overlayAnchorIdentity
@@ -2871,6 +2889,8 @@ proc layoutAt(c: Context; bounds: Rect; now: MonoTime;
     if node.identity in c.owner.trackedBounds:
       c.owner.lastBounds[node.identity] = result.rects[slot]
       c.owner.lastTransforms[node.identity] = result.worldTransforms[slot]
+  result.poseOnlyAnimating = result.animating and c.owner.poseAnimating and
+    not c.owner.otherAnimating
 
 proc layout*(c: Context; bounds: Rect): LayoutResult =
   ## Lays out the latest completed build inside bounds.

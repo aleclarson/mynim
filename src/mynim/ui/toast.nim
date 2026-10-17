@@ -215,6 +215,7 @@ proc toastViewport(c: Context; keepEmpty: bool;
     for entry in owner.toasts:
       if entry.toast.life() > initDuration():
         owner.animating = true
+        owner.otherAnimating = true
         break
 
 proc toastViewportBase*(c: Context;
@@ -254,9 +255,11 @@ proc buildToasts(c: Context) =
           if age < fade:
             opacity = age.inNanoseconds.float32 / fade.inNanoseconds.float32
             c.owner.animating = true
+            c.owner.otherAnimating = true
           elif parts.left > initDuration() and parts.left < fade:
             opacity = parts.left.inNanoseconds.float32 / fade.inNanoseconds.float32
             c.owner.animating = true
+            c.owner.otherAnimating = true
       discard box.opacity(opacity)
       discard box.children(proc() =
         if toast.description.len == 0:

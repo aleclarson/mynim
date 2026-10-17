@@ -9,6 +9,44 @@ const
   poseRotateKey = "\x00mynim.pose.rotate"
   poseFadeKey = "\x00mynim.pose.fade"
 
+proc updatePoseChannel(owner: ElementOwner;
+                      channels: var Table[string, ScalarAnimation];
+                      key: string; target: float32; animation: Animation;
+                      respectReduceMotion: bool): float32 =
+  var channel = channels.getOrDefault(key)
+  result = float32(channel.update(owner, float64(target), animation,
+    respectReduceMotion, poseChannel = true))
+  channels[key] = channel
+
+proc samplePose(owner: ElementOwner; node: var ElementNode) =
+  if not node.poseSet:
+    return
+  let target = node.poseTarget.channels()
+  var channels = if owner.animations.hasKey(node.identity):
+      owner.animations[node.identity]
+    else:
+      initTable[string, ScalarAnimation]()
+  let x = owner.updatePoseChannel(channels, poseXKey, target[0],
+    node.poseAnimation, true)
+  let y = owner.updatePoseChannel(channels, poseYKey, target[1],
+    node.poseAnimation, true)
+  let scale = owner.updatePoseChannel(channels, poseScaleKey, target[2],
+    node.poseAnimation, true)
+  let rotate = owner.updatePoseChannel(channels, poseRotateKey, target[3],
+    node.poseAnimation, true)
+  let fade = owner.updatePoseChannel(channels, poseFadeKey, target[4],
+    node.poseAnimation, false)
+  owner.animations[node.identity] = channels
+  node.poseTransform = scaling(scale, scale).then(rotation(rotate))
+    .then(translation(x, y))
+  node.poseFade = fade
+
+proc samplePoses(owner: ElementOwner) =
+  if owner == nil or owner.closed:
+    return
+  for node in owner.nodes.mitems:
+    owner.samplePose(node)
+
 proc finite(value: float32): bool =
   classify(value) notin {fcNan, fcInf, fcNegInf}
 
@@ -402,19 +440,14 @@ proc animatePose*(element: Element; pose: Pose;
   for value in [pose.x, pose.y, pose.scale, pose.rotate, pose.fade]:
     if not finiteMotion(float64(value)):
       raise newException(ValueError, "ui: pose values must be finite")
-  let target = pose.channels()
   animation.validateAnimation()
   let node = element.node
   if node == nil:
     return
-  let x = element.animateValue(poseXKey, target[0], animation, true)
-  let y = element.animateValue(poseYKey, target[1], animation, true)
-  let scale = element.animateValue(poseScaleKey, target[2], animation, true)
-  let rotate = element.animateValue(poseRotateKey, target[3], animation, true)
-  let fade = element.animateValue(poseFadeKey, target[4], animation, false)
-  node[].poseTransform = scaling(scale, scale).then(rotation(rotate))
-    .then(translation(x, y))
-  node[].poseFade = fade
+  node[].poseTarget = pose
+  node[].poseAnimation = animation
+  node[].poseSet = true
+  element.owner.samplePose(node[])
 
 proc transformOrigin*(element: Element; x, y: float32): Element =
   ## Sets the transform origin as fractions of the border box.

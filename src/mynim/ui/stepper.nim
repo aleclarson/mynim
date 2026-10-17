@@ -60,6 +60,7 @@ proc applyStepperRepeats(e: Element; identity: uint64; direction: int;
     else: value > node[].sliderLow
   if canContinue:
     owner.animating = true
+    owner.otherAnimating = true
     owner.stepperRepeats[identity] = state
   else:
     owner.stepperRepeats.del(identity)

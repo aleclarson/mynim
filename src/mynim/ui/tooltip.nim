@@ -95,6 +95,7 @@ proc buildTooltips(c: Context) =
       shownSlot = hoverSlot
     else:
       owner.animating = true
+      owner.otherAnimating = true
 
   if shownSlot < 0:
     return

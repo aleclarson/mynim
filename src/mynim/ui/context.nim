@@ -318,7 +318,7 @@ type
     generation: uint32
     parent: int32
     pointerRevision: uint64
-    inBuild, reduceMotion, animating: bool
+    inBuild, reduceMotion, animating, poseAnimating, otherAnimating: bool
     hasFrame: bool
     closed: bool
 
@@ -457,9 +457,12 @@ type
     dragOffset: Point
     transform: Transform
     poseTransform: Transform
+    poseTarget: Pose
+    poseAnimation: Animation
     poseFade: float32
     transformOriginX, transformOriginY: float32
     transformOriginSet: bool
+    poseSet: bool
     label: string
     accessDescription: string
     accessValue: string
@@ -561,6 +564,7 @@ type
     worldTransforms: seq[scene.Affine]
     visualRects: seq[Rect]
     backfaceBlocked: seq[bool]
+    poseOnlyAnimating: bool
     animating: bool
 
   LocalCell*[T] = ref object of RootObj
@@ -1558,6 +1562,8 @@ proc build*(c: Context; view: proc(c: Context) {.closure.}) =
   inc c.owner.generation
   c.owner.frameNow = getMonoTime()
   c.owner.animating = false
+  c.owner.poseAnimating = false
+  c.owner.otherAnimating = false
   c.owner.activeModalIdentity = 0
   c.owner.retainedRouterPages.clear()
   c.owner.retainedRouteIdentities.clear()

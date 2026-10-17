@@ -48,7 +48,7 @@ type
     hasScene: bool
     accessibilityOn: bool
     keyboardFocusVisible, surfaceFocused, hasTextInputState,
-      inFrame, closed, ready, gpuTried, themeDirty: bool
+      inFrame, closed, ready, gpuTried, themeDirty, poseOnlyFrame: bool
     gpuError: string
     software: raster.Renderer
     when defined(macosx):
@@ -296,6 +296,7 @@ proc isFocusGroupTabStop(rt: Runtime; layout: LayoutResult; slot: int): bool =
 proc cancelKeyPress(rt: Runtime)
 proc refreshPointer(rt: Runtime)
 proc requestFrame(rt: Runtime)
+proc requestPoseFrame(rt: Runtime)
 
 proc nextFocusSlot(rt: Runtime; layout: LayoutResult; current: int;
                    reverse: bool): int =
@@ -2051,6 +2052,7 @@ proc renderFrame(rt: Runtime; presentFrame = true) =
   if rt.closed or rt.inFrame:
     return
   rt.inFrame = true
+  rt.poseOnlyFrame = true
   defer: rt.inFrame = false
 
   let size = rt.conn.surface.size()
@@ -2248,7 +2250,10 @@ proc renderFrame(rt: Runtime; presentFrame = true) =
     rt.present(rt.frameScene)
 
   if presentFrame and layout.animating:
-    rt.requestFrame()
+    if layout.poseOnlyAnimating:
+      rt.requestPoseFrame()
+    else:
+      rt.requestFrame()
 
   if presentFrame and currentOwner.afterDeadline != MonoTime():
     if getMonoTime() >= currentOwner.afterDeadline:
@@ -2261,7 +2266,68 @@ proc renderFrame(rt: Runtime; presentFrame = true) =
     rt.ready = true
     rt.conn.post(rt.conn.ready)
 
+  rt.poseOnlyFrame = rt.poseOnlyFrame and presentFrame and
+    layout.poseOnlyAnimating and
+    currentOwner.afterDeadline == MonoTime() and rt.listReorder == nil and
+    rt.gridReorder == nil and rt.tableReorder == nil and
+    rt.scrollbarDrag.state == nil and rt.localDrag == nil and
+    rt.pointerDraggableIdentity == 0
+
+proc renderPoseOnlyFrame(rt: Runtime) =
+  if rt.closed or rt.inFrame:
+    return
+  rt.inFrame = true
+  defer: rt.inFrame = false
+
+  let size = rt.conn.surface.size()
+  let width = frameDimension(size.width, "width")
+  let height = frameDimension(size.height, "height")
+  let scale = if classify(size.scale) in {fcNan, fcInf, fcNegInf} or
+      size.scale <= 0 or size.scale > float64(high(float32)):
+    1'f32
+  else:
+    float32(size.scale)
+  let owner = rt.context.owner
+  if owner == nil or owner.closed or owner.inBuild or not owner.hasFrame:
+    rt.poseOnlyFrame = false
+    return
+
+  owner.frameNow = getMonoTime()
+  owner.reduceMotion = rt.systemPreferences.reduceMotion
+  owner.animating = false
+  owner.poseAnimating = false
+  owner.otherAnimating = false
+  owner.samplePoses()
+  let layout = rt.context.layoutAt(Rect(w: width, h: height), owner.frameNow,
+    rt.systemPreferences.reduceMotion)
+  if not layout.poseOnlyAnimating:
+    rt.poseOnlyFrame = false
+    rt.inFrame = false
+    rt.renderFrame()
+    return
+
+  rt.frameLayout = layout
+  rt.refreshPointer()
+  rt.updateTextInput()
+  rt.frameScene = layout.paintScene(scale)
+  rt.paintLocalDrag(rt.frameScene)
+  rt.hasScene = true
+  rt.updateAccessibility()
+  rt.present(rt.frameScene)
+  rt.poseOnlyFrame = rt.poseOnlyFrame and layout.poseOnlyAnimating and
+    owner.afterDeadline == MonoTime() and rt.listReorder == nil and
+    rt.gridReorder == nil and rt.tableReorder == nil and
+    rt.scrollbarDrag.state == nil and rt.localDrag == nil and
+    rt.pointerDraggableIdentity == 0
+  if layout.animating:
+    rt.requestPoseFrame()
+
 proc requestFrame(rt: Runtime) =
+  rt.poseOnlyFrame = false
+  if not rt.closed and rt.conn.surface != nil:
+    rt.conn.surface.requestFrame()
+
+proc requestPoseFrame(rt: Runtime) =
   if not rt.closed and rt.conn.surface != nil:
     rt.conn.surface.requestFrame()
 
@@ -2752,9 +2818,14 @@ proc startDragFromPress(rt: Runtime): bool =
 proc event(rt: Runtime; ev: platform.SurfaceEvent): bool =
   if rt.closed:
     return false
+  if ev.kind != platform.surfaceFrame:
+    rt.poseOnlyFrame = false
   case ev.kind
   of platform.surfaceFrame:
-    rt.renderFrame()
+    if rt.poseOnlyFrame:
+      rt.renderPoseOnlyFrame()
+    else:
+      rt.renderFrame()
     true
   of platform.surfaceResize:
     rt.requestFrame()
