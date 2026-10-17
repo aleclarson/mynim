@@ -451,6 +451,14 @@ proc image*(painter: var Painter; vector: Svg; rect: Rect; fit: Fit) =
   painter.frame.paintSvg(node, rect, painter.root, painter.scale,
     painter.opacity)
 
+proc icon*(painter: var Painter; vector: Svg; rect: Rect; color: Color) =
+  ## Draws an SVG icon fitted into a rectangle, using color for currentColor.
+  if painter.frame == nil:
+    return
+  let node = ElementNode(vector: vector, vectorColor: color, fit: Fit.Contain)
+  painter.frame.paintSvg(node, rect, painter.root, painter.scale,
+    painter.opacity)
+
 proc imageRegion*(painter: var Painter; bitmap: Bitmap; source, destination: Rect;
                   options = ImageOptions()) =
   ## Draws a clipped source region stretched into a destination rectangle.
@@ -461,6 +469,28 @@ proc imageRegion*(painter: var Painter; bitmap: Bitmap; source, destination: Rec
     fit: Fit.FillBox)
   painter.frame.paintBitmap(node, destination, painter.root, painter.scale,
     painter.opacity)
+
+proc focusRing*(painter: var Painter; rect: Rect; radius: array[4, float32]) =
+  ## Draws a theme-colored keyboard focus ring around a rectangle.
+  if painter.frame == nil:
+    return
+  const width = 2'f32
+  const outset = width + 1
+  let
+    outer = Rect(x: rect.x - outset, y: rect.y - outset,
+      w: rect.w + outset * 2, h: rect.h + outset * 2)
+    radii = [radius[0] + outset, radius[1] + outset,
+      radius[2] + outset, radius[3] + outset]
+    color = painter.theme.focus
+  let border = painterBorderPixels(width, painter.scale)
+  var op = scene.Op(kind: scene.opFill,
+    rect: sceneRect(outer, painter.root, painter.scale),
+    color: sceneColor(transparent), radii: radii.scaledEdges(painter.scale),
+    continuous: continuousCorners,
+    border: [border, border, border, border], borderColor: sceneColor(color),
+    opacity: painter.opacity)
+  op.wide = painter.frame.addWide(wideColors(transparent, transparent, color))
+  painter.frame.ops.add(op)
 
 proc fillPath*(painter: var Painter; path: Path; color: Color) =
   ## Fills a vector path with non-zero winding.
