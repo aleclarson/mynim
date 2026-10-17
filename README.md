@@ -10,6 +10,8 @@ supported by the CLI.
 
 ## Create an application
 
+The npm package is `@aleclarson/mynim`; its command is `mynim`.
+
 The npm release targets macOS and Linux on arm64 and x64. It requires Node.js
 22 or later and a native C compiler with the platform SDK:
 
@@ -28,7 +30,7 @@ bundled Nimble requires a cache path without spaces or shell metacharacters.
 Set `NIM_TOOLCHAIN_CACHE` if your default cache path contains them.
 
 ```sh
-npx mynim init counter
+npx @aleclarson/mynim init counter
 cd counter
 npm install
 npm test
@@ -42,7 +44,7 @@ it when source files or resources change.
 For a web frontend:
 
 ```sh
-npx mynim init --template web web-app
+npx @aleclarson/mynim init --template web web-app
 cd web-app
 npm install
 npm test
@@ -99,7 +101,7 @@ nimble compilecli
 ```
 
 The starter's `config.nims` then points to this checkout. npm-created projects
-instead find the SDK in `node_modules/mynim`.
+instead find the SDK in `node_modules/@aleclarson/mynim`.
 
 ## License
 

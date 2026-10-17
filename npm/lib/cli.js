@@ -69,10 +69,16 @@ async function cliExecutable(toolchain) {
 
 export async function runCli(args) {
   try {
+    const metadata = JSON.parse(await readFile(join(packageRoot, 'package.json')));
     const toolchain = await getToolchain();
     const executable = await cliExecutable(toolchain);
     process.exitCode = await runProcess(executable, args, {
-      env: { ...toolchain.env, MYNIM_PACKAGE_ROOT: packageRoot },
+      env: {
+        ...toolchain.env,
+        MYNIM_PACKAGE_ROOT: packageRoot,
+        MYNIM_PACKAGE_NAME: metadata.name,
+        MYNIM_PACKAGE_VERSION: metadata.version,
+      },
     });
   } catch (error) {
     console.error(`mynim: ${error.message}`);

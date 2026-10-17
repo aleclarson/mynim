@@ -1,5 +1,5 @@
 {
-  "name": "mynim",
+  "name": "@aleclarson/mynim",
   "version": "0.1.0",
   "description": "Build desktop apps with native UI or a web frontend in Nim",
   "type": "module",
@@ -12,8 +12,14 @@
   "engines": {
     "node": ">=22"
   },
-  "os": ["darwin", "linux"],
-  "cpu": ["arm64", "x64"],
+  "os": [
+    "darwin",
+    "linux"
+  ],
+  "cpu": [
+    "arm64",
+    "x64"
+  ],
   "bin": {
     "mynim": "npm/bin/mynim.js"
   },
@@ -33,5 +39,8 @@
     "test:cli": "node npm/test/cli.js",
     "test:smoke": "node npm/test/smoke.js",
     "prepublishOnly": "npm test"
+  },
+  "publishConfig": {
+    "access": "public"
   }
 }

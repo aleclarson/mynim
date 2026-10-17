@@ -49,13 +49,13 @@ try {
     const project = join(consumer, `${template} app`);
     run(['exec', '--offline', '--', 'mynim', 'init', '--template', template, project], consumer);
     const manifest = JSON.parse(await readFile(join(project, 'package.json')));
-    assert.equal(manifest.devDependencies.mynim, metadata.version);
+    assert.equal(manifest.devDependencies[metadata.name], metadata.version);
     assert.equal(manifest.scripts.build, 'mynim build');
     assert.equal(manifest.scripts.test, 'mynim test');
     const nimbleName = (await readdir(project)).find(name => name.endsWith('.nimble'));
     assert.ok(!(await readFile(join(project, nimbleName), 'utf8')).includes('requires "mynim'));
     // Install the candidate tarball until its version is available on npm.
-    manifest.devDependencies.mynim = 'file:' + archive;
+    manifest.devDependencies[metadata.name] = 'file:' + archive;
     await writeFile(join(project, 'package.json'), JSON.stringify(manifest));
     run(['install', '--ignore-scripts', '--no-audit', '--no-fund'], project);
 

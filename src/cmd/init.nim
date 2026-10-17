@@ -168,7 +168,7 @@ proc writeWebFiles(dir, appName: string) =
   writeText(dir / "tsconfig.json", webTsconfigTemplate)
   writeText(dir / "vite.config.ts", webViteTemplate)
 
-proc writePackageJson(dir, appName: string; web, npm: bool) =
+proc writePackageJson(dir, appName: string; web: bool; npmPackage: string) =
   var scripts = newJObject()
   scripts["dev"] = %"mynim dev"
   scripts["build"] = %"mynim build"
@@ -177,8 +177,8 @@ proc writePackageJson(dir, appName: string; web, npm: bool) =
   scripts["vet"] = %"mynim vet"
   var dependencies = newJObject()
   var devDependencies = newJObject()
-  if npm:
-    devDependencies["mynim"] = %version
+  if npmPackage.len > 0:
+    devDependencies[npmPackage] = %getEnv("MYNIM_PACKAGE_VERSION", version)
   if web:
     scripts["dev:web"] = %"vite"
     scripts["build:web"] = %"tsc --noEmit && vite build"
@@ -196,7 +196,7 @@ proc writePackageJson(dir, appName: string; web, npm: bool) =
   writeText(dir / "package.json", packageJson.pretty & "\n")
 
 proc writeProject(dir, appName, packageName, local: string;
-    projectTemplate: string; npm: bool) =
+    projectTemplate, npmPackage: string) =
   createDir(dir)
   createDir(dir / "src")
   createDir(dir / "tests")
@@ -204,6 +204,7 @@ proc writeProject(dir, appName, packageName, local: string;
 
   let appNameLiteral = appName.escape()
   let web = projectTemplate == "web"
+  let npm = npmPackage.len > 0
   let main = (if web: webMainTemplate else: nativeMainTemplate)
     .replace("{{APP_NAME}}", appNameLiteral)
   let test = if web: webTestTemplate else: nativeTestTemplate
@@ -237,19 +238,19 @@ proc writeProject(dir, appName, packageName, local: string;
     writeText(dir / "config.nims", """
 import std/os
 
-let installed = currentSourcePath().parentDir() / "node_modules" / "mynim"
+let installed = currentSourcePath().parentDir() / "node_modules" / {{PACKAGE_NAME}}
 let packageRoot = if dirExists(installed): installed
   else: getEnv("MYNIM_PACKAGE_ROOT")
 if packageRoot.len == 0:
   quit("MyNim is missing. Run npm install, then use npm run build or npm test.")
 switch("path", packageRoot / "src")
-""")
+""".replace("{{PACKAGE_NAME}}", npmPackage.escape()))
   writeBytes(dir / "resources" / "icon.png", defaultIcon())
   installBundledSkills(dir)
   if web:
     writeWebFiles(dir, appName)
   if web or npm:
-    writePackageJson(dir, appName, web, npm)
+    writePackageJson(dir, appName, web, npmPackage)
 
 proc runInit*(args: seq[string]): int =
   var appName, packageOption, localOption = ""
@@ -310,7 +311,8 @@ proc runInit*(args: seq[string]): int =
     let packageName = slugify(packageBase).replace("-", "_")
     let local = localSourcePath(localOption)
     let npm = local.len == 0 and getEnv("MYNIM_PACKAGE_ROOT").len > 0
-    writeProject(dir, name, packageName, local, projectTemplate, npm)
+    let npmPackage = if npm: getEnv("MYNIM_PACKAGE_NAME", "mynim") else: ""
+    writeProject(dir, name, packageName, local, projectTemplate, npmPackage)
     let shownPath = displayPath(dir)
     stdout.writeLine("Created " & name & " at " & shownPath & ".")
     stdout.writeLine("Next steps:")
