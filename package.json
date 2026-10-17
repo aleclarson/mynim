@@ -1,5 +1,5 @@
 {
-  "name": "@aleclarson/mynim",
+  "name": "nim-xplat",
   "version": "0.1.0",
   "description": "Build desktop apps with native UI or a web frontend in Nim",
   "type": "module",
