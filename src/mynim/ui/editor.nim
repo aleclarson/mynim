@@ -873,6 +873,78 @@ proc deleteSelectedLines(state: State) =
   let afterSelection = Selection(anchor: caret, head: caret)
   state.applyEditorEdits(snapshot, selection, afterSelection, @[edit])
 
+proc joinSelectedLines(state: State) =
+  state.ensureState()
+  if state.readOnly:
+    return
+  let snapshot = state.buffer.snapshot()
+  let selection = state.caretSelection
+  let span = snapshot.selectedLineSpan(selection)
+  let lastLine = if span.first == span.last: span.last + 1 else: span.last
+  if lastLine >= snapshot.lineCount():
+    return
+
+  type LineMapping = tuple[originalStart, leadingBytes, outputStart,
+    keptBytes: int]
+  var mappings = newSeq[LineMapping](lastLine - span.first + 1)
+  let firstStart = snapshot.lineStart(span.first)
+  let firstText = snapshot.line(span.first)
+  mappings[0] = (firstStart, 0, 0, firstText.len)
+  var joined = firstText
+  var comment = ""
+  let language = state.buffer.language
+  if language != nil:
+    comment = language.lineComment
+
+  for lineIndex in span.first ..< lastLine:
+    let current = snapshot.line(lineIndex)
+    let next = snapshot.line(lineIndex + 1)
+    let currentIndex = lineIndex - span.first
+    let currentMap = mappings[currentIndex]
+    let currentEnd = current.trailingSpaceStart()
+    mappings[currentIndex].keptBytes = max(0,
+      currentEnd - currentMap.leadingBytes)
+    joined.setLen(currentMap.outputStart + mappings[currentIndex].keptBytes)
+
+    var nextLeading = next.leadingSpaceEnd()
+    if comment.len > 0 and
+        current[0 ..< currentEnd].startsAfterIndent(comment) and
+        next[nextLeading ..< next.len].startsWith(comment):
+      nextLeading += comment.len
+      nextLeading += next[nextLeading ..< next.len].leadingSpaceEnd()
+    let rest = next[nextLeading ..< next.len]
+    let trimmedCurrent = current[0 ..< currentEnd]
+    let separator = if rest.len == 0 or rest.startsWith(")") or
+        rest.startsWith("]") or trimmedCurrent.endsWith("(") or
+        trimmedCurrent.endsWith("["): "" else: " "
+    joined.add(separator)
+    let nextIndex = currentIndex + 1
+    mappings[nextIndex] = (snapshot.lineStart(lineIndex + 1), nextLeading,
+      joined.len, next.len - nextLeading)
+    joined.add(rest)
+
+  let blockEnd = snapshot.lineEnd(lastLine)
+  let oldText = snapshot.slice(firstStart, blockEnd)
+  if joined == oldText:
+    return
+  let delta = joined.len - oldText.len
+  let mapOffset = proc(offset: int): int =
+    if offset < firstStart:
+      return offset
+    if offset > blockEnd:
+      return offset + delta
+    let lineIndex = snapshot.pos(offset).line
+    if lineIndex < span.first or lineIndex > lastLine:
+      return offset
+    let mapping = mappings[lineIndex - span.first]
+    let local = max(0, offset - mapping.originalStart -
+      mapping.leadingBytes)
+    firstStart + mapping.outputStart + min(local, mapping.keptBytes)
+  let afterSelection = Selection(anchor: mapOffset(selection.anchor),
+    head: mapOffset(selection.head))
+  let edit = Edit(start: firstStart, pastLast: blockEnd, text: joined)
+  state.applyEditorEdits(snapshot, selection, afterSelection, @[edit])
+
 proc indentSelection(state: State; outdent: bool) =
   state.ensureState()
   if state.readOnly:
@@ -1151,6 +1223,9 @@ proc view*(c: ui.Context; state: State): ui.Element =
     if key.key == platform.keyK and
         key.mods == (commandModifier or platform.modShift):
       state.deleteSelectedLines()
+      return true
+    if key.key == platform.keyJ and key.mods == platform.modCtrl:
+      state.joinSelectedLines()
       return true
     if key.key in {platform.keyUp, platform.keyDown}:
       if key.mods == platform.modAlt:

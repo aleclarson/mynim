@@ -270,6 +270,24 @@ let afterEmoji = "αβ\n😀".len
 doAssert lineKey(unicodeDelete, afterEmoji, afterEmoji, platform.keyK,
   deleteModifier or platform.modShift) == "αβ\nq"
 doAssert editorState.cursor() == "αβ\nq".len
+let joinModifier = platform.modCtrl
+let joinSource = "a  \n  b\nc"
+doAssert lineKey(joinSource, 1, 1, platform.keyJ, joinModifier) == "a b\nc"
+doAssert editorState.cursor() == 1
+doAssert editorState.undo()
+doAssert $editorState.buffer == joinSource
+let bracketLines = "call(\n  value\n)"
+doAssert lineKey(bracketLines, 0, bracketLines.len, platform.keyJ,
+  joinModifier) == "call(value)"
+doAssert editorState.selection() == editor.Selection(anchor: 0, head: 11)
+editorState.buffer.setLanguage(go)
+doAssert lineKey("// one\n// two", 1, 1, platform.keyJ,
+  joinModifier) == "// one two"
+let blankJoin = "a\n  \nb"
+doAssert lineKey(blankJoin, 0, blankJoin.len, platform.keyJ,
+  joinModifier) == "a b"
+doAssert editorState.selection() == editor.Selection(anchor: 0, head: 3)
+doAssert lineKey("a\nb", 2, 2, platform.keyJ, joinModifier) == "a\nb"
 
 win.destroy()
 loop.shutdown()
