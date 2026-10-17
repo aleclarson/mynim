@@ -1,7 +1,12 @@
 ## Build, run, and watch a native nim-xplat application during development.
 
 import std/[algorithm, hashes, httpclient, json, os, osproc, streams, strtabs,
-  strutils, tables, tempfiles]
+  strutils, tables, tempfiles, terminal]
+when defined(windows):
+  proc consoleKeyAvailable(): cint {.importc: "_kbhit", header: "<conio.h>".}
+  proc readConsoleKey(): cint {.importc: "_getch", header: "<conio.h>".}
+else:
+  import std/posix as posix
 import ./build as nativeBuild
 when hostOS == "macosx":
   import ./codesign as macCodeSign
@@ -12,6 +17,9 @@ import ../mynim/i18n as localeI18n
 type DevSnapshot = Table[string, string]
 type DevSettings = tuple[name, identifier, version, devCommand, devUrl,
   frontendDist: string]
+type DevKeyReader = object
+  enabled: bool
+  pending: string
 
 const usageDev = """Usage: nim-xplat dev [flags] [dir]
 
@@ -101,22 +109,83 @@ proc changedFiles(before, after: DevSnapshot): seq[string] =
       result.add path
   result.sort()
 
-proc stableChanges(projectDir: string; previous: DevSnapshot):
-    tuple[snapshot: DevSnapshot, paths: seq[string]] =
-  sleep(250)
+proc initDevKeyReader(): DevKeyReader =
+  result.enabled = isatty(stdin)
+
+proc appendDevKeyByte(reader: var DevKeyReader; value: char;
+    keys: var seq[string]) =
+  if value in ['\n', '\r']:
+    keys.add reader.pending.strip().toLowerAscii()
+    reader.pending.setLen(0)
+  elif value in ['\b', '\x7f']:
+    if reader.pending.len > 0:
+      reader.pending.setLen(reader.pending.len - 1)
+  elif reader.pending.len < 65_536:
+    reader.pending.add value
+
+proc pollDevKeys(reader: var DevKeyReader): seq[string] =
+  if not reader.enabled:
+    return
+  when defined(windows):
+    while consoleKeyAvailable() != 0:
+      let value = readConsoleKey()
+      if value == 0 or value == 224:
+        discard readConsoleKey()
+      elif value == 13:
+        stdout.write("\r\n")
+        reader.appendDevKeyByte('\n', result)
+      elif value == 8:
+        if reader.pending.len > 0:
+          stdout.write("\b \b")
+          reader.appendDevKeyByte('\b', result)
+      elif value >= 32 and value <= 255:
+        let ch = char(value)
+        stdout.write(ch)
+        reader.appendDevKeyByte(ch, result)
+    stdout.flushFile()
+  else:
+    var readable: posix.TFdSet
+    posix.FD_ZERO(readable)
+    posix.FD_SET(0, readable)
+    var timeout = posix.Timeval(tv_sec: posix.Time(0),
+      tv_usec: posix.Suseconds(0))
+    if posix.select(1, addr readable, nil, nil, addr timeout) <= 0:
+      return
+    var buffer: array[0 .. 1023, char]
+    let count = posix.read(0, addr buffer[0], buffer.len)
+    if count <= 0:
+      reader.enabled = false
+      return
+    for index in 0 ..< count:
+      reader.appendDevKeyByte(buffer[index], result)
+
+proc waitAndPollDevKeys(reader: var DevKeyReader; durationMs: int): seq[string] =
+  var remaining = durationMs
+  while remaining > 0:
+    let pause = min(50, remaining)
+    sleep(pause)
+    remaining -= pause
+    result.add reader.pollDevKeys()
+
+proc stableChanges(projectDir: string; previous: DevSnapshot;
+    reader: var DevKeyReader):
+    tuple[snapshot: DevSnapshot, paths: seq[string], keys: seq[string]] =
+  result.keys = reader.waitAndPollDevKeys(250)
   var current = fileSnapshot(projectDir)
   if current == previous:
-    return (current, @[])
+    result.snapshot = current
+    return
   var stableScans = 0
   while stableScans < 2:
-    sleep(150)
+    result.keys.add reader.waitAndPollDevKeys(150)
     let next = fileSnapshot(projectDir)
     if next == current:
       inc stableScans
     else:
       current = next
       stableScans = 0
-  (current, changedFiles(previous, current))
+  result.snapshot = current
+  result.paths = changedFiles(previous, current)
 
 proc captured(command: string; args: seq[string]; workingDir: string):
     tuple[code: int, output: string] =
@@ -240,6 +309,23 @@ proc devLocale(value: string): string =
     raise newException(ValueError, "-lang \"" & value &
       "\" is not a language: use a BCP 47 tag, such as de, zh-Hant or " &
       "pt-BR, or a pseudo locale, en-XA or ar-XB")
+
+proc devHelp(): string =
+  "\n  Shortcuts\n" &
+    "  press r + enter to rebuild and restart the app\n" &
+    "  press c + enter to clear the console\n" &
+    "  press q + enter to quit\n"
+
+proc handleDevKeys(keys: seq[string]; restart: var bool): bool =
+  for key in keys:
+    case key
+    of "r": restart = true
+    of "c":
+      stdout.write("\x1b[2J\x1b[H")
+      stdout.flushFile()
+    of "q": return true
+    of "h": stdout.write(devHelp())
+    else: discard
 
 proc stopProcess(process: var Process) =
   if process == nil:
@@ -386,6 +472,9 @@ proc runDev*(args: seq[string]): int =
     app = launchApp(built.executable, projectDir, settings.devUrl,
       settings.frontendDist, lang)
     stdout.writeLine("Running " & settings.name & " Dev; press Ctrl+C to quit")
+    var keyReader = initDevKeyReader()
+    if keyReader.enabled:
+      stdout.writeLine("Type h + enter to show dev shortcuts")
 
     while true:
       let code = app.peekExitCode()
@@ -401,11 +490,18 @@ proc runDev*(args: seq[string]): int =
         stderr.writeLine("nim-xplat dev: app exited with status " & $code &
           "; waiting for a source change")
 
-      let (nextSnapshot, changed) = stableChanges(projectDir, watched)
-      if changed.len == 0:
+      let (nextSnapshot, changed, keys) = stableChanges(projectDir, watched,
+        keyReader)
+      var restart = false
+      if handleDevKeys(keys, restart):
+        return 0
+      if changed.len == 0 and not restart:
         continue
       watched = nextSnapshot
-      stdout.writeLine("Changed: " & changed.join(", "))
+      if changed.len > 0:
+        stdout.writeLine("Changed: " & changed.join(", "))
+      elif restart:
+        stdout.writeLine("Restarting " & settings.name & " Dev")
       var nextConfig: JsonNode
       var nextSettings: DevSettings
       try:
