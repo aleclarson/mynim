@@ -1328,7 +1328,7 @@ method buildMaterial*(material: Material; element: Element): Material {.base.} =
   material
 
 proc inActiveModalScope(owner: ElementOwner; slot: int): bool =
-  owner != nil and slot > 0 and slot < owner.nodes.len and
+  owner != nil and slot >= 0 and slot < owner.nodes.len and
     (owner.activeModalIdentity == 0 or
      owner.nodes[slot].modalScopeIdentity == owner.activeModalIdentity)
 
