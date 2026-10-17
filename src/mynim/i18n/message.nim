@@ -1,6 +1,6 @@
 ## Parses ICU MessageFormat messages and exposes their argument structure.
 
-import std/[strutils, unicode]
+import std/[strutils, unicode, times, math]
 
 type
   MessageNodeKind* = enum
@@ -34,6 +34,22 @@ type
     source*: string
     nodes*: seq[MessageNode]
 
+  FormatArgKind* = enum
+    formatStringArg
+    formatNumberArg
+    formatBooleanArg
+    formatDateTimeArg
+    formatNullArg
+
+  FormatArg* = object
+    ## A named value supplied to `i18n.format`.
+    name*: string
+    kind*: FormatArgKind
+    text*: string
+    exact*: bool
+    boolean*: bool
+    dateTime*: DateTime
+
   MessageSyntaxError* = object of ValueError
     offset*: int
 
@@ -46,6 +62,46 @@ proc syntaxError(parser: MessageParser; detail: string): ref MessageSyntaxError 
     "i18n: " & detail & " at offset " & $parser.position &
     " of " & parser.source.escape())
   result.offset = parser.position
+
+proc expandFloatExponent(value: string): string =
+  let exponentAt = value.find({'e', 'E'})
+  if exponentAt < 0: return value
+  let mantissa = value[0 ..< exponentAt]
+  let exponent = parseInt(value[exponentAt + 1 .. ^1])
+  let negative = mantissa.startsWith('-')
+  let unsigned = if negative: mantissa[1 .. ^1] else: mantissa
+  let point = unsigned.find('.')
+  let integerDigits = if point < 0: unsigned.len else: point
+  let digits = unsigned.replace(".", "")
+  let destination = integerDigits + exponent
+  let sign = if negative: "-" else: ""
+  if destination <= 0:
+    sign & "0." & repeat('0', -destination) & digits
+  elif destination >= digits.len:
+    sign & digits & repeat('0', destination - digits.len)
+  else:
+    sign & digits[0 ..< destination] & "." & digits[destination .. ^1]
+
+proc formatArg*(name, value: string): FormatArg =
+  FormatArg(name: name, kind: formatStringArg, text: value)
+
+proc formatArg*[T: SomeInteger](name: string; value: T): FormatArg =
+  FormatArg(name: name, kind: formatNumberArg, text: $value)
+
+proc formatArg*[T: SomeFloat](name: string; value: T): FormatArg =
+  if classify(value) in {fcNan, fcInf, fcNegInf}:
+    return FormatArg(name: name, kind: formatStringArg, text: $value)
+  FormatArg(name: name, kind: formatNumberArg,
+    text: expandFloatExponent(formatFloat(value, ffDefault, -1)))
+
+proc formatArg*(name: string; value: bool): FormatArg =
+  FormatArg(name: name, kind: formatBooleanArg, boolean: value)
+
+proc formatArg*(name: string; value: DateTime): FormatArg =
+  FormatArg(name: name, kind: formatDateTimeArg, dateTime: value)
+
+proc nullFormatArg*(name: string): FormatArg =
+  FormatArg(name: name, kind: formatNullArg)
 
 proc patternSpace(rune: Rune): bool =
   int(rune) in [0x20, 0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x85, 0x200E,

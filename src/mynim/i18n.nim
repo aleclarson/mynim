@@ -3,8 +3,10 @@
 ## messages in it.
 ##
 ## PORT STATUS: regional preferences, localized number formatting, plural
-## rules, CLDR names, and common date skeletons use CLDR data. ICU message
-## evaluation and full date pattern matching are still being ported.
+## rules, names, and common date skeletons use CLDR data. ICU message
+## parsing, choice evaluation, number styles, date/time styles, and the
+## en-XA/ar-XB pseudo locales are supported. Full date pattern matching and
+## catalog-backed lookup/accessors are still being ported.
 
 import std/[strutils, tables, times, atomics, unicode, math]
 import ./i18n/cldr_regions as cldr
@@ -67,12 +69,13 @@ const
   pseudoAccented* = "en-XA"
   pseudoDoubled* = "en-XB"
   pseudoBrackets* = "en-XC"
+  pseudoBidi* = "ar-XB"
 
 proc isPseudo*(locale: string): bool =
   ## Whether locale is a pseudo locale.
   let normalized = normalize(locale)
   normalized == pseudoAccented or normalized == pseudoDoubled or
-    normalized == pseudoBrackets
+    normalized == pseudoBrackets or normalized == pseudoBidi
 
 # modifierScripts are the scripts the modifiers of POSIX locales name.
 const modifierScripts = {
@@ -680,8 +683,8 @@ proc writeGroupedInteger(system: NumberSystem; pattern: NumberPattern;
     else:
       width = secondary
 
-proc formatNumberDecimal(locale, value, style: string;
-    options: NumberOptions; exact = false): string =
+proc formatNumberDecimal(locale, value: string; options: NumberOptions;
+    exact = false): string =
   let decimalValue = value.strip()
   if not validDecimal(decimalValue): return value
   let data = formatLocaleIndex(locale)
@@ -695,7 +698,7 @@ proc formatNumberDecimal(locale, value, style: string;
   elif maxFraction <= 0 and minFraction == 0:
     maxFraction = selected.maximumFraction
   if maxFraction < minFraction: maxFraction = minFraction
-  if exact and style.len == 0 and options.minFractionDigits == 0 and
+  if exact and options.minFractionDigits == 0 and
       options.maxFractionDigits == 0 and not options.percent and
       not options.integer:
     let point = decimalValue.find('.')
@@ -732,11 +735,11 @@ proc formatNumber*(locale: string; value: string;
     options = NumberOptions()): string =
   ## Formats a decimal string with CLDR number symbols. Decimal strings
   ## keep their written fraction digits unless the options round them.
-  formatNumberDecimal(locale, value, "", options, exact = true)
+  formatNumberDecimal(locale, value, options, exact = true)
 
 proc formatNumber*[T: SomeInteger](locale: string; value: T;
     options = NumberOptions()): string =
-  formatNumberDecimal(locale, $value, "", options)
+  formatNumberDecimal(locale, $value, options)
 
 proc formatNumber*[T: SomeFloat](locale: string; value: T;
     options = NumberOptions()): string =
@@ -752,7 +755,7 @@ proc formatNumber*[T: SomeFloat](locale: string; value: T;
       else: pattern.prefix & system.infinity & pattern.suffix
   var decimal = formatFloat(float64(value), ffDecimal, -1)
   if decimal.endsWith("."): decimal.setLen(decimal.len - 1)
-  formatNumberDecimal(locale, decimal, "", options)
+  formatNumberDecimal(locale, decimal, options)
 
 proc monthWidthIndex(width: NameWidth): int =
   case width
@@ -960,6 +963,63 @@ proc formatDate*(locale: string; value: DateTime;
   let pattern = datePattern(locale, data, options)
   formatPattern(locale, data, value, pattern, digits).replace("\u202f", " ")
 
+proc icuNumberOptions(style: string): NumberOptions =
+  let stems = if style.startsWith("::"):
+      strutils.splitWhitespace(style[2 .. ^1])
+    elif style.strip().len > 0:
+      @[style.strip()]
+    else:
+      @[]
+  for stem in stems:
+    case stem
+    of "integer", "precision-integer":
+      result.integer = true
+      result.halfEven = true
+    of "percent":
+      result.percent = true
+      result.halfEven = true
+    of "group-off":
+      result.noGrouping = true
+    else:
+      if stem.len > 1 and stem[0] == '.' and
+          stem[1 .. ^1].allCharsInSet({'0', '#'}):
+        result.minFractionDigits = stem.count('0')
+        result.maxFractionDigits = stem.len - 1
+
+proc formatMessageNumber(locale, value, style: string;
+    exact: bool): string =
+  let options = icuNumberOptions(style)
+  formatNumberDecimal(locale, value, options, exact)
+
+proc dateStyleIndex(style: string): int =
+  case style
+  of "full": 0
+  of "long": 1
+  of "short": 3
+  else: 2
+
+proc formatMessageDate(locale: string; value: DateTime; kind, style: string):
+    string =
+  let data = formatLocaleIndex(locale)
+  let digits = localizedDigits(locale, data)
+  var pattern: string
+  if style.startsWith("::"):
+    pattern = datePattern(locale, data,
+      DateOptions(skeleton: style[2 .. ^1].strip()))
+  elif kind == "date":
+    pattern = dateSlot(data, 170 + dateStyleIndex(style))
+  elif kind == "time":
+    pattern = dateSlot(data, 174 + dateStyleIndex(style))
+  else:
+    let dateIndex = dateStyleIndex("short")
+    let datePattern = dateSlot(data, 170 + dateIndex)
+    let timePattern = dateSlot(data, 174 + dateIndex)
+    pattern = dateSlot(data, 182 + dateIndex)
+    if pattern == "": pattern = dateSlot(data, 178 + dateIndex)
+    if pattern == "": pattern = "{1} {0}"
+    pattern = pattern.replace("{1}", datePattern).replace("{0}", timePattern)
+  formatPattern(locale, data, value, pattern, digits).replace("\u202f", " ")
+
 proc formatInteger*(locale: string; value: int; minDigits = 1): string =
   ## Formats an integer without grouping, using the locale's numbering
   ## system and at least minDigits digits.
@@ -972,6 +1032,369 @@ proc timePattern*(locale: string; hourCycle = 0): string =
   let data = formatLocaleIndex(locale)
   datePattern(locale, data, DateOptions(skeleton: "jm",
     hourCycle: hourCycle)).replace("\u202f", " ")
+
+type
+  MessagePseudoKind = enum
+    messagePseudoNone, messagePseudoAccent, messagePseudoBidi
+
+  MessagePseudo = object
+    kind: MessagePseudoKind
+    textLength: int
+
+  MessagePound = object
+    active, numeric, exact: bool
+    decimal: string
+    raw: messageFormat.FormatArg
+
+const
+  pseudoAccents: array[20, string] = [
+    "one", "two", "three", "four", "five", "six", "seven", "eight",
+    "nine", "ten", "eleven", "twelve", "thirteen", "fourteen",
+    "fifteen", "sixteen", "seventeen", "eighteen", "nineteen", "twenty"]
+
+proc pseudoSpace(rune: Rune): bool =
+  let codepoint = int(rune)
+  codepoint in [0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x20, 0x85, 0xA0, 0x1680,
+    0x2028, 0x2029, 0x202F, 0x205F, 0x3000] or codepoint in 0x2000..0x200A
+
+proc accentRune(rune: Rune): string =
+  if int(rune) > 0x7F: return toUTF8(rune)
+  case char(int(rune))
+  of 'a': "å"
+  of 'b': "ƀ"
+  of 'c': "ç"
+  of 'd': "ð"
+  of 'e': "é"
+  of 'f': "ƒ"
+  of 'g': "ĝ"
+  of 'h': "ĥ"
+  of 'i': "î"
+  of 'j': "ĵ"
+  of 'k': "ķ"
+  of 'l': "ļ"
+  of 'm': "ɱ"
+  of 'n': "ñ"
+  of 'o': "ö"
+  of 'p': "þ"
+  of 'q': "ǫ"
+  of 'r': "ŕ"
+  of 's': "š"
+  of 't': "ţ"
+  of 'u': "û"
+  of 'v': "ṽ"
+  of 'w': "ŵ"
+  of 'x': "ẋ"
+  of 'y': "ý"
+  of 'z': "ž"
+  of 'A': "Å"
+  of 'B': "Ɓ"
+  of 'C': "Ç"
+  of 'D': "Ð"
+  of 'E': "É"
+  of 'F': "Ƒ"
+  of 'G': "Ĝ"
+  of 'H': "Ĥ"
+  of 'I': "Î"
+  of 'J': "Ĵ"
+  of 'K': "Ķ"
+  of 'L': "Ļ"
+  of 'M': "Ṁ"
+  of 'N': "Ñ"
+  of 'O': "Ö"
+  of 'P': "Þ"
+  of 'Q': "Ǫ"
+  of 'R': "Ŕ"
+  of 'S': "Š"
+  of 'T': "Ţ"
+  of 'U': "Û"
+  of 'V': "Ṽ"
+  of 'W': "Ŵ"
+  of 'X': "Ẋ"
+  of 'Y': "Ý"
+  of 'Z': "Ž"
+  else: toUTF8(rune)
+
+proc pseudoText(pseudo: var MessagePseudo; text: string): string =
+  case pseudo.kind
+  of messagePseudoNone:
+    result = text
+  of messagePseudoAccent:
+    for rune in text.runes:
+      result.add accentRune(rune)
+      inc pseudo.textLength
+  of messagePseudoBidi:
+    var word = ""
+    for rune in text.runes:
+      if pseudoSpace(rune):
+        if word.len > 0:
+          result.add "\u200f\u202e" & word & "\u202c\u200f"
+          word.setLen(0)
+        result.add toUTF8(rune)
+      else:
+        word.add toUTF8(rune)
+    if word.len > 0:
+      result.add "\u200f\u202e" & word & "\u202c\u200f"
+
+proc pseudoPlaceholder(pseudo: MessagePseudo; value: string): string =
+  if pseudo.kind == messagePseudoBidi:
+    "\u200f" & value & "\u200f"
+  else:
+    value
+
+proc trimMagnitude(value: string): string =
+  result = value.strip(leading = true, trailing = false, chars = {'0'})
+  if result.len == 0: result = "0"
+
+proc compareMagnitude(a, b: string): int =
+  let a = trimMagnitude(a)
+  let b = trimMagnitude(b)
+  if a.len < b.len: return -1
+  if a.len > b.len: return 1
+  if a < b: return -1
+  if a > b: return 1
+  0
+
+proc addMagnitude(a, b: string): string =
+  var left = a.high
+  var right = b.high
+  var carry = 0
+  var reversed = ""
+  while left >= 0 or right >= 0 or carry > 0:
+    let x = if left >= 0: ord(a[left]) - ord('0') else: 0
+    let y = if right >= 0: ord(b[right]) - ord('0') else: 0
+    let sum = x + y + carry
+    reversed.add char(ord('0') + sum mod 10)
+    carry = sum div 10
+    dec left
+    dec right
+  result = newString(reversed.len)
+  for i, ch in reversed:
+    result[reversed.high - i] = ch
+
+proc subtractMagnitude(a, b: string): string =
+  ## Subtracts nonnegative decimal b from a, where a >= b.
+  var left = a.high
+  var right = b.high
+  var borrow = 0
+  var reversed = ""
+  while left >= 0:
+    var digit = ord(a[left]) - ord('0') - borrow
+    let other = if right >= 0: ord(b[right]) - ord('0') else: 0
+    if digit < other:
+      digit += 10
+      borrow = 1
+    else:
+      borrow = 0
+    reversed.add char(ord('0') + digit - other)
+    dec left
+    dec right
+  result = newString(reversed.len)
+  for i, ch in reversed:
+    result[reversed.high - i] = ch
+  result = trimMagnitude(result)
+
+proc canonicalDecimal(value: string): string =
+  let value = value.strip()
+  if not validDecimal(value): return ""
+  let parts = decimalParts(value)
+  var fraction = parts.fraction
+  while fraction.len > 0 and fraction[^1] == '0':
+    fraction.setLen(fraction.len - 1)
+  let isZero = parts.integer == "0" and fraction.len == 0
+  if parts.negative and not isZero: result.add '-'
+  result.add parts.integer
+  if fraction.len > 0:
+    result.add '.'
+    result.add fraction
+
+proc subtractPluralOffset(value: string; offset: int64): string =
+  if offset <= 0: return value
+  let parts = decimalParts(value)
+  let scale = parts.fraction.len
+  let left = trimMagnitude(parts.integer & parts.fraction)
+  let right = trimMagnitude($offset & repeat('0', scale))
+  var negative = parts.negative
+  var magnitude: string
+  if parts.negative:
+    magnitude = addMagnitude(left, right)
+  elif compareMagnitude(left, right) >= 0:
+    magnitude = subtractMagnitude(left, right)
+  else:
+    magnitude = subtractMagnitude(right, left)
+    negative = true
+  if magnitude.len <= scale:
+    magnitude = repeat('0', scale + 1 - magnitude.len) & magnitude
+  let integerLength = magnitude.len - scale
+  let integer = magnitude[0 ..< integerLength]
+  let fraction = if scale == 0: "" else: magnitude[integerLength .. ^1]
+  if negative and trimMagnitude(magnitude) != "0": result.add '-'
+  result.add integer
+  if scale > 0:
+    result.add '.'
+    result.add fraction
+
+proc numericArgument(arg: messageFormat.FormatArg):
+    tuple[value: string, exact, ok: bool] =
+  case arg.kind
+  of messageFormat.formatNumberArg:
+    result.value = arg.text
+    result.exact = arg.exact
+    result.ok = validDecimal(arg.text)
+  of messageFormat.formatStringArg:
+    result.value = arg.text
+    result.exact = true
+    result.ok = validDecimal(arg.text)
+  else:
+    discard
+
+proc formatArgumentValue(locale: string; arg: messageFormat.FormatArg): string =
+  case arg.kind
+  of messageFormat.formatStringArg: result = arg.text
+  of messageFormat.formatNumberArg:
+    result = formatNumberDecimal(locale, arg.text, NumberOptions(), arg.exact)
+  of messageFormat.formatBooleanArg:
+    result = if arg.boolean: "true" else: "false"
+  of messageFormat.formatDateTimeArg:
+    result = formatMessageDate(locale, arg.dateTime, "datetime", "short")
+  of messageFormat.formatNullArg: result = ""
+
+proc selectedMessageCase(cases: seq[messageFormat.MessageCase];
+    key: string): messageFormat.MessageCase =
+  for messageCase in cases:
+    if messageCase.key == key: return messageCase
+  for messageCase in cases:
+    if messageCase.key == "other": return messageCase
+
+proc selectValueKey(arg: messageFormat.FormatArg): string =
+  case arg.kind
+  of messageFormat.formatStringArg: result = arg.text
+  of messageFormat.formatNumberArg:
+    result = canonicalDecimal(arg.text)
+    if result.len == 0: result = arg.text
+  of messageFormat.formatBooleanArg:
+    result = if arg.boolean: "true" else: "false"
+  of messageFormat.formatDateTimeArg:
+    result = arg.dateTime.format("yyyy-MM-dd'T'HH:mm:ss")
+  of messageFormat.formatNullArg: result = ""
+
+proc formatMessageNodes(nodes: seq[messageFormat.MessageNode];
+    args: Table[string, messageFormat.FormatArg]; locale, ruleLocale: string;
+    pound: MessagePound; pseudo: var MessagePseudo): string
+
+proc formatMessageChoice(node: messageFormat.MessageNode;
+    arg: messageFormat.FormatArg; args: Table[string, messageFormat.FormatArg];
+    locale, ruleLocale: string; pound: MessagePound;
+    pseudo: var MessagePseudo): string =
+  if node.kind == messageFormat.messageSelect:
+    let selected = selectedMessageCase(node.cases, selectValueKey(arg))
+    return formatMessageNodes(selected.nodes, args, locale, ruleLocale, pound,
+      pseudo)
+
+  let number = numericArgument(arg)
+  var selectedKey = "other"
+  var nextPound = MessagePound(active: true, raw: arg)
+  if number.ok:
+    let originalParts = decimalParts(number.value)
+    if not originalParts.negative:
+      let exactNumber = canonicalDecimal(number.value)
+      for messageCase in node.cases:
+        if messageCase.exact.len > 0 and
+            canonicalDecimal(messageCase.exact) == exactNumber:
+          selectedKey = messageCase.key
+          break
+    let adjusted = subtractPluralOffset(number.value, node.offset)
+    nextPound = MessagePound(active: true, numeric: true,
+      exact: number.exact, decimal: adjusted, raw: arg)
+    if selectedKey == "other":
+      let categoryValue = if number.exact: adjusted else:
+        formatNumberDecimal("en", adjusted,
+          NumberOptions(noGrouping: true), exact = false)
+      let parsed = pluralRuntime.parsePluralOperands(categoryValue)
+      if parsed.ok:
+        let category = if node.kind == messageFormat.messageSelectOrdinal:
+            ordinalCategory(ruleLocale, parsed.operands)
+          else:
+            pluralCategory(ruleLocale, parsed.operands)
+        selectedKey = pluralName(category)
+  let selected = selectedMessageCase(node.cases, selectedKey)
+  formatMessageNodes(selected.nodes, args, locale, ruleLocale, nextPound, pseudo)
+
+proc formatMessageNodes(nodes: seq[messageFormat.MessageNode];
+    args: Table[string, messageFormat.FormatArg]; locale, ruleLocale: string;
+    pound: MessagePound; pseudo: var MessagePseudo): string =
+  for node in nodes:
+    case node.kind
+    of messageFormat.messageText:
+      result.add pseudoText(pseudo, node.text)
+    of messageFormat.messagePound:
+      if not pound.active:
+        result.add '#'
+      elif pound.numeric:
+        result.add pseudoPlaceholder(pseudo, formatNumberDecimal(locale,
+          pound.decimal, NumberOptions(), pound.exact))
+      else:
+        result.add pseudoPlaceholder(pseudo,
+          formatArgumentValue(locale, pound.raw))
+    else:
+      if node.text notin args:
+        result.add "{" & node.text & "}"
+        continue
+      let arg = args[node.text]
+      case node.kind
+      of messageFormat.messageArgument:
+        result.add pseudoPlaceholder(pseudo, formatArgumentValue(locale, arg))
+      of messageFormat.messageNumber:
+        let number = numericArgument(arg)
+        if number.ok:
+          result.add pseudoPlaceholder(pseudo, formatMessageNumber(locale,
+            number.value, node.style, number.exact))
+        else:
+          result.add pseudoPlaceholder(pseudo, formatArgumentValue(locale, arg))
+      of messageFormat.messageDate, messageFormat.messageTime:
+        if arg.kind == messageFormat.formatDateTimeArg:
+          let kind = if node.kind == messageFormat.messageDate: "date" else: "time"
+          result.add pseudoPlaceholder(pseudo, formatMessageDate(locale,
+            arg.dateTime, kind, node.style))
+        else:
+          result.add pseudoPlaceholder(pseudo, formatArgumentValue(locale, arg))
+      of messageFormat.messageSelect, messageFormat.messagePlural,
+          messageFormat.messageSelectOrdinal:
+        result.add formatMessageChoice(node, arg, args, locale, ruleLocale,
+          pound, pseudo)
+      of messageFormat.messageText, messageFormat.messagePound:
+        discard
+
+proc format*(message: messageFormat.Message; locale: string;
+    args: varargs[messageFormat.FormatArg]): string =
+  ## Formats an ICU message using localized number/date data and CLDR plural
+  ## rules. Missing arguments keep their `{name}` spelling. en-XA accents and
+  ## pads message text; ar-XB adds bidirectional test markers.
+  if message.isNil: return ""
+  var values = initTable[string, messageFormat.FormatArg]()
+  for arg in args:
+    values[arg.name] = arg
+  let tag = normalize(locale)
+  let pseudoLocale = isPseudo(locale)
+  let ruleLocale = if pseudoLocale: "en" else: tag
+  let formatLocale = if pseudoLocale: "en" else: locale
+  var pseudo = MessagePseudo()
+  if tag == pseudoAccented:
+    pseudo.kind = messagePseudoAccent
+  elif tag == pseudoBidi:
+    pseudo.kind = messagePseudoBidi
+  result = formatMessageNodes(message.nodes, values, formatLocale, ruleLocale,
+    MessagePound(), pseudo)
+  if pseudo.kind == messagePseudoAccent:
+    let padding = (pseudo.textLength * 2 + 4) div 5
+    var padded = result
+    var paddedLength = 0
+    var index = 0
+    while paddedLength < padding:
+      let word = pseudoAccents[index mod pseudoAccents.len]
+      padded.add " " & word
+      paddedLength += 1 + word.len
+      inc index
+    result = "[" & padded & "]"
 
 proc `match`*(want, supported: seq[string]): string =
   ## The supported tag want likes best (i18n's match): an exact
