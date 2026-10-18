@@ -153,6 +153,9 @@ suite "shader file parser":
     let parsed = parseShaderFile("package main\nconst missing")
     check parsed.error.message == "a constant declaration requires a value"
 
+    let emptyGroup = parseShaderFile("package main\nconst ()")
+    check emptyGroup.error.message == "a variable or constant group cannot be empty"
+
   test "parses assignments, conditionals, loops, range, and return":
     let parsed = parseShaderFile("""
       package main

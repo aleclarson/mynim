@@ -58,6 +58,7 @@ type
     saskIncDec
     saskReturn
     saskBranch
+    saskLabel
     saskIf
     saskFor
     saskRange
@@ -680,6 +681,8 @@ proc parseGlobalDeclaration(p: var Parser): GlobalParseResult =
         discard p.advance()
       elif not p.matches(")"):
         p.fail("expected ';' or ')' after declaration")
+    if specIndex == 0 and p.error.message.len == 0:
+      p.fail("a variable or constant group cannot be empty")
     if p.error.message.len == 0:
       discard p.expect(")")
   else:
@@ -885,7 +888,7 @@ proc parseStatement(p: var Parser): ShaderAstStmt =
   let token = p.current
   if token.kind == stkIdentifier and p.index + 1 < p.tokens.len and
       p.tokens[p.index + 1].text == ":":
-    result = ShaderAstStmt(kind: saskBranch, token: token, operator: "label")
+    result = ShaderAstStmt(kind: saskLabel, token: token)
     result.name = token.text
     discard p.advance()
     discard p.advance()
