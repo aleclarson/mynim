@@ -3,6 +3,7 @@
 import std/[math, monotimes, options, os, strutils, tables, times, unicode]
 import mynim/ui as ui
 import mynim/transfer as transfer
+import mynim/internal/l10n as l10n
 import mynim/plugins/terminal/internal/[links, pty, session, view_paint]
 import mynim/plugins/terminal/internal/vt/[input as vtInput, library,
     terminal as vtTerminal]
@@ -1026,6 +1027,7 @@ proc view*(context: ui.Context; terminal: Terminal): ui.Element =
     raise newException(ValueError, "cannot build a view for a closed terminal")
   let services = context.services()
   let uiTheme = context.theme()
+  let messages = l10n.`in`(context.locale())
   let darkAppearance = uiTheme.dark
   terminal.state.scrollbarWidth = uiTheme.scrollbarWidth
   terminal.session.setWake(proc() = services.invalidate())
@@ -1066,15 +1068,15 @@ proc view*(context: ui.Context; terminal: Terminal): ui.Element =
   discard result.contextMenu(proc(menu: ui.Menu) =
     let selected = terminal.session.selectedText()
     let text = if selected.isSome: selected.get() else: ""
-    if menu.item("Copy")
+    if menu.item(messages.menuCopy())
         .disabled(selected.isNone or text.len == 0).chosen:
       services.writeClipboard(text)
-    if menu.item("Paste").chosen:
+    if menu.item(messages.menuPaste()).chosen:
       terminal.pasteClipboard(services)
-    if menu.item("Select All").chosen:
+    if menu.item(messages.menuSelectAll()).chosen:
       terminal.selectAll(services)
     menu.separator()
-    if menu.item("Clear Scrollback").chosen:
+    if menu.item(messages.clearScrollback()).chosen:
       terminal.session.clearScrollback()
       services.invalidate()
   )

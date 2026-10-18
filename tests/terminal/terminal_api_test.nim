@@ -491,6 +491,12 @@ suite "native Terminal API":
       let topLine = tester.clipboard()
       check topLine.startsWith("line ")
       check parseInt(topLine[5 .. ^1]) < 10
+      tester.setLocale("zh-Hans")
+      tester.rightClickAt(30, 20)
+      check tester.menu() == @[
+        "复制", "粘贴", "全选", "-", "清除回滚"]
+      check tester.chooseMenuItem("全选") == nil
+      tester.setLocale("")
       tester.rightClickAt(30, 20)
       check tester.menu() == @[
         "Copy", "Paste", "Select All", "-", "Clear Scrollback"]
