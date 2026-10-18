@@ -58,3 +58,9 @@ suite "shader source inspection":
     let info = inspectShaderSource("func Fragment() vec4 { return vec4(1) }")
     check not info.found
     check info.error == "shader: expected a package clause at line 1, column 1"
+
+    let malformedBody = inspectShaderSource(
+      "package main\nfunc Fragment() vec4 { return ) }")
+    check not malformedBody.found
+    check malformedBody.error ==
+      "shader: expected expression, got ')' at line 2, column 31"

@@ -44,7 +44,7 @@ proc entryName(kind: ShaderEntryKind): string =
 
 proc inspectShaderSource*(source: string): ShaderSourceInfo =
   ## Finds a supported package-level shader function and checks effect image use.
-  ## Full syntax and type errors remain the compiler frontend's responsibility.
+  ## Type checking and full Kage grammar validation remain compiler work.
   let parsed = parseShaderFile(source)
   if parsed.error.message.len > 0:
     result.error = "shader: " & parsed.error.message & " at line " &

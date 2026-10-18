@@ -50,11 +50,39 @@ type
     expr*: ShaderAstExpr
     error*: ShaderParseError
 
+  ShaderAstStmtKind* = enum
+    saskBlock
+    saskDeclaration
+    saskAssignment
+    saskExpression
+    saskIncDec
+    saskReturn
+    saskBranch
+    saskIf
+    saskFor
+    saskRange
+
+  ShaderAstStmt* = ref object
+    ## An untyped statement; semantic resolution lowers it to shader IR.
+    kind*: ShaderAstStmtKind
+    token*: ShaderToken
+    name*: string
+    operator*: string
+    expressions*: seq[ShaderAstExpr]
+    statements*: seq[ShaderAstStmt]
+    rawTokens*: seq[ShaderToken]
+
+  ShaderStatementResult* = object
+    statement*: ShaderAstStmt
+    error*: ShaderParseError
+
   ShaderFunctionDecl* = object
-    ## A package-level function header and the raw tokens inside its body.
+    ## A package-level function header, body syntax tree, and source tokens.
     name*: string
     token*: ShaderToken
     receiver*: bool
+    hasBody*: bool
+    body*: ShaderAstStmt
     bodyTokens*: seq[ShaderToken]
 
   ShaderSourceFile* = object
@@ -71,6 +99,7 @@ type
     index: int
     eof: ShaderToken
     error: ShaderParseError
+    suppressComposite: bool
 
 proc current(p: Parser): ShaderToken {.inline.} =
   if p.index < p.tokens.len: p.tokens[p.index] else: p.eof
@@ -122,7 +151,7 @@ proc skipBalanced(p: var Parser; open, close: string;
     contents.add token
   p.fail("unterminated '" & open & "' group")
 
-proc skipDeclaration(p: var Parser) =
+proc skipDeclaration(p: var Parser; consumeSeparator = true) =
   discard p.advance()
   var parens = 0
   var brackets = 0
@@ -130,7 +159,8 @@ proc skipDeclaration(p: var Parser) =
   while not p.atEnd:
     let token = p.current
     if token.kind == stkSemicolon and parens == 0 and brackets == 0 and braces == 0:
-      discard p.advance()
+      if consumeSeparator:
+        discard p.advance()
       return
     case token.text
     of "(": inc parens
@@ -143,6 +173,7 @@ proc skipDeclaration(p: var Parser) =
     discard p.advance()
 
 proc endPosition(source: string): tuple[line, column: int]
+proc parseShaderStatements*(tokens: seq[ShaderToken]): ShaderStatementResult
 
 proc parseFunctionDecl(p: var Parser): ShaderFunctionDecl =
   discard p.advance() # func
@@ -176,7 +207,7 @@ proc parseFunctionDecl(p: var Parser): ShaderFunctionDecl =
       return
     if token.text == "{" and parens == 0 and brackets == 0 and braces == 0 and
         (p.index == 0 or p.tokens[p.index - 1].text notin ["struct", "interface"]):
-      discard p.skipBalanced("{", "}", result.bodyTokens)
+      result.hasBody = p.skipBalanced("{", "}", result.bodyTokens)
       if p.error.message.len == 0 and not p.atEnd and
           p.current.kind != stkSemicolon:
         p.fail("expected a separator after function body")
@@ -224,7 +255,13 @@ proc parseShaderFile*(source: string): ShaderFileResult =
     if parser.current.kind == stkSemicolon:
       discard parser.advance()
     elif parser.current.text == "func" and parser.current.kind == stkKeyword:
-      let function = parser.parseFunctionDecl()
+      var function = parser.parseFunctionDecl()
+      if parser.error.message.len == 0 and function.hasBody:
+        let body = parseShaderStatements(function.bodyTokens)
+        if body.error.message.len > 0:
+          parser.error = body.error
+        else:
+          function.body = body.statement
       if parser.error.message.len == 0:
         result.file.functions.add function
     elif parser.current.text in ["var", "const", "type", "import"] and
@@ -404,7 +441,7 @@ proc parsePostfix(p: var Parser; expr: ShaderAstExpr): ShaderAstExpr =
         if low == nil:
           p.fail("expected an index expression")
         result = ShaderAstExpr(kind: saekIndex, token: open, children: @[result, low])
-    elif p.matches("{"):
+    elif p.matches("{") and not p.suppressComposite:
       result = p.parseComposite(result)
     else:
       break
@@ -423,6 +460,262 @@ proc parseExpression(p: var Parser; minimumPrecedence = 1): ShaderAstExpr =
       operator: operator.text,
       children: @[result, right]
     )
+
+proc parseExpressionList(p: var Parser): seq[ShaderAstExpr] =
+  result.add p.parseExpression()
+  while p.take(",") and p.error.message.len == 0:
+    result.add p.parseExpression()
+
+proc parseSimpleStatement(p: var Parser): ShaderAstStmt =
+  let token = p.current
+  let expressions = p.parseExpressionList()
+  if p.error.message.len > 0:
+    return
+  if p.current.text in ["=", ":=", "+=", "-=", "*=", "/=", "%=", "&=",
+                        "|=", "^=", "<<=", ">>=", "&^="]:
+    let operator = p.advance()
+    let right = p.parseExpressionList()
+    return ShaderAstStmt(
+      kind: saskAssignment,
+      token: token,
+      operator: operator.text,
+      expressions: expressions & right
+    )
+  if p.current.text in ["++", "--"]:
+    let operator = p.advance()
+    if expressions.len != 1:
+      p.fail("increment and decrement require one expression")
+      return
+    return ShaderAstStmt(
+      kind: saskIncDec,
+      token: token,
+      operator: operator.text,
+      expressions: expressions
+    )
+  if expressions.len != 1:
+    p.fail("an expression statement requires one expression")
+    return
+  ShaderAstStmt(kind: saskExpression, token: token, expressions: expressions)
+
+proc parseStatement(p: var Parser): ShaderAstStmt
+
+proc parseStatementList(p: var Parser; untilClose: bool): seq[ShaderAstStmt] =
+  while not p.atEnd and p.error.message.len == 0 and
+      (not untilClose or not p.matches("}")):
+    if p.current.kind == stkSemicolon:
+      discard p.advance()
+      continue
+    let start = p.index
+    let statement = p.parseStatement()
+    if p.error.message.len > 0:
+      break
+    if statement != nil:
+      result.add statement
+    if p.index == start:
+      p.fail("expected a statement")
+      break
+    if p.current.kind == stkSemicolon:
+      discard p.advance()
+    elif untilClose and not p.matches("}"):
+      p.fail("expected ';' or '}' after statement")
+    elif not untilClose and not p.atEnd:
+      p.fail("expected ';' after statement")
+
+proc parseBlock(p: var Parser): ShaderAstStmt =
+  let open = p.current
+  if not p.expect("{"):
+    return
+  result = ShaderAstStmt(kind: saskBlock, token: open)
+  result.statements = p.parseStatementList(untilClose = true)
+  if p.error.message.len == 0:
+    if p.atEnd:
+      p.fail("unterminated block")
+    else:
+      discard p.expect("}")
+
+proc parseIf(p: var Parser): ShaderAstStmt =
+  let token = p.advance()
+  let previousMode = p.suppressComposite
+  p.suppressComposite = true
+  let head = p.parseSimpleStatement()
+  var condition: ShaderAstExpr
+  var initializer: ShaderAstStmt
+  if p.current.kind == stkSemicolon:
+    initializer = head
+    discard p.advance()
+    condition = p.parseExpression()
+  elif head != nil and head.kind == saskExpression and head.expressions.len == 1:
+    condition = head.expressions[0]
+  else:
+    p.fail("expected a condition after 'if'")
+  p.suppressComposite = previousMode
+  if p.error.message.len > 0:
+    return
+  if not p.matches("{"):
+    p.fail("expected a block after 'if' condition")
+    return
+  let thenBlock = p.parseBlock()
+  result = ShaderAstStmt(kind: saskIf, token: token, expressions: @[condition])
+  if initializer != nil:
+    result.statements.add initializer
+  result.statements.add thenBlock
+  if p.take("else"):
+    if p.matches("if"):
+      result.statements.add p.parseIf()
+    elif p.matches("{"):
+      result.statements.add p.parseBlock()
+    else:
+      p.fail("expected 'if' or a block after 'else'")
+
+proc hasRangeClause(p: Parser): bool =
+  var parens = 0
+  var brackets = 0
+  var braces = 0
+  for i in p.index ..< p.tokens.len:
+    let token = p.tokens[i]
+    if token.kind == stkSemicolon and parens == 0 and brackets == 0 and braces == 0:
+      return false
+    if token.text == "range" and token.kind == stkKeyword:
+      return true
+    case token.text
+    of "(": inc parens
+    of ")": parens = max(0, parens - 1)
+    of "[": inc brackets
+    of "]": brackets = max(0, brackets - 1)
+    of "{": inc braces
+    of "}":
+      if braces == 0:
+        return false
+      dec braces
+    else: discard
+
+proc parseRange(p: var Parser; token: ShaderToken): ShaderAstStmt =
+  result = ShaderAstStmt(kind: saskRange, token: token)
+  if p.take("range"):
+    result.expressions = @[p.parseExpression()]
+  else:
+    let left = p.parseExpressionList()
+    if p.current.text notin ["=", ":="]:
+      p.fail("expected '=' or ':=' before 'range'")
+      return
+    result.operator = p.advance().text
+    result.expressions = left
+    if not p.take("range"):
+      p.fail("expected 'range' in range clause")
+      return
+    result.expressions.add p.parseExpression()
+  if p.error.message.len == 0:
+    if not p.matches("{"):
+      p.fail("expected a block after range clause")
+    else:
+      result.statements.add p.parseBlock()
+
+proc parseFor(p: var Parser): ShaderAstStmt =
+  let token = p.advance()
+  result = ShaderAstStmt(kind: saskFor, token: token)
+  if p.matches("{"):
+    result.statements.add p.parseBlock()
+    return
+  if p.hasRangeClause:
+    let previousMode = p.suppressComposite
+    p.suppressComposite = true
+    result = p.parseRange(token)
+    p.suppressComposite = previousMode
+    return
+
+  let previousMode = p.suppressComposite
+  p.suppressComposite = true
+  var initializer: ShaderAstStmt
+  if p.current.kind != stkSemicolon:
+    initializer = p.parseSimpleStatement()
+  if p.current.kind == stkSemicolon:
+    if initializer != nil:
+      result.statements.add initializer
+    discard p.advance()
+    if p.current.kind != stkSemicolon:
+      result.expressions.add p.parseExpression()
+    if not p.expect(";"):
+      p.suppressComposite = previousMode
+      return
+    if not p.matches("{"):
+      result.statements.add p.parseSimpleStatement()
+  elif initializer != nil and initializer.kind == saskExpression and
+      initializer.expressions.len == 1:
+    result.expressions.add initializer.expressions[0]
+  else:
+    p.fail("expected a condition or three-part clause after 'for'")
+  p.suppressComposite = previousMode
+  if p.error.message.len == 0:
+    if not p.matches("{"):
+      p.fail("expected a block after 'for' clause")
+    else:
+      result.statements.add p.parseBlock()
+
+proc parseLocalDeclaration(p: var Parser): ShaderAstStmt =
+  let start = p.index
+  let token = p.current
+  p.skipDeclaration(consumeSeparator = false)
+  result = ShaderAstStmt(
+    kind: saskDeclaration,
+    token: token,
+    rawTokens: p.tokens[start ..< p.index]
+  )
+
+proc parseStatement(p: var Parser): ShaderAstStmt =
+  let token = p.current
+  if token.kind == stkIdentifier and p.index + 1 < p.tokens.len and
+      p.tokens[p.index + 1].text == ":":
+    result = ShaderAstStmt(kind: saskBranch, token: token, operator: "label")
+    result.name = token.text
+    discard p.advance()
+    discard p.advance()
+    result.statements.add p.parseStatement()
+    return
+  case token.text
+  of "{":
+    return p.parseBlock()
+  of "if":
+    return p.parseIf()
+  of "for":
+    return p.parseFor()
+  of "var", "const", "type":
+    return p.parseLocalDeclaration()
+  of "return":
+    discard p.advance()
+    result = ShaderAstStmt(kind: saskReturn, token: token)
+    if not p.atEnd and p.current.kind != stkSemicolon and not p.matches("}"):
+      result.expressions = p.parseExpressionList()
+  of "break", "continue", "fallthrough", "goto":
+    discard p.advance()
+    result = ShaderAstStmt(kind: saskBranch, token: token, operator: token.text)
+    if token.text == "goto" or token.text in ["break", "continue"]:
+      if p.current.kind == stkIdentifier:
+        result.name = p.advance().text
+  else:
+    return p.parseSimpleStatement()
+
+proc tokenEnd(token: ShaderToken): tuple[offset, line, column: int] =
+  result = (offset: token.offset, line: token.line, column: token.column)
+  for c in token.text:
+    inc result.offset
+    if c == '\n':
+      inc result.line
+      result.column = 1
+    else:
+      inc result.column
+
+proc parseShaderStatements*(tokens: seq[ShaderToken]): ShaderStatementResult =
+  ## Parses the statement sequence captured inside one function body.
+  var eof = ShaderToken(line: 1, column: 1)
+  if tokens.len > 0:
+    let endPos = tokenEnd(tokens[^1])
+    eof = ShaderToken(offset: endPos.offset, line: endPos.line, column: endPos.column)
+  var parser = Parser(tokens: tokens, eof: eof)
+  result.statement = ShaderAstStmt(kind: saskBlock, token: eof)
+  result.statement.statements = parser.parseStatementList(untilClose = false)
+  if parser.error.message.len > 0:
+    result.statement = nil
+  result.error = parser.error
 
 proc endPosition(source: string): tuple[line, column: int] =
   result = (line: 1, column: 1)

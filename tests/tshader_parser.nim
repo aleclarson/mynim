@@ -1,5 +1,6 @@
 import std/unittest
 
+import mynim/internal/shader/lexer
 import mynim/internal/shader/parser
 
 suite "shader expression parser":
@@ -104,3 +105,50 @@ suite "shader file parser":
     let malformed = parseShaderFile("package main\nfunc Fragment vec4")
     check malformed.error.message == "expected a parameter list after function name"
     check malformed.error.line == 2
+
+  test "parses assignments, conditionals, loops, range, and return":
+    let parsed = parseShaderFile("""
+      package main
+      func Fragment(pos vec2) vec4 {
+        value := 1
+        value += 2
+        if value > 0 { value++ } else { value-- }
+        for i := 0; i < 3; i++ { value += i }
+        for _, point := range points { value += int(point.x) }
+        return vec4(float(value))
+      }
+    """)
+    check parsed.error.message.len == 0
+    let body = parsed.file.functions[0].body
+    check parsed.file.functions[0].hasBody
+    check body.kind == saskBlock
+    check body.statements.len == 6
+    check body.statements[0].kind == saskAssignment
+    check body.statements[0].operator == ":="
+    check body.statements[1].operator == "+="
+    let conditional = body.statements[2]
+    check conditional.kind == saskIf
+    check conditional.statements.len == 2
+    check conditional.statements[0].statements[0].kind == saskIncDec
+    let loop = body.statements[3]
+    check loop.kind == saskFor
+    check loop.statements.len == 3
+    check loop.expressions.len == 1
+    let range = body.statements[4]
+    check range.kind == saskRange
+    check range.operator == ":="
+    check range.expressions.len == 3
+    check body.statements[5].kind == saskReturn
+
+  test "reports invalid statements at their token location":
+    let tokens = lexShaderSource("return )").tokens
+    let body = parseShaderStatements(tokens)
+    check body.statement == nil
+    check body.error.message == "expected expression, got ')'"
+    check body.error.line == 1
+    check body.error.column == 8
+
+    let invalidFunction = parseShaderFile(
+      "package main\nfunc Fragment() vec4 { return ) }")
+    check invalidFunction.error.message == "expected expression, got ')'"
+    check invalidFunction.error.line == 2
