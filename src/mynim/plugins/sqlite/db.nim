@@ -256,10 +256,66 @@ proc checkSqlite(db: SqliteDb; rc: cint) =
   if rc != sqliteOk:
     raise sqliteError(db, rc)
 
+proc isUtf8Continuation(value: int): bool {.inline.} =
+  value >= 0x80 and value <= 0xbf
+
+proc isValidUtf8(value: string): bool =
+  var i = 0
+  while i < value.len:
+    let first = ord(value[i])
+    if first <= 0x7f:
+      inc i
+    elif first >= 0xc2 and first <= 0xdf:
+      if i + 1 >= value.len or not isUtf8Continuation(ord(value[i + 1])):
+        return false
+      inc i, 2
+    elif first == 0xe0:
+      if i + 2 >= value.len: return false
+      let second = ord(value[i + 1])
+      if second < 0xa0 or second > 0xbf or
+          not isUtf8Continuation(ord(value[i + 2])): return false
+      inc i, 3
+    elif (first >= 0xe1 and first <= 0xec) or
+        (first >= 0xee and first <= 0xef):
+      if i + 2 >= value.len or
+          not isUtf8Continuation(ord(value[i + 1])) or
+          not isUtf8Continuation(ord(value[i + 2])): return false
+      inc i, 3
+    elif first == 0xed:
+      if i + 2 >= value.len: return false
+      let second = ord(value[i + 1])
+      if second < 0x80 or second > 0x9f or
+          not isUtf8Continuation(ord(value[i + 2])): return false
+      inc i, 3
+    elif first == 0xf0:
+      if i + 3 >= value.len: return false
+      let second = ord(value[i + 1])
+      if second < 0x90 or second > 0xbf or
+          not isUtf8Continuation(ord(value[i + 2])) or
+          not isUtf8Continuation(ord(value[i + 3])): return false
+      inc i, 4
+    elif first >= 0xf1 and first <= 0xf3:
+      if i + 3 >= value.len or
+          not isUtf8Continuation(ord(value[i + 1])) or
+          not isUtf8Continuation(ord(value[i + 2])) or
+          not isUtf8Continuation(ord(value[i + 3])): return false
+      inc i, 4
+    elif first == 0xf4:
+      if i + 3 >= value.len: return false
+      let second = ord(value[i + 1])
+      if second < 0x80 or second > 0x8f or
+          not isUtf8Continuation(ord(value[i + 2])) or
+          not isUtf8Continuation(ord(value[i + 3])): return false
+      inc i, 4
+    else:
+      return false
+  true
+
 proc open*(path: string; options = OpenOptions()): Database =
   ## Opens a database path or `:memory:` and enables foreign-key constraints.
-  if path.len == 0 or '\0' in path:
-    raise newException(ValueError, "sqlite: database path must be nonempty and contain no NUL")
+  if path.len == 0 or '\0' in path or not isValidUtf8(path):
+    raise newException(ValueError,
+      "sqlite: database path must be nonempty UTF-8 without NUL")
   var flags = openReadWrite or openCreate or openFullMutex
   if options.readOnly:
     flags = openReadOnly or openFullMutex

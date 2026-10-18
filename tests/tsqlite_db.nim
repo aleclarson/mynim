@@ -263,6 +263,18 @@ suite "SQLite database API":
     check received
     check "canceled" in message
 
+  test "requires valid UTF-8 database paths":
+    for invalid in ["\xff", "\xc0\xaf", "\xed\xa0\x80", "\xf4\x90\x80\x80"]:
+      expect ValueError:
+        discard sqliteDb.open(":memory:" & invalid)
+
+    let path = getTempDir() / ("mynim-sqlite-\xc3\xa9-" &
+      $getCurrentProcessId() & ".db")
+    defer:
+      if fileExists(path): removeFile(path)
+    let db = sqliteDb.open(path)
+    db.close()
+
   test "supports read-only opens and idempotent close":
     let path = getTempDir() / ("mynim-sqlite-" & $getCurrentProcessId() & ".db")
     if fileExists(path): removeFile(path)
