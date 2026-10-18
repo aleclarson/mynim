@@ -423,8 +423,6 @@ proc gridCellDimension(node: ElementNode; natural: NaturalSize;
                        horizontal: bool; area, base, mainExtent: float32;
                        align: Align): tuple[size, offset: float32] =
   let dimension = if horizontal: node.width else: node.height
-  let minimum = if horizontal: node.minW else: node.minH
-  let maximum = if horizontal: node.maxW else: node.maxH
   let marginStartIndex = if horizontal: 3 else: 0
   let marginEndIndex = if horizontal: 1 else: 2
   let marginStart = marginValue(node.margin[marginStartIndex])
@@ -434,19 +432,27 @@ proc gridCellDimension(node: ElementNode; natural: NaturalSize;
   let autoEnd = node.margin[marginEndIndex] == Auto
   let resolved = dimension.resolve(base)
   if resolved.ok:
-    result.size = clampSize(resolved.value, minimum, maximum, base)
+    if horizontal:
+      result.size = node.clampWidth(resolved.value, base)
+    else:
+      result.size = node.clampHeight(resolved.value, base)
   elif not horizontal and node.aspectRatio > 0:
-    result.size = clampSize(
+    result.size = node.clampHeight(
       max(mainExtent - node.contentInsetX, 0'f32) / node.aspectRatio +
-        node.contentInsetY, minimum, maximum, base)
+        node.contentInsetY, base)
   elif align == Align.Stretch and not autoStart and not autoEnd and
       (horizontal or node.aspectRatio <= 0):
-    result.size = clampSize(max(area - margins, 0'f32),
-      minimum, maximum, base)
+    if horizontal:
+      result.size = node.clampWidth(max(area - margins, 0'f32), base)
+    else:
+      result.size = node.clampHeight(max(area - margins, 0'f32), base)
   else:
     let naturalSize = if horizontal: natural.w else: natural.h
-    result.size = clampSize(min(naturalSize, max(area - margins, 0'f32)),
-      minimum, maximum, base)
+    let value = min(naturalSize, max(area - margins, 0'f32))
+    if horizontal:
+      result.size = node.clampWidth(value, base)
+    else:
+      result.size = node.clampHeight(value, base)
 
   let free = area - result.size - margins
   result.offset = marginStart

@@ -60,7 +60,7 @@ block grow_and_shrink:
 
 block boxes_are_not_smaller_than_padding:
   let c = newContext()
-  var column, columnChild, row, rowChild: Element
+  var column, columnChild, row, rowChild, grid, gridChild: Element
   c.build(proc(ctx: Context) =
     column = ctx.column().size(100, 40)
     discard column.children(proc() =
@@ -70,10 +70,16 @@ block boxes_are_not_smaller_than_padding:
     discard row.children(proc() =
       rowChild = ctx.box().width(8).padding(0, 3, 0, 11)
     )
+    grid = ctx.grid().columns(1).size(100, 40)
+    discard grid.children(proc() =
+      gridChild = ctx.box().size(8, 8).padding(14, 3, 0, 11)
+    )
   )
   let layout = c.layout(100, 100)
   doAssert layout.bounds(columnChild).w == 14
   doAssert layout.bounds(rowChild).w == 14
+  doAssert layout.bounds(gridChild).w == 14
+  doAssert layout.bounds(gridChild).h == 14
 
 block flex_shrink_uses_inner_base_size:
   let c = newContext()
