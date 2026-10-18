@@ -3,6 +3,7 @@
 ## Calls on a terminal must be serialized, and its GhosttyVT library must
 ## remain loaded until after close().
 
+import std/options
 import ./library
 
 type
@@ -23,6 +24,9 @@ type
   TerminalModeConfig {.bycopy.} = object
     mode: uint16
     value: bool
+  TerminalColor* {.bycopy.} = object
+    r*, g*, b*: uint8
+  TerminalPalette* = array[256, TerminalColor]
 
   GhosttyTerminal* = ref object
     library: GhosttyVT
@@ -51,6 +55,10 @@ const
   optionModeDefault = 33'i32
   optionMode = 34'i32
   optionResizePullScrollback = 40'i32
+  optionColorForeground = 11'i32
+  optionColorBackground = 12'i32
+  optionColorCursor = 13'i32
+  optionColorPalette = 14'i32
   modeAnsiMask = 0x8000'u16
 
   modeCursorKeys* = TerminalMode(1)
@@ -73,6 +81,10 @@ static:
   doAssert sizeof(TerminalModeConfig) == 4
   doAssert offsetOf(TerminalModeConfig, mode) == 0
   doAssert offsetOf(TerminalModeConfig, value) == 2
+  doAssert sizeof(TerminalColor) == 3
+  doAssert offsetOf(TerminalColor, r) == 0
+  doAssert offsetOf(TerminalColor, g) == 1
+  doAssert offsetOf(TerminalColor, b) == 2
 
 proc requiredSymbol(library: GhosttyVT; name: string): pointer =
   result = library.symbol(name)
@@ -289,3 +301,26 @@ proc ansiMode*(value: int): TerminalMode =
   if value < 0 or value > 0x7FFF:
     raise newException(ValueError, "ANSI terminal mode is out of range")
   TerminalMode(uint16(value) or modeAnsiMask)
+
+proc setColors*(terminal: GhosttyTerminal; foreground, background: TerminalColor;
+                cursor = none(TerminalColor);
+                palette = none(TerminalPalette)) =
+  ## Sets default colors and palette entries; absent optional values reset them.
+  var foregroundValue = foreground
+  var backgroundValue = background
+  terminal.setOption(optionColorForeground, addr foregroundValue,
+    "setting foreground color")
+  terminal.setOption(optionColorBackground, addr backgroundValue,
+    "setting background color")
+  if cursor.isSome:
+    var cursorValue = cursor.get()
+    terminal.setOption(optionColorCursor, addr cursorValue,
+      "setting cursor color")
+  else:
+    terminal.setOption(optionColorCursor, nil, "clearing cursor color")
+  if palette.isSome:
+    var paletteValue = palette.get()
+    terminal.setOption(optionColorPalette, addr paletteValue[0],
+      "setting terminal palette")
+  else:
+    terminal.setOption(optionColorPalette, nil, "resetting terminal palette")

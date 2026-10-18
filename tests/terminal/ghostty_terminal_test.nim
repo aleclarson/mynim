@@ -38,6 +38,13 @@ suite "Ghostty terminal state":
     terminal.setMode(modeFocusEvent, false)
     check not terminal.mode(modeFocusEvent)
     terminal.setResizePullScrollback(false)
+    var palette: TerminalPalette
+    palette[42] = TerminalColor(r: 8, g: 9, b: 10)
+    terminal.setColors(
+      foreground = TerminalColor(r: 11, g: 12, b: 13),
+      background = TerminalColor(r: 21, g: 22, b: 23),
+      cursor = some(TerminalColor(r: 31, g: 32, b: 33)),
+      palette = some(palette))
     check uint16(ansiMode(20)) == 0x8014'u16
     expect ValueError:
       terminal.setScrollbackMaxBytes(-1)
@@ -60,7 +67,12 @@ suite "Ghostty terminal state":
     check frameCursor.inView
     check (frameCursor.x, frameCursor.y) == (3, 1)
     check frameCursor.visible
-    discard renderState.colors()
+    let frameColors = renderState.colors()
+    check frameColors.foreground == RGB(r: 11, g: 12, b: 13)
+    check frameColors.background == RGB(r: 21, g: 22, b: 23)
+    check frameColors.hasCursor
+    check frameColors.cursor == RGB(r: 31, g: 32, b: 33)
+    check frameColors.palette[42] == RGB(r: 8, g: 9, b: 10)
 
     renderState.rows()
     var rowCount = 0
