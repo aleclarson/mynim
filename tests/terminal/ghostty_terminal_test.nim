@@ -1,5 +1,5 @@
-import std/[os, unittest]
-import mynim/plugins/terminal/internal/vt/[library, terminal]
+import std/[options, os, unittest]
+import mynim/plugins/terminal/internal/vt/[library, render, terminal]
 
 suite "Ghostty terminal state":
   test "validates the library and dimensions before construction":
@@ -7,6 +7,14 @@ suite "Ghostty terminal state":
       discard newGhosttyTerminal(nil, 80, 24)
     expect ValueError:
       discard newGhosttyTerminal(nil, 0, 24)
+
+  test "reports nil handles as closed":
+    let terminal: GhosttyTerminal = nil
+    let renderState: GhosttyRenderState = nil
+    expect IOError:
+      discard terminal.size()
+    expect IOError:
+      discard renderState.size()
 
   test "creates, writes, resizes, resets and closes a terminal":
     let path = getEnv("MYNIM_GHOSTTY_VT")
@@ -19,15 +27,72 @@ suite "Ghostty terminal state":
 
     check terminal.size() == (cols: 80, rows: 24)
     check terminal.cursor() == (x: 0, y: 0)
-    terminal.write("hello\e[2;4H")
+    terminal.write("hello\e[1;6He\u0301\e[1mB\e[0m" &
+      "\e[38;5;123mP\e[0m\e[38;2;1;2;3mR\e[0m\e[2;4H")
     check terminal.cursor() == (x: 3, y: 1)
 
     terminal.resize(100, 30, 9, 16)
     check terminal.size() == (cols: 100, rows: 30)
+
+    let renderState = newGhosttyRenderState(library)
+    defer: renderState.close()
+    renderState.update(terminal)
+    check renderState.size() == (cols: 100, rows: 30)
+    check renderState.dirty() != renderClean
+    let frameCursor = renderState.cursor()
+    check frameCursor.inView
+    check (frameCursor.x, frameCursor.y) == (3, 1)
+    check frameCursor.visible
+    discard renderState.colors()
+
+    renderState.rows()
+    var rowCount = 0
+    var firstRow: seq[RenderCell]
+    while renderState.nextRow():
+      let y = renderState.rowViewportY()
+      let cells = renderState.rowCells()
+      check cells.len == 100
+      if y == 0:
+        firstRow = cells
+        check renderState.rowDirty()
+        check cells[0].codepoint == uint32(ord('h'))
+        check cells[1].codepoint == uint32(ord('e'))
+        check cells[4].codepoint == uint32(ord('o'))
+        check cells[5].codepoint == uint32(ord('e'))
+        check cells[5].grapheme
+        check cells[6].codepoint == uint32(ord('B'))
+        check cells[7].codepoint == uint32(ord('P'))
+        check cells[8].codepoint == uint32(ord('R'))
+        check cells[0].wide == cellNarrow
+        check cells[6].styleId != 0
+        check renderState.cellGraphemes(5) ==
+          @[uint32(ord('e')), 0x301'u32]
+        check renderState.cellStyle(6).bold
+        let paletteStyle = renderState.cellStyle(7)
+        check paletteStyle.foreground.kind == renderColorPalette
+        check paletteStyle.foreground.paletteIndex == 123
+        let rgbStyle = renderState.cellStyle(8)
+        check rgbStyle.foreground.kind == renderColorRgb
+        check rgbStyle.foreground.rgb == RGB(r: 1, g: 2, b: 3)
+        check renderState.rowSelection().isNone
+        discard renderState.rowId()
+      inc rowCount
+    check rowCount == 30
+
+    renderState.clean()
+    check renderState.dirty() == renderClean
+
     terminal.reset()
     check terminal.size() == (cols: 100, rows: 30)
     check terminal.cursor() == (x: 0, y: 0)
+    renderState.update(terminal)
+    check renderState.dirty() != renderClean
+    check (renderState.cursor().x, renderState.cursor().y) == (0, 0)
+    check firstRow[0].codepoint == uint32(ord('h'))
 
+    renderState.close()
     terminal.close()
+    expect IOError:
+      discard renderState.size()
     expect IOError:
       discard terminal.size()

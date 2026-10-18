@@ -61,6 +61,20 @@ proc requireLayout(types: JsonNode; name: string; size: int;
       raise newException(ValueError,
         &"Ghostty {name}.{field} is at {actualOffset}, expected {offset}")
 
+proc requireEnumValue(types: JsonNode; typeName, field: string;
+                      expected: int) =
+  let node = typeNode(types, typeName)
+  if not node.hasKey("kind") or node["kind"].kind != JString or
+      node["kind"].getStr() != "enum" or not node.hasKey("values") or
+      node["values"].kind != JObject or not node["values"].hasKey(field) or
+      node["values"][field].kind != JInt:
+    raise newException(ValueError,
+      "Ghostty " & typeName & " has no enum value " & field)
+  let actual = node["values"][field].getInt()
+  if actual != expected:
+    raise newException(ValueError,
+      &"Ghostty {typeName}.{field} is {actual}, expected {expected}")
+
 proc bitField(node: JsonNode; name, context: string): GhosttyCellField =
   if node.kind != JObject or not node.hasKey(name):
     raise newException(ValueError, context & " has no bit field " & name)
@@ -71,6 +85,12 @@ proc bitField(node: JsonNode; name, context: string): GhosttyCellField =
       result.lsb + result.width > 64:
     raise newException(ValueError,
       &"Ghostty {context}.{name} has invalid bit range")
+
+proc requireWidth(field: GhosttyCellField; width: int; name: string) =
+  if field.width != width:
+    raise newException(ValueError,
+      "GhosttyCell " & name & " is " & $field.width & " bits, expected " &
+      $width)
 
 proc armBit(content: JsonNode; arm, field: string): GhosttyCellField =
   if content.kind != JObject or not content.hasKey("content") or
@@ -93,7 +113,7 @@ proc armBit(content: JsonNode; arm, field: string): GhosttyCellField =
       "GhosttyCell." & arm & "." & field & " exceeds the packed cell")
 
 proc parseManifest*(data: string): GhosttyManifest =
-  ## Parses and checks the subset of the ABI this binding currently uses.
+  ## Parses and checks the ABI layouts passed across this binding.
   var root: JsonNode
   try:
     root = parseJson(data)
@@ -114,6 +134,37 @@ proc parseManifest*(data: string): GhosttyManifest =
     ("ptr", offsetOf(GhosttyString, data)),
     ("len", offsetOf(GhosttyString, len))])
 
+  requireLayout(types, "GhosttyColorRgb", 3, [
+    ("r", 0), ("g", 1), ("b", 2)])
+  requireLayout(types, "GhosttyStyleColor", 16, [
+    ("tag", 0), ("value", 8)])
+  requireLayout(types, "GhosttyStyle", 72, [
+    ("size", 0), ("fg_color", 8), ("bg_color", 24),
+    ("underline_color", 40), ("bold", 56), ("italic", 57),
+    ("faint", 58), ("blink", 59), ("inverse", 60),
+    ("invisible", 61), ("strikethrough", 62), ("overline", 63),
+    ("underline", 64)])
+  requireLayout(types, "GhosttyStyleColor", 16, [
+    ("tag", 0), ("value", 8)])
+  requireLayout(types, "GhosttyStyle", 72, [
+    ("size", 0), ("fg_color", 8), ("bg_color", 24),
+    ("underline_color", 40), ("bold", 56), ("italic", 57),
+    ("faint", 58), ("blink", 59), ("inverse", 60),
+    ("invisible", 61), ("strikethrough", 62), ("overline", 63),
+    ("underline", 64)])
+  requireLayout(types, "GhosttyRenderStateCursor", 24, [
+    ("size", 0), ("viewport_has_value", 8), ("viewport_x", 10),
+    ("viewport_y", 12), ("wide_tail", 14), ("visible", 15),
+    ("blinking", 16), ("password_input", 17), ("visual_style", 20)])
+  requireLayout(types, "GhosttyRenderStateColors", 792, [
+    ("size", 0), ("background", 8), ("foreground", 11), ("cursor", 14),
+    ("cursor_has_value", 17), ("palette", 18)])
+  requireLayout(types, "GhosttyRenderStateRowSelection", 16, [
+    ("size", 0), ("start_x", 8), ("end_x", 10)])
+  requireLayout(types, "GhosttyRenderStateRowId", 16, [("bits", 0)])
+  requireLayout(types, "GhosttyCellsView", 16, [
+    ("ptr", 0), ("len", 8)])
+
   let cell = typeNode(types, "GhosttyCell")
   if not cell.hasKey("kind") or cell["kind"].kind != JString or
       cell["kind"].getStr() != "packed" or
@@ -132,6 +183,26 @@ proc parseManifest*(data: string): GhosttyManifest =
   result.cell.red = armBit(bits, "BG_COLOR_RGB", "r")
   result.cell.green = armBit(bits, "BG_COLOR_RGB", "g")
   result.cell.blue = armBit(bits, "BG_COLOR_RGB", "b")
+  requireWidth(result.cell.contentTag, 2, "content tag")
+  requireWidth(result.cell.styleId, 16, "style id")
+  requireWidth(result.cell.wide, 2, "wide marker")
+  requireWidth(result.cell.hyperlink, 1, "hyperlink marker")
+  requireWidth(result.cell.codepoint, 21, "codepoint")
+  requireWidth(result.cell.paletteIndex, 8, "palette index")
+  requireWidth(result.cell.red, 8, "red channel")
+  requireWidth(result.cell.green, 8, "green channel")
+  requireWidth(result.cell.blue, 8, "blue channel")
+  requireEnumValue(types, "GhosttyCellContentTag", "CODEPOINT", 0)
+  requireEnumValue(types, "GhosttyCellContentTag", "CODEPOINT_GRAPHEME", 1)
+  requireEnumValue(types, "GhosttyCellContentTag", "BG_COLOR_PALETTE", 2)
+  requireEnumValue(types, "GhosttyCellContentTag", "BG_COLOR_RGB", 3)
+  requireEnumValue(types, "GhosttyCellWide", "NARROW", 0)
+  requireEnumValue(types, "GhosttyCellWide", "WIDE", 1)
+  requireEnumValue(types, "GhosttyCellWide", "SPACER_TAIL", 2)
+  requireEnumValue(types, "GhosttyCellWide", "SPACER_HEAD", 3)
+  requireEnumValue(types, "GhosttyStyleColorTag", "NONE", 0)
+  requireEnumValue(types, "GhosttyStyleColorTag", "PALETTE", 1)
+  requireEnumValue(types, "GhosttyStyleColorTag", "RGB", 2)
 
 proc openGhosttyVT*(path: string): GhosttyVT =
   ## Loads the shared library and verifies its reported ABI before use.

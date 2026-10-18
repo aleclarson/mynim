@@ -67,6 +67,14 @@ proc requireHandle(terminal: GhosttyTerminal): pointer =
     raise newException(IOError, "terminal is closed")
   terminal.handle
 
+proc rawHandle*(terminal: GhosttyTerminal): pointer =
+  ## Internal bridge for Ghostty APIs that consume this terminal handle.
+  requireHandle(terminal)
+
+proc belongsToLibrary*(terminal: GhosttyTerminal; library: GhosttyVT): bool =
+  ## Checks that another Ghostty object can safely use this terminal.
+  not terminal.isNil and terminal.library == library
+
 proc close*(terminal: GhosttyTerminal) =
   ## Frees the Ghostty state; close it before unloading its library.
   if terminal.isNil or terminal.handle.isNil:
@@ -79,9 +87,10 @@ proc close*(terminal: GhosttyTerminal) =
 
 proc reset*(terminal: GhosttyTerminal) =
   ## Resets modes, scrollback and screen contents while keeping dimensions.
+  let handle = requireHandle(terminal)
   let resetTerminal = cast[TerminalResetProc](requiredSymbol(
     terminal.library, "ghostty_terminal_reset"))
-  resetTerminal(requireHandle(terminal))
+  resetTerminal(handle)
 
 proc resize*(terminal: GhosttyTerminal; cols, rows: int;
              cellWidth = 1; cellHeight = 1) =
@@ -89,35 +98,37 @@ proc resize*(terminal: GhosttyTerminal; cols, rows: int;
   if cellWidth < 0 or cellWidth > high(uint32).int or
       cellHeight < 0 or cellHeight > high(uint32).int:
     raise newException(ValueError, "terminal cell pixel size is out of range")
+  let handle = requireHandle(terminal)
   let resizeTerminal = cast[TerminalResizeProc](requiredSymbol(
     terminal.library, "ghostty_terminal_resize"))
-  let status = resizeTerminal(requireHandle(terminal),
+  let status = resizeTerminal(handle,
     checkedDimension(cols, "columns"), checkedDimension(rows, "rows"),
     uint32(max(1, cellWidth)), uint32(max(1, cellHeight)))
   checkResult("resize", status)
 
 proc write*(terminal: GhosttyTerminal; data: openArray[byte]) =
   ## Processes a chunk of VT output. An empty chunk is a no-op.
+  let handle = requireHandle(terminal)
   if data.len == 0:
-    discard requireHandle(terminal)
     return
   let writeData = cast[TerminalWriteProc](requiredSymbol(terminal.library,
     "ghostty_terminal_vt_write"))
-  writeData(requireHandle(terminal),
+  writeData(handle,
     cast[ptr UncheckedArray[byte]](unsafeAddr data[0]), csize_t(data.len))
 
 proc write*(terminal: GhosttyTerminal; data: string) =
   ## Processes UTF-8 terminal output without copying its bytes.
+  discard requireHandle(terminal)
   if data.len == 0:
-    discard requireHandle(terminal)
     return
   terminal.write(data.toOpenArrayByte(0, data.high))
 
 proc getUint16(terminal: GhosttyTerminal; key: int32): int =
+  let handle = requireHandle(terminal)
   var value: uint16
   let getData = cast[TerminalGetProc](requiredSymbol(terminal.library,
     "ghostty_terminal_get"))
-  let status = getData(requireHandle(terminal), key, addr value)
+  let status = getData(handle, key, addr value)
   checkResult("terminal query", status)
   int(value)
 
