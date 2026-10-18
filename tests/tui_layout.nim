@@ -139,6 +139,34 @@ block content_sized_row_respects_basis_limits:
   doAssert layout.bounds(fixed).w == 47
   doAssert layout.bounds(capped).w == 117
 
+block minimum_wins_over_maximum:
+  let c = newContext()
+  var column, constrained, growing: Element
+  c.build(proc(ctx: Context) =
+    column = ctx.column().size(100, 200)
+    discard column.children(proc() =
+      constrained = ctx.box().height(100).minHeight(60).maxHeight(30)
+      growing = ctx.box().height(10).grow()
+    )
+  )
+  let layout = c.layout(100, 200)
+  doAssert layout.bounds(constrained).h == 60
+  doAssert layout.bounds(growing).h == 140
+
+block wrapped_column_stretches_to_line:
+  let c = newContext()
+  var column, stretched, widest: Element
+  c.build(proc(ctx: Context) =
+    column = ctx.column().size(600, 500).wrap()
+    discard column.children(proc() =
+      stretched = ctx.row().height(10)
+      widest = ctx.row().size(50, 10)
+    )
+  )
+  let layout = c.layout(600, 500)
+  doAssert layout.bounds(stretched).w == 50
+  doAssert layout.bounds(widest).w == 50
+
 block grow_in_content_sized_column:
   let c = newContext()
   var parent, growing, content, after: Element
