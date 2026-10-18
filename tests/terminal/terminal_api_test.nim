@@ -356,6 +356,118 @@ suite "native Terminal API":
       check offeredText == "pasted"
       check terminal.waitForExit() == 0
 
+  test "reads lazy paste formats only when a terminal requests them":
+    if getEnv("MYNIM_GHOSTTY_VT").len == 0:
+      skip()
+    when defined(windows):
+      skip()
+    else:
+      let script = """
+import base64, os, re, select, sys, termios, time
+attrs = termios.tcgetattr(0)
+attrs[3] &= ~(termios.ICANON | termios.ECHO)
+attrs[6][termios.VMIN] = 1
+attrs[6][termios.VTIME] = 0
+termios.tcsetattr(0, termios.TCSANOW, attrs)
+os.write(1, b'\x1b[?5522hREADY\r\n')
+def read_until(needle, timeout=5):
+    result = b''
+    deadline = time.monotonic() + timeout
+    while needle not in result and time.monotonic() < deadline:
+        ready, _, _ = select.select([0], [], [], 0.1)
+        if ready:
+            part = os.read(0, 1)
+            if not part:
+                break
+            result += part
+    return result
+event = read_until(b'status=DONE')
+password = re.search(rb':pw=([^;\x1b]+)', event)
+listing = base64.b64encode(b'text/plain text/html image/png\n')
+if password is None or b';' + listing not in event:
+    sys.exit(11)
+mime = base64.b64encode(b'text/html')
+name = base64.b64encode(b'Lazy provider')
+request = b'\x1b]5522;type=read:pw=' + password.group(1) + b':name=' + name + b';' + mime + b'\x1b\\'
+os.write(1, request)
+reply = read_until(b'status=DONE')
+expected = b'status=DATA:mime=' + mime + b';' + base64.b64encode(b'<b>lazy</b>')
+if expected not in reply or b'mime=' + base64.b64encode(b'image/png') in reply:
+    sys.exit(12)
+sys.exit(0)
+"""
+      var textReads, htmlReads, pngReads: Atomic[int]
+      let data = transfer.newData(transfer.newItem(
+        transfer.lazy(transfer.Text, proc(): tuple[data: seq[byte],
+            err: ref CatchableError] =
+          discard textReads.fetchAdd(1, moRelaxed)
+          (data: @[byte(ord('f'))], err: nil)),
+        transfer.lazy(transfer.HTML, proc(): tuple[data: seq[byte],
+            err: ref CatchableError] =
+          discard htmlReads.fetchAdd(1, moRelaxed)
+          (data: @[byte(ord('<')), byte(ord('b')), byte(ord('>')),
+            byte(ord('l')), byte(ord('a')), byte(ord('z')), byte(ord('y')),
+            byte(ord('<')), byte(ord('/')), byte(ord('b')), byte(ord('>'))],
+            err: nil)),
+        transfer.lazy(transfer.PNG, proc(): tuple[data: seq[byte],
+            err: ref CatchableError] =
+          discard pngReads.fetchAdd(1, moRelaxed)
+          (data: @[137'u8, 80, 78, 71], err: nil))))
+      let terminal = newTerminal(TerminalOptions(command: @[
+        "/usr/bin/python3", "-c", script]))
+      defer: terminal.close()
+      let tester = ui.newTester(proc(c: ui.Context) =
+        discard view(c, terminal).size(800, 500)
+      , 800, 500)
+      defer: tester.close()
+      for _ in 0 ..< 50:
+        tester.frame()
+        sleep(10)
+      terminal.pasteData(data)
+      for _ in 0 ..< 600:
+        tester.frame()
+        if terminal.processExitCode().isSome:
+          break
+        sleep(10)
+      check terminal.processExitCode().get() == 0
+      check textReads.load(moRelaxed) == 0
+      check htmlReads.load(moRelaxed) == 1
+      check pngReads.load(moRelaxed) == 0
+
+  test "reads only lazy text for normal paste fallback":
+    if getEnv("MYNIM_GHOSTTY_VT").len == 0:
+      skip()
+    when defined(windows):
+      skip()
+    else:
+      var textReads, htmlReads: Atomic[int]
+      let data = transfer.newData(transfer.newItem(
+        transfer.lazy(transfer.Text, proc(): tuple[data: seq[byte],
+            err: ref CatchableError] =
+          discard textReads.fetchAdd(1, moRelaxed)
+          (data: @[byte(ord('f')), byte(ord('a')), byte(ord('l')),
+            byte(ord('l')), byte(ord('b')), byte(ord('a')), byte(ord('c')),
+            byte(ord('k'))], err: nil)),
+        transfer.lazy(transfer.HTML, proc(): tuple[data: seq[byte],
+            err: ref CatchableError] =
+          discard htmlReads.fetchAdd(1, moRelaxed)
+          (data: @[byte(ord('<')), byte(ord('b')), byte(ord('>'))], err: nil))))
+      let terminal = newTerminal(TerminalOptions(command: @[
+        "/bin/bash", "-c",
+        "read -t 3 -n 8 -r value || exit 98; test \"$value\" = fallback"]))
+      defer: terminal.close()
+      let tester = ui.newTester(proc(c: ui.Context) =
+        discard view(c, terminal).size(800, 500)
+      , 800, 500)
+      defer: tester.close()
+      for _ in 0 ..< 50:
+        tester.frame()
+        sleep(10)
+      terminal.pasteData(data)
+      check terminal.waitForExit() == 0
+      check textReads.load(moRelaxed) == 1
+      check htmlReads.load(moRelaxed) == 0
+
   test "reports when an image-only paste cannot be offered":
     if getEnv("MYNIM_GHOSTTY_VT").len == 0:
       skip()

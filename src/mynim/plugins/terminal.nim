@@ -57,6 +57,10 @@ type
     asked: bool
     promptText: string
 
+  PendingPasteProvider = object
+    data: transfer.Data
+    mimes: seq[string]
+
   TerminalTheme* = ref object
     foreground*, background*: ui.Color
     cursor*, cursorText*: ui.Color
@@ -122,6 +126,8 @@ type
     pendingKey: PendingTerminalKey
     takenKeys: seq[ui.Key]
     clipboardReads: seq[PendingClipboardRead]
+    pasteProviders: Table[uint64, PendingPasteProvider]
+    nextPasteProviderId: uint64
     clipboardPromptId: uint64
     clipboardPromptOpen: bool
     appliedTheme: TerminalTheme
@@ -261,7 +267,8 @@ proc newTerminal*(options = defaultTerminalOptions()): Terminal =
   let options = options.normalized()
   new(result)
   result.options = options
-  result.state = TerminalViewState(blinkStart: getMonoTime())
+  result.state = TerminalViewState(blinkStart: getMonoTime(),
+    pasteProviders: initTable[uint64, PendingPasteProvider]())
   result.library = loadGhosttyVT()
   try:
     result.session = newTerminalSession(result.library,
@@ -285,6 +292,9 @@ proc send*(terminal: Terminal; data: string) =
     raise newException(IOError, "terminal is closed")
   terminal.session.send(data)
 
+proc pasteDataWithHeld(terminal: Terminal; data: transfer.Data;
+                       held: openArray[transfer.Format])
+
 proc paste*(terminal: Terminal; text: string) =
   ## Sanitizes clipboard text and sends it with the active bracketed-paste mode.
   if terminal == nil or terminal.closed:
@@ -293,10 +303,13 @@ proc paste*(terminal: Terminal; text: string) =
 
 proc pasteData*(terminal: Terminal; data: transfer.Data) =
   ## Pastes clipboard data, offering its MIME types to Kitty mode 5522.
-  ## Formats are materialized on this caller before the PTY session reads them.
+  ## Call on the UI thread. Lazy formats are read only if the program requests
+  ## them; normal text fallback reads only text/plain.
   if terminal == nil or terminal.closed:
     raise newException(IOError, "terminal is closed")
-  terminal.session.pasteData(data)
+  terminal.session.scrollToBottom()
+  terminal.session.clearSelection()
+  terminal.pasteDataWithHeld(data, data.formats())
 
 proc size*(terminal: Terminal): tuple[cols, rows: int] =
   ## Returns the current terminal grid dimensions.
@@ -329,6 +342,8 @@ proc close*(terminal: Terminal) =
   terminal.closed = true
   terminal.session.setWake(nil)
   terminal.session.close()
+  terminal.state.pasteProviders.clear()
+  terminal.state.clipboardReads.setLen(0)
   terminal.library.close()
   terminal.session = nil
   terminal.library = nil
@@ -531,7 +546,7 @@ proc pasteClipboard(terminal: Terminal; services: ui.Services) =
   terminal.session.scrollToBottom()
   terminal.session.clearSelection()
   # Keep the original clipboard formats for PasteNoText when only text was read.
-  terminal.session.pasteData(data, formats)
+  terminal.pasteDataWithHeld(data, formats)
 
 proc tickSelection(terminal: Terminal) =
   if not terminal.state.selecting or not terminal.state.ticking or
@@ -576,6 +591,62 @@ proc readClipboardFormat(data: transfer.Data; mime: string): seq[byte] =
     let files = data.read(transfer.FileList)
     if files.err == nil:
       return files.data
+
+proc prunePasteProviders(terminal: Terminal) =
+  var retained = terminal.session.retainedPasteOfferIds()
+  for pending in terminal.state.clipboardReads:
+    if pending.source.pasteOfferId != 0 and
+        pending.source.pasteOfferId notin retained:
+      retained.add(pending.source.pasteOfferId)
+  var obsolete: seq[uint64]
+  for id in terminal.state.pasteProviders.keys:
+    if id notin retained:
+      obsolete.add(id)
+  for id in obsolete:
+    terminal.state.pasteProviders.del(id)
+
+proc pasteDataWithHeld(terminal: Terminal; data: transfer.Data;
+                       held: openArray[transfer.Format]) =
+  let snapshot = data.snapshot()
+  let formats = snapshot.formats()
+  let mimes = block:
+    var values: seq[string]
+    for format in formats:
+      let mime = offerMime(format)
+      if mime.len > 0 and mime notin values:
+        values.add(mime)
+    values
+  var offerId = terminal.state.nextPasteProviderId
+  while true:
+    if offerId == high(uint64):
+      offerId = 1
+    else:
+      inc offerId
+    if offerId != 0 and not terminal.state.pasteProviders.hasKey(offerId):
+      break
+  terminal.state.nextPasteProviderId = offerId
+  terminal.state.pasteProviders[offerId] = PendingPasteProvider(
+    data: snapshot, mimes: mimes)
+  let offered = terminal.session.offerPasteData(offerId, formats, held)
+  if offered:
+    terminal.prunePasteProviders()
+    return
+
+  terminal.state.pasteProviders.del(offerId)
+  let text = readClipboardFormat(snapshot, transfer.Text)
+  var hasNonText = false
+  if held.len > 0:
+    for format in held:
+      if format != transfer.Text:
+        hasNonText = true
+        break
+  else:
+    for format in formats:
+      if format != transfer.Text:
+        hasNonText = true
+        break
+  terminal.session.pasteFallback(transfer.bytesToString(text), hasNonText)
+  terminal.prunePasteProviders()
 
 proc clipboardContents(services: ui.Services; request: ClipboardReadRequest):
     tuple[contents: seq[(string, seq[byte])], available: seq[string]] =
@@ -627,10 +698,32 @@ proc finishClipboardRead(terminal: Terminal; services: ui.Services;
   else:
     terminal.session.answerClipboardRead(pending.source, false, [], [])
 
+proc answerPasteOfferRead(terminal: Terminal;
+                          pending: PendingClipboardRead) =
+  let id = pending.source.pasteOfferId
+  if terminal.state.pasteProviders.hasKey(id):
+    let offer = terminal.state.pasteProviders[id]
+    var contents: seq[(string, seq[byte])]
+    for mime in pending.source.mimes:
+      let bytes = readClipboardFormat(offer.data, mime)
+      if bytes.len > 0:
+        contents.add((mime, bytes))
+    terminal.session.answerClipboardRead(pending.source, true, contents,
+      offer.mimes)
+    terminal.state.pasteProviders.del(id)
+  else:
+    terminal.session.answerClipboardRead(pending.source, false, [], [])
+
 proc answerClipboardReads(terminal: Terminal; context: ui.Context;
                           services: ui.Services) =
   while terminal.state.clipboardReads.len > 0:
     let pending = terminal.state.clipboardReads[0]
+    if pending.source.pasteOfferId != 0:
+      if terminal.session.clipboardReadAnswer(pending.source) == 0:
+        terminal.answerPasteOfferRead(pending)
+      terminal.state.clipboardReads.delete(0)
+      terminal.prunePasteProviders()
+      continue
     let answer = terminal.session.clipboardReadAnswer(pending.source)
     if answer != 0:
       terminal.finishClipboardRead(services, pending, answer == 1)
@@ -1038,6 +1131,7 @@ proc view*(context: ui.Context; terminal: Terminal): ui.Element =
   terminal.state.scrollbarWidth = uiTheme.scrollbarWidth
   terminal.session.setWake(proc() = services.invalidate())
   terminal.dispatchEvents(services)
+  terminal.prunePasteProviders()
   let pasteOfferDelay = terminal.session.pasteOfferDelay()
   if pasteOfferDelay.isSome:
     context.after(pasteOfferDelay.get())
