@@ -1,6 +1,73 @@
 import std/[os, strutils, unittest]
 
+import mynim/internal/ctx as context
 import mynim/plugins/sqlite/db as sqliteDb
+
+type ContextTransactionArgs = object
+  db: sqliteDb.Database
+  ctx: context.CancelCtx
+
+type BusyInsertArgs = object
+  db: sqliteDb.Database
+  ctx: context.CancelCtx
+
+type ContextWaitArgs = object
+  db: sqliteDb.Database
+  ctx: context.CancelCtx
+
+proc rawSqliteOpen(path: cstring; db: ptr pointer; flags: cint;
+                   vfs: cstring): cint {.importc: "sqlite3_open_v2", cdecl.}
+proc rawSqliteExec(db: pointer; sql: cstring; callback, userData: pointer;
+                   error: ptr cstring): cint {.importc: "sqlite3_exec", cdecl.}
+proc rawSqliteClose(db: pointer): cint {.importc: "sqlite3_close", cdecl.}
+
+var
+  contextTransactionStarted: Channel[bool]
+  contextTransactionFinished: Channel[string]
+  busyInsertStarted: Channel[bool]
+  busyInsertFinished: Channel[string]
+  contextWaitStarted: Channel[bool]
+  contextWaitFinished: Channel[string]
+
+proc runContextTransaction(args: ContextTransactionArgs) {.thread.} =
+  {.cast(gcsafe).}:
+    contextTransactionStarted.send(true)
+    try:
+      discard args.db.transaction(args.ctx, [
+        SqlStatement(sql: "INSERT INTO items VALUES (8)"),
+        SqlStatement(sql:
+        "WITH RECURSIVE sequence(x) AS (SELECT 1 UNION ALL " &
+        "SELECT x + 1 FROM sequence WHERE x < 1000000000) " &
+        "SELECT sum(x) FROM sequence")
+      ])
+      contextTransactionFinished.send("completed")
+    except CatchableError as error:
+      contextTransactionFinished.send(error.msg)
+
+proc runBusyInsert(args: BusyInsertArgs) {.thread.} =
+  {.cast(gcsafe).}:
+    busyInsertStarted.send(true)
+    try:
+      discard args.db.execute(args.ctx, "INSERT INTO busy_items VALUES (1)")
+      busyInsertFinished.send("completed")
+    except CatchableError as error:
+      busyInsertFinished.send(error.msg)
+
+proc runContextWait(args: ContextWaitArgs) {.thread.} =
+  {.cast(gcsafe).}:
+    contextWaitStarted.send(true)
+    try:
+      discard args.db.query(args.ctx, "SELECT 1")
+      contextWaitFinished.send("completed")
+    except CatchableError as error:
+      contextWaitFinished.send(error.msg)
+
+contextTransactionStarted.open()
+contextTransactionFinished.open()
+busyInsertStarted.open()
+busyInsertFinished.open()
+contextWaitStarted.open()
+contextWaitFinished.open()
 
 suite "SQLite database API":
   test "binds typed values and copies row data":
@@ -87,6 +154,114 @@ suite "SQLite database API":
         SqlStatement(sql: "INSERT INTO items VALUES (2)"),
       ], canceled)
     check db.query("SELECT count(*) FROM items").rows[0][0] == integerValue(0)
+
+  test "direct operations accept contexts and cancel active SQLite work":
+    let ctx = context.newCtx()
+    let db = sqliteDb.open(ctx, ":memory:")
+    defer: db.close()
+    discard db.execute(ctx, "CREATE TABLE items(value INTEGER)")
+    let committed = db.transaction(ctx, [
+      SqlStatement(sql: "INSERT INTO items VALUES (?)", params: @[integerValue(7)])
+    ])
+    check committed.len == 1
+    check db.query(ctx, "SELECT value FROM items").rows[0][0] == integerValue(7)
+
+    let cancelCtx = context.newCtx()
+    var worker: Thread[ContextTransactionArgs]
+    createThread(worker, runContextTransaction,
+      ContextTransactionArgs(db: db, ctx: cancelCtx))
+    discard contextTransactionStarted.recv()
+    sleep(10)
+
+    let waitCtx = context.newCtx()
+    var waiter: Thread[ContextWaitArgs]
+    createThread(waiter, runContextWait, ContextWaitArgs(db: db, ctx: waitCtx))
+    discard contextWaitStarted.recv()
+    sleep(10)
+    waitCtx.cancel()
+    var waitReceived = false
+    var waitMessage = ""
+    for _ in 0 ..< 1000:
+      let response = contextWaitFinished.tryRecv()
+      if response.dataAvailable:
+        waitReceived = true
+        waitMessage = response.msg
+        break
+      sleep(1)
+    if not waitReceived: cancelCtx.cancel()
+    joinThread(waiter)
+    check waitReceived
+    check "canceled" in waitMessage
+    if waitReceived:
+      check not contextTransactionFinished.tryRecv().dataAvailable
+
+    cancelCtx.cancel()
+
+    var received = false
+    var message = ""
+    for _ in 0 ..< 1000:
+      let response = contextTransactionFinished.tryRecv()
+      if response.dataAvailable:
+        received = true
+        message = response.msg
+        break
+      sleep(1)
+    if not received:
+      db.interrupt()
+      for _ in 0 ..< 1000:
+        let response = contextTransactionFinished.tryRecv()
+        if response.dataAvailable:
+          message = response.msg
+          break
+        sleep(1)
+    joinThread(worker)
+    check received
+    check "canceled" in message
+    check db.query(ctx, "SELECT value FROM items").rows ==
+      @[@[integerValue(7)]]
+
+  test "cancellation interrupts a SQLite file-lock wait":
+    let path = getTempDir() / ("mynim-sqlite-busy-" &
+      $getCurrentProcessId() & ".db")
+    if fileExists(path): removeFile(path)
+    let db = sqliteDb.open(path, OpenOptions(busyTimeoutMs: 5000))
+    discard db.execute("CREATE TABLE busy_items(value INTEGER)")
+    var lockDb: pointer
+    check rawSqliteOpen(path.cstring, addr lockDb,
+      0x00000002.cint or 0x00000004.cint or 0x00010000.cint, nil) == 0
+    check rawSqliteExec(lockDb, "BEGIN IMMEDIATE", nil, nil, nil) == 0
+
+    let ctx = context.newCtx()
+    var worker: Thread[BusyInsertArgs]
+    createThread(worker, runBusyInsert, BusyInsertArgs(db: db, ctx: ctx))
+    discard busyInsertStarted.recv()
+    sleep(20)
+    ctx.cancel()
+
+    var received = false
+    var message = ""
+    for _ in 0 ..< 1000:
+      let response = busyInsertFinished.tryRecv()
+      if response.dataAvailable:
+        received = true
+        message = response.msg
+        break
+      sleep(1)
+    if not received:
+      discard rawSqliteExec(lockDb, "ROLLBACK", nil, nil, nil)
+      for _ in 0 ..< 1000:
+        let response = busyInsertFinished.tryRecv()
+        if response.dataAvailable:
+          message = response.msg
+          break
+        sleep(1)
+    joinThread(worker)
+    discard rawSqliteExec(lockDb, "ROLLBACK", nil, nil, nil)
+    discard rawSqliteClose(lockDb)
+    db.close()
+    if fileExists(path): removeFile(path)
+    check received
+    check "canceled" in message
 
   test "supports read-only opens and idempotent close":
     let path = getTempDir() / ("mynim-sqlite-" & $getCurrentProcessId() & ".db")

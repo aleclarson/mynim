@@ -1,7 +1,8 @@
 ## A small SQLite C API binding used by the SQLite plugin and native apps.
 ## The pinned SQLite amalgamation is compiled into the Mynim executable.
 
-import std/[locks, math, strutils]
+import std/[locks, math, monotimes, os, strutils, times]
+import mynim/internal/ctx as context
 
 type
   SqliteDb = pointer
@@ -15,6 +16,12 @@ type
   ExtendedCode = proc(db: SqliteDb): cint {.cdecl.}
   ExtendedResults = proc(db: SqliteDb; enabled: cint): cint {.cdecl.}
   BusyTimeout = proc(db: SqliteDb; milliseconds: cint): cint {.cdecl.}
+  BusyCallback = proc(userData: pointer; priorCalls: cint): cint {.cdecl.}
+  ProgressCallback = proc(userData: pointer): cint {.cdecl.}
+  SetBusyHandler = proc(db: SqliteDb; callback: BusyCallback;
+                        userData: pointer): cint {.cdecl.}
+  SetProgressHandler = proc(db: SqliteDb; instructions: cint;
+                            callback: ProgressCallback; userData: pointer) {.cdecl.}
   PrepareV2 = proc(db: SqliteDb; sql: cstring; bytes: cint;
                    stmt: ptr SqliteStmt; tail: ptr cstring): cint {.cdecl.}
   FinalizeStmt = proc(stmt: SqliteStmt): cint {.cdecl.}
@@ -47,6 +54,8 @@ type
     extendedCode: ExtendedCode
     extendedResults: ExtendedResults
     busyTimeout: BusyTimeout
+    setBusyHandler: SetBusyHandler
+    setProgressHandler: SetProgressHandler
     prepareV2: PrepareV2
     finalizeStmt: FinalizeStmt
     parameterCount: ParameterCount
@@ -113,7 +122,14 @@ type
     handle: SqliteDb
     mutex: Lock
     handleMutex: Lock
+    busyTimeoutMs: int
     closing: bool
+
+  OperationCancellation = object
+    cancelled: proc(): bool {.closure.}
+    busyTimeoutMs: int
+    busyStarted: MonoTime
+    failure: ref CatchableError
 
 const
   sqliteOk = 0
@@ -145,6 +161,11 @@ proc cErrorMessage(db: SqliteDb): cstring {.importc: "sqlite3_errmsg", cdecl.}
 proc cExtendedCode(db: SqliteDb): cint {.importc: "sqlite3_extended_errcode", cdecl.}
 proc cExtendedResults(db: SqliteDb; enabled: cint): cint {.importc: "sqlite3_extended_result_codes", cdecl.}
 proc cBusyTimeout(db: SqliteDb; milliseconds: cint): cint {.importc: "sqlite3_busy_timeout", cdecl.}
+proc cSetBusyHandler(db: SqliteDb; callback: BusyCallback;
+                     userData: pointer): cint {.importc: "sqlite3_busy_handler", cdecl.}
+proc cSetProgressHandler(db: SqliteDb; instructions: cint;
+                         callback: ProgressCallback; userData: pointer) {.
+  importc: "sqlite3_progress_handler", cdecl.}
 proc cPrepareV2(db: SqliteDb; sql: cstring; bytes: cint;
                 stmt: ptr SqliteStmt; tail: ptr cstring): cint {.importc: "sqlite3_prepare_v2", cdecl.}
 proc cFinalizeStmt(stmt: SqliteStmt): cint {.importc: "sqlite3_finalize", cdecl.}
@@ -177,6 +198,8 @@ let sqliteApi = SqliteApi(
   extendedCode: cExtendedCode,
   extendedResults: cExtendedResults,
   busyTimeout: cBusyTimeout,
+  setBusyHandler: cSetBusyHandler,
+  setProgressHandler: cSetProgressHandler,
   prepareV2: cPrepareV2,
   finalizeStmt: cFinalizeStmt,
   parameterCount: cParameterCount,
@@ -258,6 +281,7 @@ proc open*(path: string; options = OpenOptions()): Database =
 
   new(result)
   result.handle = handle
+  result.busyTimeoutMs = min(timeout, high(cint).int)
   initLock(result.mutex)
   initLock(result.handleMutex)
   result.mutex.acquire()
@@ -277,6 +301,23 @@ proc open*(path: string; options = OpenOptions()): Database =
     result.handle = nil
     raise
   result.mutex.release()
+
+proc close*(db: Database)
+
+proc open*(ctx: context.CancelCtx; path: string;
+           options = OpenOptions()): Database =
+  ## Opens a database if `ctx` is active; a context canceled during open
+  ## causes the newly opened connection to be closed before returning.
+  if ctx != nil and ctx.done():
+    let error = ctx.err()
+    if error != nil: raise error
+    raise context.newCanceled("sqlite: operation canceled")
+  result = open(path, options)
+  if ctx != nil and ctx.done():
+    result.close()
+    let error = ctx.err()
+    if error != nil: raise error
+    raise context.newCanceled("sqlite: operation canceled")
 
 proc close*(db: Database) =
   ## Interrupts any active operation, then closes this connection. Repeated
@@ -439,10 +480,10 @@ proc validateUserSql(sql: string) =
   if words[0] == "VACUUM" and "INTO" in words:
     raise newException(ValueError, "sqlite: VACUUM INTO is not allowed")
 
-proc runLocked(db: SqliteDb; sql: string; params: openArray[SqlValue];
-               collectRows: bool; internal = false;
-               cancelled: proc(): bool {.closure.} = nil):
-               tuple[execution: SqlResult, rows: SqlRows] =
+proc runLockedCore(db: SqliteDb; sql: string; params: openArray[SqlValue];
+                   collectRows: bool; internal: bool;
+                   cancelled: proc(): bool {.closure.}):
+                   tuple[execution: SqlResult, rows: SqlRows] =
   if not internal: validateUserSql(sql)
   let stmt = prepareOne(db, sql)
   defer: discard sqliteApi.finalizeStmt(stmt)
@@ -479,44 +520,147 @@ proc runLocked(db: SqliteDb; sql: string; params: openArray[SqlValue];
     else:
       raise sqliteError(db, rc)
 
+proc isCanceled(state: ptr OperationCancellation): bool =
+  if state == nil or state.cancelled == nil: return false
+  try:
+    result = state.cancelled()
+  except CatchableError as error:
+    state.failure = error
+    result = true
+
+proc sqliteProgress(userData: pointer): cint {.cdecl.} =
+  if isCanceled(cast[ptr OperationCancellation](userData)): 1 else: 0
+
+proc sqliteBusy(userData: pointer; priorCalls: cint): cint {.cdecl.} =
+  let state = cast[ptr OperationCancellation](userData)
+  if state == nil or state.busyTimeoutMs <= 0: return 0
+  if isCanceled(state): return 0
+  if priorCalls == 0: state.busyStarted = getMonoTime()
+  if (getMonoTime() - state.busyStarted).inMilliseconds >=
+      state.busyTimeoutMs.int64:
+    return 0
+  sleep(1)
+  if isCanceled(state): return 0
+  1
+
+proc runLocked(db: SqliteDb; sql: string; params: openArray[SqlValue];
+               collectRows: bool; internal = false;
+               cancelled: proc(): bool {.closure.} = nil;
+               busyTimeoutMs = 5000):
+               tuple[execution: SqlResult, rows: SqlRows] =
+  if cancelled == nil:
+    return runLockedCore(db, sql, params, collectRows, internal, nil)
+
+  var cancellation = OperationCancellation(cancelled: cancelled,
+    busyTimeoutMs: max(0, busyTimeoutMs))
+  let userData = cast[pointer](addr cancellation)
+  checkSqlite(db, sqliteApi.setBusyHandler(db, sqliteBusy, userData))
+  sqliteApi.setProgressHandler(db, 1000, sqliteProgress, userData)
+  var operationError: ref CatchableError
+  var restoreError: ref CatchableError
+  try:
+    result = runLockedCore(db, sql, params, collectRows, internal, cancelled)
+  except CatchableError as error:
+    operationError = error
+  finally:
+    sqliteApi.setProgressHandler(db, 0, nil, nil)
+    let timeoutRc = sqliteApi.busyTimeout(db,
+      min(max(0, busyTimeoutMs), high(cint).int).cint)
+    if timeoutRc != sqliteOk:
+      restoreError = sqliteError(db, timeoutRc)
+  if cancellation.failure != nil: raise cancellation.failure
+  if operationError != nil: raise operationError
+  if restoreError != nil: raise restoreError
+
 proc isClosing(db: Database): bool =
   db.handleMutex.acquire()
   result = db.closing or db.handle == nil
   db.handleMutex.release()
+
+proc acquireOperationLock(db: Database;
+                          cancelled: proc(): bool {.closure.}) =
+  if cancelled == nil:
+    db.mutex.acquire()
+    return
+  while not db.mutex.tryAcquire():
+    if cancelled():
+      raise newException(ValueError, "sqlite: operation canceled")
+    sleep(1)
+  try:
+    if cancelled():
+      raise newException(ValueError, "sqlite: operation canceled")
+  except:
+    db.mutex.release()
+    raise
+
+proc contextFailure(ctx: context.CancelCtx): ref CatchableError =
+  if ctx != nil:
+    result = ctx.err()
+  if result == nil:
+    result = context.newCanceled("sqlite: operation canceled")
 
 proc execute*(db: Database; sql: string;
               params: openArray[SqlValue] = [];
               cancelled: proc(): bool {.closure.} = nil): SqlResult =
   ## Executes one statement and consumes rows from RETURNING clauses.
   if db == nil: raise newException(ValueError, "sqlite: database is closed")
-  db.mutex.acquire()
+  db.acquireOperationLock(cancelled)
   defer: db.mutex.release()
   db.requireOpen()
   let shouldStop = proc(): bool =
     db.isClosing() or (cancelled != nil and cancelled())
-  runLocked(db.handle, sql, params, false, cancelled = shouldStop).execution
+  runLocked(db.handle, sql, params, false, cancelled = shouldStop,
+    busyTimeoutMs = db.busyTimeoutMs).execution
+
+proc execute*(db: Database; ctx: context.CancelCtx; sql: string;
+              params: openArray[SqlValue] = []): SqlResult =
+  ## Executes one statement and interrupts SQLite work when `ctx` is canceled.
+  if ctx != nil and ctx.done(): raise contextFailure(ctx)
+  let cancelled = if ctx == nil: nil else:
+      (proc(): bool = ctx.done())
+  try:
+    result = db.execute(sql, params, cancelled)
+  except CatchableError:
+    if ctx != nil and ctx.done(): raise contextFailure(ctx)
+    raise
 
 proc query*(db: Database; sql: string;
             params: openArray[SqlValue] = [];
             cancelled: proc(): bool {.closure.} = nil): SqlRows =
   ## Queries one statement, preserving column order and SQLite value types.
   if db == nil: raise newException(ValueError, "sqlite: database is closed")
-  db.mutex.acquire()
+  db.acquireOperationLock(cancelled)
   defer: db.mutex.release()
   db.requireOpen()
   let shouldStop = proc(): bool =
     db.isClosing() or (cancelled != nil and cancelled())
-  runLocked(db.handle, sql, params, true, cancelled = shouldStop).rows
+  runLocked(db.handle, sql, params, true, cancelled = shouldStop,
+    busyTimeoutMs = db.busyTimeoutMs).rows
 
-proc control(db: SqliteDb; sql: string) =
-  discard runLocked(db, sql, [], false, internal = true)
+proc query*(db: Database; ctx: context.CancelCtx; sql: string;
+            params: openArray[SqlValue] = []): SqlRows =
+  ## Queries one statement and interrupts SQLite work when `ctx` is canceled.
+  if ctx != nil and ctx.done(): raise contextFailure(ctx)
+  let cancelled = if ctx == nil: nil else:
+      (proc(): bool = ctx.done())
+  try:
+    result = db.query(sql, params, cancelled)
+  except CatchableError:
+    if ctx != nil and ctx.done(): raise contextFailure(ctx)
+    raise
+
+proc control(db: SqliteDb; sql: string;
+             cancelled: proc(): bool {.closure.} = nil;
+             busyTimeoutMs = 5000) =
+  discard runLocked(db, sql, [], false, internal = true,
+    cancelled = cancelled, busyTimeoutMs = busyTimeoutMs)
 
 proc transaction*(db: Database;
                   statements: openArray[SqlStatement];
                   cancelled: proc(): bool {.closure.} = nil): seq[SqlResult] =
   ## Runs the statements in order under BEGIN IMMEDIATE and rolls back on error.
   if db == nil: raise newException(ValueError, "sqlite: database is closed")
-  db.mutex.acquire()
+  db.acquireOperationLock(cancelled)
   defer: db.mutex.release()
   db.requireOpen()
   if statements.len == 0: return @[]
@@ -524,18 +668,30 @@ proc transaction*(db: Database;
   let shouldStop = proc(): bool =
     db.isClosing() or (cancelled != nil and cancelled())
 
-  control(db.handle, "BEGIN IMMEDIATE")
+  control(db.handle, "BEGIN IMMEDIATE", shouldStop, db.busyTimeoutMs)
   var committed = false
   try:
     for statement in statements:
       if shouldStop(): raise newException(ValueError, "sqlite: operation canceled")
       result.add runLocked(db.handle, statement.sql, statement.params, false,
-        cancelled = shouldStop).execution
+        cancelled = shouldStop, busyTimeoutMs = db.busyTimeoutMs).execution
     if shouldStop(): raise newException(ValueError, "sqlite: operation canceled")
-    control(db.handle, "COMMIT")
+    control(db.handle, "COMMIT", shouldStop, db.busyTimeoutMs)
     committed = true
   except CatchableError:
     if not committed:
-      try: control(db.handle, "ROLLBACK")
+      try: control(db.handle, "ROLLBACK", busyTimeoutMs = db.busyTimeoutMs)
       except CatchableError: discard
+    raise
+
+proc transaction*(db: Database; ctx: context.CancelCtx;
+                  statements: openArray[SqlStatement]): seq[SqlResult] =
+  ## Runs an atomic batch and interrupts SQLite work when `ctx` is canceled.
+  if ctx != nil and ctx.done(): raise contextFailure(ctx)
+  let cancelled = if ctx == nil: nil else:
+      (proc(): bool = ctx.done())
+  try:
+    result = db.transaction(statements, cancelled)
+  except CatchableError:
+    if ctx != nil and ctx.done(): raise contextFailure(ctx)
     raise
