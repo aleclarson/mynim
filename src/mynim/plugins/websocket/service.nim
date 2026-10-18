@@ -273,7 +273,7 @@ proc newWebSocketPlugin*(options: ws.Options): core.Plugin =
     ("Send", sendMethod(service)),
   ]
   result.setup = proc(): ref CatchableError =
-    core.bindChannels("websocket", "Connect", [0])
+    core.bindChannels("plugin:websocket", "Connect", [1])
     nil
 
 proc newWebSocketPlugin*(): core.Plugin =
