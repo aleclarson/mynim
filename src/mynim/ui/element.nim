@@ -320,6 +320,18 @@ type
     align*: Align ## Cell content alignment.
     sortable*: bool ## Header clicks update ListState.sort or sortBy.
     fixed*: bool ## Keeps the column in its declared slot and width.
+    rowHeader*: bool ## Selects whole rows and never participates in column blocks.
+
+  ColumnRange* = object ## The chosen table columns between anchor and cursor.
+    cursor*: string ## Column ID at the active end of the range.
+    anchor*: string ## Column ID at the fixed end of the range.
+    all*: bool ## Chooses every column, including row headers.
+
+  TableColumnFrame = object
+    id: string
+    column: int
+    rowHeader: bool
+    headerSlot: int
 
   TableLayout* = object ## User-persisted column order and widths.
     order*: seq[string] ## Movable column IDs, followed by unspecified columns.
@@ -346,6 +358,7 @@ type
     rowHeader: ListRowHeader
     rowReorder: ListRowReorder
     columns*: TableLayout ## Saved table column order and user widths.
+    cells*: ColumnRange ## Chosen column range for cell selection.
     sort*: SortOrder ## Primary table sort; title fallback uses column ID.
     sortBy*: seq[SortOrder] ## Optional ordered, multi-column sort.
     headerMenu*: TableHeaderMenu ## Builds a context menu for a table header.
@@ -356,6 +369,11 @@ type
     rowAccessAction: ListRowAccessAction
     keyHandler: ListKeyHandler
     tableDrag: TableDrag
+    tableColumns: seq[TableColumnFrame]
+    tableSlot: int
+    tableGeneration: uint32
+    tableRightToLeft: bool
+    cellSelectEnabled: bool
     tableFitColumn: string
     headerCacheRow, headerCacheFrom, headerCacheStop: int
     headerCacheValid: bool

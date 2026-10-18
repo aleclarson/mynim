@@ -16,6 +16,7 @@ type
 proc estimatedHeight(heights: var ListHeights): float64
 proc listHeightTop(heights: var ListHeights; row: int;
                    gap: float32): float64
+proc selectAllListRows(state: ListState)
 proc isSelected*(state: ListState; row: int): bool
 proc selectedRows*(state: ListState): seq[int]
 
@@ -498,7 +499,8 @@ proc newListState*(estimatedRowHeight = 28'f32; rowGap = 0'f32;
                    multiSelectable = false;
                    rowLabel: ListRowLabel = nil;
                    rowHeader: ListRowHeader = nil;
-                   reorder: ListRowReorder = nil): ListState =
+                   reorder: ListRowReorder = nil;
+                   cellSelect = false): ListState =
   ## Creates persistent state for a virtualized list.
   ##
   ## rowKey should return a stable, unique key for each logical row. When a
@@ -507,7 +509,8 @@ proc newListState*(estimatedRowHeight = 28'f32; rowGap = 0'f32;
   ## to enable row clicks and keyboard selection; rowLabel enables row focus
   ## and type-to-select. select also enables keyboard selection.
   ## followEnd starts at and follows the end until the user scrolls away.
-  ## multiSelectable enables multi-row selection and modifier handling; rowKey
+  ## multiSelectable enables multi-row selection and modifier handling;
+  ## cellSelect also enables it and lets a Table choose column blocks. rowKey
   ## keeps those choices with their rows as they move.
   ## rowLabel names rows for accessibility and enables type-to-select.
   ## rowHeader marks section headers, which stay pinned while their rows scroll
@@ -529,8 +532,10 @@ proc newListState*(estimatedRowHeight = 28'f32; rowGap = 0'f32;
   result.rowHeader = rowHeader
   result.rowReorder = reorder
   result.keepOffset = keepOffset
-  result.selectionEnabled = selectable or multiSelectable or rowLabel != nil
-  result.multiSelectionEnabled = multiSelectable
+  result.selectionEnabled = selectable or multiSelectable or cellSelect or
+    rowLabel != nil
+  result.multiSelectionEnabled = multiSelectable or cellSelect
+  result.cellSelectEnabled = cellSelect
   result.followEnd = followEnd
   result.selectedRow = -1
   result.editRow = -1
@@ -630,6 +635,15 @@ proc enableMultiSelection*(state: ListState): ListState =
   state.multiSelectionEnabled = true
   state
 
+proc enableCellSelection*(state: ListState): ListState =
+  ## Enables block selection of table cells and multi-row selection.
+  if state == nil:
+    raise newException(ValueError, "ui: list state cannot be nil")
+  state.selectionEnabled = true
+  state.multiSelectionEnabled = true
+  state.cellSelectEnabled = true
+  state
+
 proc isSelected*(state: ListState; row: int): bool =
   ## Reports whether row belongs to this list's multi-selection.
   state != nil and state.multiSelectionEnabled and
@@ -654,6 +668,81 @@ proc selectedRows*(state: ListState): seq[int] =
     elif chosen.row >= 0 and chosen.row < state.rowCount and
         not state.isListHeader(chosen.row):
       result.add(chosen.row)
+
+proc tableColumnIndex(state: ListState; id: string): int =
+  for index, column in state.tableColumns:
+    if column.id == id:
+      return index
+  -1
+
+proc nextTableColumn(state: ListState; index, direction: int): int =
+  var at = index + direction
+  while at >= 0 and at < state.tableColumns.len:
+    if not state.tableColumns[at].rowHeader:
+      return at
+    at += direction
+  -1
+
+proc fixTableCells(state: ListState) =
+  if not state.cellSelectEnabled:
+    return
+  let cursorIndex = state.tableColumnIndex(state.cells.cursor)
+  if cursorIndex < 0 or state.tableColumns[cursorIndex].rowHeader:
+    let first = state.nextTableColumn(-1, 1)
+    state.cells.cursor = if first >= 0: state.tableColumns[first].id else: ""
+  let anchorIndex = state.tableColumnIndex(state.cells.anchor)
+  if anchorIndex < 0 or state.tableColumns[anchorIndex].rowHeader:
+    state.cells.anchor = state.cells.cursor
+
+proc selectedCellBlock(state: ListState): tuple[first, last: int] =
+  if state.cells.all:
+    return (0, state.tableColumns.high)
+  let anchor = state.tableColumnIndex(state.cells.anchor)
+  let cursor = state.tableColumnIndex(state.cells.cursor)
+  if anchor < 0 or cursor < 0:
+    return (0, -1)
+  (min(anchor, cursor), max(anchor, cursor))
+
+proc cellColumnInBlock(state: ListState; column: int): bool =
+  let columnBlock = state.selectedCellBlock()
+  column >= columnBlock.first and column <= columnBlock.last and
+    not state.tableColumns[column].rowHeader
+
+proc cellSelected*(state: ListState; row, column: int): bool =
+  ## Reports whether a built table cell belongs to the row and column choice.
+  ## Without cell selection, every cell of a selected row is selected.
+  if state == nil or state.frameOwner == nil or state.tableSlot <= 0 or
+      state.tableGeneration != state.generation or
+      row < 0 or row >= state.rowCount or state.isListHeader(row) or
+      (state.selectedRow != row and not state.isSelected(row)):
+    return false
+  if not state.cellSelectEnabled:
+    return true
+  for index, item in state.tableColumns:
+    if item.column == column:
+      return if item.rowHeader: state.cells.all
+        else: state.cellColumnInBlock(index)
+  false
+
+proc selectedColumns*(state: ListState): seq[string] =
+  ## Returns chosen column IDs in displayed order, excluding row headers.
+  if state == nil or not state.cellSelectEnabled or
+      state.tableGeneration != state.generation:
+    return
+  let columnBlock = state.selectedCellBlock()
+  if columnBlock.first <= columnBlock.last:
+    for index in columnBlock.first..columnBlock.last:
+      if not state.tableColumns[index].rowHeader:
+        result.add(state.tableColumns[index].id)
+
+proc selectColumns*(state: ListState; fromColumn, toColumn: string) =
+  ## Selects every row and the displayed column range between two IDs.
+  ## IDs use TableColumn.id, falling back to its title.
+  if state == nil or not state.cellSelectEnabled or
+      state.tableGeneration != state.generation or state.tableColumns.len == 0:
+    return
+  state.selectAllListRows()
+  state.cells = ColumnRange(cursor: toColumn, anchor: fromColumn)
 
 proc clearSelection*(state: ListState) =
   ## Clears the row choice and any multi-selection.
@@ -790,6 +879,25 @@ proc selectListKey(state: ListState; key: platform.Key;
   if state.multiSelectionEnabled and key == platform.keyA and
       mods == commandMask:
     state.selectAllListRows()
+    if state.cellSelectEnabled:
+      state.cells.all = true
+    return true
+
+  if state.cellSelectEnabled and not state.outlineMode and
+      key in {platform.keyLeft, platform.keyRight}:
+    if mods != 0 and mods != platform.modShift:
+      return false
+    var direction = if key == platform.keyLeft: -1 else: 1
+    if state.tableRightToLeft:
+      direction = -direction
+    let at = state.tableColumnIndex(state.cells.cursor)
+    if at >= 0:
+      let next = state.nextTableColumn(at, direction)
+      if next >= 0:
+        state.cells.cursor = state.tableColumns[next].id
+    state.cells.all = false
+    if mods != platform.modShift:
+      state.cells.anchor = state.cells.cursor
     return true
 
   when not defined(macosx):
@@ -856,6 +964,9 @@ proc selectListKey(state: ListState; key: platform.Key;
     state.requestRow = target
   else:
     state.select(target)
+  if state.cellSelectEnabled and not extend:
+    state.cells.anchor = state.cells.cursor
+    state.cells.all = false
   true
 
 proc handleListKey(layout: LayoutResult; focusSlot: int;

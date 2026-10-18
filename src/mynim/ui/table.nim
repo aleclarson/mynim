@@ -188,7 +188,7 @@ proc enableMultiSort*(state: ListState; orders: seq[SortOrder] = @[]) =
 proc sortPlace(state: ListState; column: TableColumn):
     tuple[position: int, descending: bool] =
   result.position = -1
-  if not column.sortable:
+  if not column.sortable or column.rowHeader:
     return
   let id = column.columnId
   if state.usesMultiSort:
@@ -235,6 +235,16 @@ proc sortHeader(state: ListState; id: string;
   state.sortClicked(id, (mods and
     (platform.modSuper or platform.modShift)) != 0)
 
+proc tableFocusedWithin(owner: ElementOwner; slot: int): bool =
+  if owner == nil or not owner.focusActive or owner.focusIdentity == 0:
+    return false
+  var focusedSlot = owner.idSlots.getOrDefault(owner.focusIdentity, -1)
+  while focusedSlot > 0:
+    if focusedSlot == slot:
+      return true
+    focusedSlot = int(owner.nodes[focusedSlot].parent)
+  false
+
 proc tableCells(c: Context; state: ListState;
                 columns: openArray[TableColumn]; order: seq[int];
                 layout: TableLayout; flexMin: float32; role: platform.AccessRole;
@@ -268,6 +278,11 @@ proc tableCells(c: Context; state: ListState;
       box.node.tableColumnMinWidth = column.minWidth
       box.node.tableColumnMaxWidth = column.maxWidth
       box.node.tableFitMeasure = fitting
+    if role == platform.roleColumnHeader and state.cellSelectEnabled:
+      for tableColumn in state.tableColumns.mitems:
+        if tableColumn.column == columnIndex:
+          tableColumn.headerSlot = int(box.slot)
+          break
     discard box.children(proc() =
       if fill != nil:
         fill(columnIndex, box)
@@ -308,6 +323,17 @@ proc table*(c: Context; state: ListState; columns: openArray[TableColumn];
     result.node.accessRoleSet = true
     result.node.listState = state
     result.node.listRowIndex = -1
+    state.tableSlot = int(result.slot)
+    state.tableGeneration = c.owner.generation
+    state.tableRightToLeft = result.node.rightToLeft
+
+  state.tableColumns.setLen(0)
+  if state.cellSelectEnabled:
+    for index in order:
+      let column = columnList[index]
+      state.tableColumns.add(TableColumnFrame(id: column.columnId,
+        column: index, rowHeader: column.rowHeader, headerSlot: -1))
+    state.fixTableCells()
 
   discard result.children(proc() =
     let header = c.row().height(headerHeight).minWidth(leastWidth)
@@ -332,7 +358,7 @@ proc table*(c: Context; state: ListState; columns: openArray[TableColumn];
                 .shrink(0)
             discard c.text(if sort.descending: "↓" else: "↑")
               .textColor(theme.textMuted).shrink(0)
-          if column.sortable:
+          if column.sortable and not column.rowHeader:
             let id = column.columnId
             discard box.onClick(proc(mods: platform.Modifiers) =
               state.sortHeader(id, mods)
@@ -343,6 +369,11 @@ proc table*(c: Context; state: ListState; columns: openArray[TableColumn];
                   platform.accessSortDescending
                 else:
                   platform.accessSortAscending
+          elif column.rowHeader and state.cellSelectEnabled:
+            discard box.onClick(proc(mods: platform.Modifiers) =
+              state.selectAllListRows()
+              state.cells.all = true
+            )
           if not column.fixed:
             let edge = c.box().absolute().top(0).bottom(0).width(2)
               .endInset(0)
@@ -375,6 +406,30 @@ proc table*(c: Context; state: ListState; columns: openArray[TableColumn];
               platform.roleCell, proc(index: int; box: Element) =
                 if cell != nil:
                   cell(rowIndex, index)
+                if state.cellSelectEnabled and box.node != nil:
+                  let chosen = state.cellSelected(rowIndex, index)
+                  if chosen:
+                    box.node.accessExtraStates =
+                      box.node.accessExtraStates or platform.accessSelected
+                  let cellFocused = c.owner.tableFocusedWithin(int(box.slot))
+                  let tableFocused = c.owner.tableFocusedWithin(state.tableSlot)
+                  let cursorColumn = state.tableColumnIndex(state.cells.cursor)
+                  let tableColumn = state.tableColumnIndex(
+                    columnList[index].columnId)
+                  let cursorCell = tableFocused and not cellFocused and
+                    rowIndex == state.selectedRow and
+                    tableColumn == cursorColumn
+                  if chosen and not cellFocused:
+                    discard box.background(theme.accent)
+                      .textColor(theme.accentText)
+                  if cursorCell:
+                    let cursorColor = if chosen:
+                        theme.accentText
+                      else:
+                        theme.accent
+                    discard box.draw(proc(painter: var Painter; rect: Rect) =
+                      painter.stroke(rect, cursorColor, 0, 1)
+                    )
             )
           )
       ).grow(1).scrollX(state.scrollState)

@@ -4461,6 +4461,51 @@ proc scrollKey(layout: LayoutResult; focusSlot: int;
     slot = int(node.parent)
   false
 
+proc tableColumnAt(layout: LayoutResult; state: ListState;
+                   x, y: float32): int =
+  result = -1
+  if state == nil or state.frameOwner != cast[pointer](layout.owner) or
+      state.tableGeneration != layout.generation:
+    return
+  var bestDistance = 0'f32
+  for index, column in state.tableColumns:
+    let slot = column.headerSlot
+    if slot <= 0 or slot >= layout.rects.len:
+      continue
+    let (localX, _, valid) = layout.localPoint(slot, x, y)
+    if not valid:
+      continue
+    let rect = layout.rects[slot]
+    let distance = max(max(rect.x - localX, localX - (rect.x + rect.w)),
+      0'f32)
+    if result < 0 or distance < bestDistance:
+      result = index
+      bestDistance = distance
+
+proc clickTableCell(layout: LayoutResult; state: ListState;
+                    x, y: float32; mods: platform.Modifiers) =
+  if state == nil or not state.cellSelectEnabled:
+    return
+  let index = layout.tableColumnAt(state, x, y)
+  if index < 0:
+    return
+  var cells = state.cells
+  let column = state.tableColumns[index]
+  when defined(macosx):
+    const commandMask = platform.modSuper
+  else:
+    const commandMask = platform.modCtrl
+  if column.rowHeader:
+    cells.all = true
+  elif (mods and platform.modShift) != 0:
+    cells.cursor = column.id
+    cells.all = false
+  elif (mods and commandMask) != 0:
+    return
+  else:
+    cells = ColumnRange(cursor: column.id, anchor: column.id)
+  state.cells = cells
+
 proc scrollIntoView*(e: Element): Element =
   ## Scrolls the element's ancestors just enough to show it in each viewport.
   result = e
@@ -4488,6 +4533,7 @@ proc dispatchClick(layout: LayoutResult; pressed: Element;
   if node.listState != nil and node.listRowIndex >= 0 and
       not node.listRowHeader and not node.listRowAction:
     node.listState.clickListRow(node.listRowIndex, mods)
+    layout.clickTableCell(node.listState, x, y, mods)
   else:
     let handler = node.clickHandler
     if handler != nil:
