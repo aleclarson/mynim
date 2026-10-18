@@ -231,7 +231,7 @@ proc processOptions(options: TerminalOptions): PtyOptions =
     env: defaultEnvironment(options.env))
 
 proc newTerminal*(options = defaultTerminalOptions()): Terminal =
-  ## Loads Ghostty, starts the configured shell/program, and creates a view owner.
+  ## Loads Ghostty and defers PTY start until the first view size or 500 ms.
   let options = options.normalized()
   new(result)
   result.options = options

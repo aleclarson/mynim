@@ -1,6 +1,6 @@
 ## A PTY process connected to a serialized Ghostty terminal and render state.
 
-import std/[base64, locks, options, strutils, unicode]
+import std/[base64, locks, options, os, strutils, unicode]
 import ./pty
 import ./vt/[effects, encode, frame, input, library, render, selection, terminal]
 
@@ -51,9 +51,11 @@ type
     renderState: GhosttyRenderState
     keyEncoder: GhosttyKeyEncoder
     mouseEncoder: GhosttyMouseEncoder
+    launchOptions: PtyOptions
     process: Pty
-    readerThread, writerThread: Thread[TerminalSession]
-    readerStarted, writerStarted: bool
+    startupThread, readerThread, writerThread: Thread[TerminalSession]
+    startupStarted, readerStarted, writerStarted: bool
+    launchPending, launchRequested, processReady: bool
     callbacksInstalled: bool
     closed, closing, writerStop, readerDone: bool
     inputQueue: seq[seq[byte]]
@@ -134,7 +136,7 @@ proc queueInput(session: TerminalSession; data: openArray[byte];
   copyMem(addr copied[0], unsafeAddr data[0], data.len)
   session.inputQueue.add(move(copied))
   session.inputQueueBytes += data.len
-  session.inputChanged.signal()
+  session.inputChanged.broadcast()
   session.inputGuard.release()
   true
 
@@ -543,6 +545,13 @@ proc dispatchNotifications(session: TerminalSession) =
 
 proc reader(session: TerminalSession) {.thread.} =
   {.cast(gcsafe).}:
+    session.inputGuard.acquire()
+    while not session.processReady and not session.writerStop:
+      session.inputChanged.wait(session.inputGuard)
+    let canRead = session.processReady and not session.writerStop
+    session.inputGuard.release()
+    if not canRead:
+      return
     var buffer = newSeq[byte](readBufferSize)
     while true:
       var count: int
@@ -589,9 +598,11 @@ proc writer(session: TerminalSession) {.thread.} =
   {.cast(gcsafe).}:
     while true:
       session.inputGuard.acquire()
-      while session.inputQueue.len == 0 and not session.writerStop:
+      while (session.inputQueue.len == 0 or not session.processReady) and
+          not session.writerStop:
         session.inputChanged.wait(session.inputGuard)
-      if session.writerStop:
+      if session.writerStop and
+          (session.inputQueue.len == 0 or not session.processReady):
         session.inputQueue.setLen(0)
         session.inputQueueBytes = 0
         session.inputGuard.release()
@@ -622,6 +633,87 @@ proc cellPixels(cols, rows, cellWidth, cellHeight: int):
   let width = uint64(cols) * uint64(cellWidth)
   let height = uint64(rows) * uint64(cellHeight)
   (int(min(width, 0xFFFF'u64)), int(min(height, 0xFFFF'u64)))
+
+proc startPendingLocked(session: TerminalSession): bool =
+  ## Starts the deferred PTY under the terminal lock; true requests an error redraw.
+  if not session.launchPending:
+    return
+  session.inputGuard.acquire()
+  let stopping = session.closing or session.closed
+  session.inputGuard.release()
+  if stopping:
+    return
+
+  var processOptions = session.launchOptions
+  processOptions.cols = session.cols
+  processOptions.rows = session.rows
+  let pixels = cellPixels(session.cols, session.rows,
+    session.cellWidth, session.cellHeight)
+  processOptions.width = pixels.width
+  processOptions.height = pixels.height
+  try:
+    session.process = processOptions.start()
+  except CatchableError as error:
+    session.launchPending = false
+    session.launchRequested = false
+    session.launchOptions = PtyOptions()
+    try:
+      let message = "\e[31m" & error.msg & "\e[0m"
+      session.terminal.write(message.toOpenArrayByte(0, message.high))
+    except CatchableError as writeError:
+      session.inputGuard.acquire()
+      if session.inputError.len == 0:
+        session.inputError = writeError.msg
+      session.inputGuard.release()
+    session.inputGuard.acquire()
+    session.processExitCode = some(-1)
+    session.readerDone = true
+    session.writerStop = true
+    session.inputQueue.setLen(0)
+    session.inputQueueBytes = 0
+    session.inputChanged.broadcast()
+    session.inputGuard.release()
+    session.addEvent(TerminalEvent(kind: terminalProcessExited,
+      exitCode: -1))
+    return true
+
+  session.launchPending = false
+  session.launchRequested = false
+  session.launchOptions = PtyOptions()
+  session.inputGuard.acquire()
+  session.processReady = true
+  session.inputChanged.broadcast()
+  session.inputGuard.release()
+
+proc delayedStart(session: TerminalSession) {.thread.} =
+  {.cast(gcsafe).}:
+    const startDelayMs = 500
+    const pollIntervalMs = 10
+    for _ in 0 ..< startDelayMs div pollIntervalMs:
+      sleep(pollIntervalMs)
+      session.terminalGuard.acquire()
+      let pending = session.launchPending
+      let requested = session.launchRequested
+      let wake = if pending and requested:
+          session.startPendingLocked()
+        else:
+          false
+      session.terminalGuard.release()
+      if wake:
+        session.signalWake()
+      if not pending or requested:
+        return
+      session.inputGuard.acquire()
+      let stopping = session.closing or session.closed
+      session.inputGuard.release()
+      if stopping:
+        return
+
+    session.terminalGuard.acquire()
+    let wake = session.startPendingLocked()
+    session.terminalGuard.release()
+    if wake:
+      session.signalWake()
 
 proc releaseGhostty(session: TerminalSession) =
   if session.callbacksInstalled and not session.terminal.isNil:
@@ -669,7 +761,7 @@ proc newTerminalSession*(library: GhosttyVT; process: PtyOptions;
     noClipboardWrite = false;
     clipboardReadPolicy = clipboardAccessDeny;
     onNotify: TerminalNotify = nil): TerminalSession =
-  ## Starts a PTY-backed Ghostty terminal and its input/output workers.
+  ## Creates a Ghostty terminal and starts its PTY on first resize or timeout.
   if library.isNil:
     raise newException(ValueError, "terminal session Ghostty library is nil")
   if cols <= 0 or cols > high(uint16).int or rows <= 0 or
@@ -678,6 +770,8 @@ proc newTerminalSession*(library: GhosttyVT; process: PtyOptions;
   if cellWidth <= 0 or uint64(cellWidth) > uint64(high(uint32)) or
       cellHeight <= 0 or uint64(cellHeight) > uint64(high(uint32)):
     raise newException(ValueError, "terminal session cell size is invalid")
+  if process.path.len == 0:
+    raise newException(ValueError, "terminal session process path is empty")
 
   new(result)
   initLock(result.terminalGuard)
@@ -702,25 +796,25 @@ proc newTerminalSession*(library: GhosttyVT; process: PtyOptions;
     result.keyEncoder = newGhosttyKeyEncoder(library)
     result.mouseEncoder = newGhosttyMouseEncoder(library)
     result.renderState = newGhosttyRenderState(library)
-    var processOptions = process
-    processOptions.cols = cols
-    processOptions.rows = rows
-    let pixels = cellPixels(cols, rows, cellWidth, cellHeight)
-    if processOptions.width <= 0: processOptions.width = pixels.width
-    if processOptions.height <= 0: processOptions.height = pixels.height
-    result.process = processOptions.start()
+    result.launchOptions = process
+    result.launchPending = true
     result.terminal.setCallbacks(cast[pointer](result), sessionCallbacks())
     result.callbacksInstalled = true
     createThread(result.writerThread, writer, result)
     result.writerStarted = true
     createThread(result.readerThread, reader, result)
     result.readerStarted = true
+    createThread(result.startupThread, delayedStart, result)
+    result.startupStarted = true
   except CatchableError:
     result.inputGuard.acquire()
     result.closing = true
     result.writerStop = true
     result.inputChanged.broadcast()
     result.inputGuard.release()
+    if result.startupStarted:
+      joinThread(result.startupThread)
+      result.startupStarted = false
     if result.process != nil:
       try:
         result.process.kill()
@@ -1066,7 +1160,7 @@ proc sendMouse*(session: TerminalSession; action: MouseAction;
 
 proc resize*(session: TerminalSession; cols, rows: int;
              cellWidth = 1; cellHeight = 1) =
-  ## Resizes the PTY and terminal model as one serialized update.
+  ## Resizes the terminal and PTY, or starts the deferred PTY at this size.
   if session.isNil:
     raise newException(ValueError, "terminal session is nil")
   if cols <= 0 or cols > high(uint16).int or rows <= 0 or
@@ -1077,13 +1171,16 @@ proc resize*(session: TerminalSession; cols, rows: int;
     raise newException(ValueError, "terminal session cell size is invalid")
   session.lockTerminal()
   try:
-    let pixels = cellPixels(cols, rows, cellWidth, cellHeight)
-    session.process.resize(cols, rows, pixels.width, pixels.height)
     session.terminal.resize(cols, rows, cellWidth, cellHeight)
     session.cols = cols
     session.rows = rows
     session.cellWidth = cellWidth
     session.cellHeight = cellHeight
+    if session.process != nil:
+      let pixels = cellPixels(cols, rows, cellWidth, cellHeight)
+      session.process.resize(cols, rows, pixels.width, pixels.height)
+    elif session.launchPending:
+      session.launchRequested = true
   finally:
     session.terminalGuard.release()
 
@@ -1227,6 +1324,10 @@ proc close*(session: TerminalSession) =
   session.inputChanged.broadcast()
   session.inputGuard.release()
 
+  if session.startupStarted:
+    joinThread(session.startupThread)
+    session.startupStarted = false
+
   # Drain operations that passed their initial open check. New calls see
   # `closing` before they can enter the terminal lock.
   session.terminalGuard.acquire()
@@ -1248,6 +1349,10 @@ proc close*(session: TerminalSession) =
   session.terminalGuard.acquire()
   session.releaseGhostty()
   session.process = nil
+  session.launchPending = false
+  session.launchRequested = false
+  session.launchOptions = PtyOptions()
+  session.cachedRows = @[]
   session.heldFrame = none(TerminalFrame)
   session.events.setLen(0)
   session.terminalGuard.release()

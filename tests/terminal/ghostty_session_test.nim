@@ -100,3 +100,18 @@ suite "Ghostty PTY terminal session":
     session.close()
     expect IOError:
       discard session.snapshot()
+
+  test "starts the process at the first resized PTY dimensions":
+    let path = getEnv("MYNIM_GHOSTTY_VT")
+    if path.len == 0:
+      skip()
+    let library = openGhosttyVT(path)
+    defer: library.close()
+    let session = newTerminalSession(library,
+      PtyOptions(path: "/bin/sh", args: @["/bin/sh", "-c", "stty size"]),
+      cols = 80, rows = 24)
+    defer: session.close()
+
+    session.resize(100, 30, cellWidth = 9, cellHeight = 18)
+    check session.waitForExit() == 0
+    check text(session.snapshot()).contains("30 100")

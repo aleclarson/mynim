@@ -232,6 +232,7 @@ suite "native Terminal API":
       skip()
     let oscUrl = "https://osc.example/" & repeat("x", 600)
     var options = defaultTerminalOptions()
+    var processStarted: Atomic[bool]
     options.command = @[
       when defined(windows): "cmd.exe"
       else: "/bin/sh",
@@ -239,11 +240,14 @@ suite "native Terminal API":
       else: "-c",
       when defined(windows): "ping -n 10 127.0.0.1 >nul"
       else:
-        "printf '\\033]8;;" & oscUrl &
+        "printf '\\033]9;terminal-ready\\007\\033]8;;" & oscUrl &
         "\\aosc-link\\033]8;;\\a\\r\\n" &
         "https://text.example/path.\\r\\n" &
         "./src/main.nim:12:3\\r\\n'; sleep 10"]
     options.font.fontFeatures = "liga=0,calt=0"
+    options.onNotify = proc(title, body: string) =
+      if body == "terminal-ready":
+        processStarted.store(true, moRelaxed)
     var openedPaths: seq[string]
     var seenLinks: seq[string]
     options.openLink = proc(link: string): bool =
@@ -264,6 +268,15 @@ suite "native Terminal API":
     check (cols, rows) != (80, 24)
     when not defined(windows):
       const commandMods = when defined(macosx): ui.modSuper else: ui.modCtrl
+      var processOutputReady = false
+      for _ in 0 ..< 200:
+        tester.frame()
+        if processStarted.load(moRelaxed):
+          processOutputReady = true
+          break
+        sleep(10)
+      check processOutputReady
+      tester.frame()
       tester.move(20, 12)
       tester.holdModifiers(commandMods)
       check tester.cursor() == ui.cursorPointer
