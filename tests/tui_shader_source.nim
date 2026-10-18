@@ -53,3 +53,8 @@ suite "shader source inspection":
     """)
     check info.found
     check info.error.len == 0
+
+  test "reports malformed package-level syntax":
+    let info = inspectShaderSource("func Fragment() vec4 { return vec4(1) }")
+    check not info.found
+    check info.error == "shader: expected a package clause at line 1, column 1"

@@ -1,6 +1,7 @@
 ## Source-level shader declarations shared by the shader compiler frontend.
 
 import mynim/internal/shader/lexer
+import mynim/internal/shader/parser
 
 type
   ShaderEntryKind* = enum
@@ -44,22 +45,16 @@ proc entryName(kind: ShaderEntryKind): string =
 proc inspectShaderSource*(source: string): ShaderSourceInfo =
   ## Finds a supported package-level shader function and checks effect image use.
   ## Full syntax and type errors remain the compiler frontend's responsibility.
-  let lexed = lexShaderSource(source)
-  if lexed.error.message.len > 0:
+  let parsed = parseShaderFile(source)
+  if parsed.error.message.len > 0:
+    result.error = "shader: " & parsed.error.message & " at line " &
+      $parsed.error.line & ", column " & $parsed.error.column
     return
-  let tokens = lexed.tokens
   var entries: seq[ShaderEntryKind]
-  var braceDepth = 0
-  for i, token in tokens:
-    if braceDepth == 0 and token.kind == stkKeyword and token.text == "func" and
-        i + 1 < tokens.len and tokens[i + 1].kind == stkIdentifier:
-      var kind: ShaderEntryKind
-      if entryKind(tokens[i + 1].text, kind):
-        entries.add kind
-    if token.text == "{":
-      inc braceDepth
-    elif token.text == "}" and braceDepth > 0:
-      dec braceDepth
+  for function in parsed.file.functions:
+    var kind: ShaderEntryKind
+    if not function.receiver and entryKind(function.name, kind):
+      entries.add kind
 
   if entries.len == 0:
     return
@@ -71,7 +66,7 @@ proc inspectShaderSource*(source: string): ShaderSourceInfo =
   result.kind = entries[0]
   result.found = true
   if result.kind != sekFragment:
-    for token in tokens:
+    for token in parsed.file.tokens:
       if token.kind == stkIdentifier and
           token.text in ["image3At", "image3Sample", "image3Size"]:
         result.error = "shader: an effect's shader reads image0 to image2: " &
