@@ -9,6 +9,7 @@ type
     Start ## Left in a row; top in a column.
     Center
     End ## Right in a row; bottom in a column.
+    Baseline ## Lines children up by their text or box baselines.
     Stretch
     SpaceBetween
     SpaceAround

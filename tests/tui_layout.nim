@@ -173,6 +173,116 @@ block wrapped_column_stretches_to_line:
   doAssert layout.bounds(stretched).w == 50
   doAssert layout.bounds(widest).w == 50
 
+block flex_baseline_aligns_text_and_boxes:
+  let c = newContext()
+  var row, price, unit: Element
+  c.build(proc(ctx: Context) =
+    row = ctx.row().gap(4).alignItems(Align.Baseline)
+    discard row.children(proc() =
+      price = ctx.text("$42").textSize(40)
+      unit = ctx.text("/month").textSize(13).padding(3, 0, 0, 0)
+    )
+  )
+  let textLayout = c.layout(400, 300)
+  doAssert textLayout.bounds(price).y == textLayout.bounds(row).y
+  doAssert textLayout.bounds(unit).y > textLayout.bounds(price).y
+  doAssert textLayout.bounds(row).h >=
+    textLayout.bounds(unit).y + textLayout.bounds(unit).h -
+      textLayout.bounds(row).y
+
+  var selfRow, big, small, dot, top: Element
+  c.build(proc(ctx: Context) =
+    selfRow = ctx.row().alignItems(Align.Start)
+    discard selfRow.children(proc() =
+      big = ctx.box().size(10, 40).alignSelf(Align.Baseline)
+      small = ctx.box().size(10, 10).alignSelf(Align.Baseline)
+      dot = ctx.box().size(6, 6).alignSelf(Align.Baseline)
+      top = ctx.box().size(10, 10)
+    )
+  )
+  let boxLayout = c.layout(400, 300)
+  doAssert boxLayout.bounds(small).y + boxLayout.bounds(small).h ==
+    boxLayout.bounds(big).y + boxLayout.bounds(big).h
+  doAssert boxLayout.bounds(dot).y + boxLayout.bounds(dot).h ==
+    boxLayout.bounds(big).y + boxLayout.bounds(big).h
+  doAssert boxLayout.bounds(top).y == boxLayout.bounds(big).y
+
+block column_baseline_aligns_left_edges_in_rtl:
+  let c = newContext()
+  var column, first, second: Element
+  c.build(proc(ctx: Context) =
+    column = ctx.column().size(300, 100)
+      .direction(Direction.RightToLeft).alignItems(Align.Baseline)
+    discard column.children(proc() =
+      first = ctx.box().size(50, 10)
+      second = ctx.box().size(100, 10).margin(0, 10, 0, 0)
+    )
+  )
+  let layout = c.layout(400, 300)
+  doAssert layout.bounds(first).x == 190
+  doAssert layout.bounds(second).x == 190
+
+block grid_baseline_aligns_each_row:
+  let c = newContext()
+  var parent, grid, a, b, third, startAligned, fixedGrid, e, f: Element
+  c.build(proc(ctx: Context) =
+    parent = ctx.column().alignItems(Align.Start)
+    discard parent.children(proc() =
+      grid = ctx.grid().columnTracks(fixed(100), fixed(100))
+        .alignItems(Align.Baseline)
+      discard grid.children(proc() =
+        a = ctx.box().height(20).margin(5, 0, 0, 0)
+        b = ctx.box().height(50)
+        third = ctx.box().height(10)
+        startAligned = ctx.box().height(30).margin(0, 0, 4, 0)
+          .alignSelf(Align.Start)
+      )
+      fixedGrid = ctx.grid().columnTracks(fixed(100), fixed(100))
+        .rowTracks(fixed(200)).alignItems(Align.Baseline)
+      discard fixedGrid.children(proc() =
+        e = ctx.box().height(20)
+        f = ctx.box().height(50).margin(3, 0, 0, 0)
+      )
+    )
+  )
+  let layout = c.layout(400, 600)
+  doAssert layout.bounds(grid) == Rect(x: 0, y: 0, w: 200, h: 84)
+  doAssert layout.bounds(a) == Rect(x: 0, y: 30, w: 100, h: 20)
+  doAssert layout.bounds(b) == Rect(x: 100, y: 0, w: 100, h: 50)
+  doAssert layout.bounds(third) == Rect(x: 0, y: 50, w: 100, h: 10)
+  doAssert layout.bounds(startAligned) == Rect(x: 100, y: 50, w: 100, h: 30)
+  doAssert layout.bounds(fixedGrid) == Rect(x: 0, y: 84, w: 200, h: 200)
+  doAssert layout.bounds(e) == Rect(x: 0, y: 117, w: 100, h: 20)
+  doAssert layout.bounds(f) == Rect(x: 100, y: 87, w: 100, h: 50)
+
+block nested_flex_baseline_uses_first_baseline_child:
+  let c = newContext()
+  var row, first, column, inner, innerFirst: Element
+  c.build(proc(ctx: Context) =
+    row = ctx.row().width(300).alignItems(Align.Baseline)
+    discard row.children(proc() =
+      first = ctx.box().height(40)
+      column = ctx.column().padding(7, 0, 0, 0)
+      discard column.children(proc() =
+        discard ctx.box().height(10)
+        discard ctx.box().height(20)
+      )
+      inner = ctx.row().alignItems(Align.Baseline).margin(2, 0, 0, 0)
+      discard inner.children(proc() =
+        innerFirst = ctx.box().height(5)
+        discard ctx.box().height(15).margin(0, 0, 6, 0)
+      )
+    )
+  )
+  let layout = c.layout(400, 300)
+  doAssert layout.bounds(row).h == 60
+  doAssert layout.bounds(first).y == layout.bounds(row).y
+  doAssert layout.bounds(column).y - layout.bounds(row).y == 23
+  doAssert layout.bounds(column).h == 37
+  doAssert layout.bounds(inner).y - layout.bounds(row).y == 25
+  doAssert layout.bounds(inner).h == 21
+  doAssert layout.bounds(innerFirst).y > layout.bounds(inner).y
+
 block grow_in_content_sized_column:
   let c = newContext()
   var parent, growing, content, after: Element

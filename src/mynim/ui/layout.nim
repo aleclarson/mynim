@@ -157,6 +157,63 @@ proc rowItemWidth(node: ElementNode; natural: NaturalSize): float32 =
   if node.shrink == 0:
     result = max(result, base)
 
+proc byBaseline(node: ElementNode; align: Align; row, grid,
+                wrapReverse: bool): bool =
+  let marginStart = if grid or row: 0 else: 3
+  let marginEnd = if grid or row: 2 else: 1
+  align == Align.Baseline and node.margin[marginStart] != Auto and
+    node.margin[marginEnd] != Auto and not wrapReverse
+
+proc naturalBaseline(nodes: seq[ElementNode]; natural: seq[NaturalSize];
+                     slot: int): tuple[value: float32, ok: bool] =
+  if slot <= 0 or slot >= nodes.len:
+    return
+  let node = nodes[slot]
+  if node.hasText and not node.textInline and not node.textOverlay and
+      node.shapedText != nil and node.shapedText.lines.len > 0:
+    return (node.contentInsetY + node.shapedText.lines[0].baseline, true)
+
+  var firstChild = -1
+  var child = int(node.firstChild)
+  let align = if node.align == Align.Auto: Align.Stretch else: node.align
+  while child >= 0:
+    let childNode = nodes[child]
+    if not childNode.absolute and not childNode.textInline:
+      if firstChild < 0:
+        firstChild = child
+      let childAlign = if childNode.selfAlign == Align.Auto:
+          align
+        else:
+          childNode.selfAlign
+      if node.row and not node.grid and
+          childNode.byBaseline(childAlign, true, false, node.wrapReverse):
+        firstChild = child
+        break
+    child = int(childNode.nextSibling)
+  if firstChild < 0:
+    return
+
+  let childNode = nodes[firstChild]
+  let childBaseline = nodes.naturalBaseline(natural, firstChild)
+  let baseline = if childBaseline.ok: childBaseline.value
+    else: natural[firstChild].h
+  let childAlign = if childNode.selfAlign == Align.Auto:
+      align
+    else:
+      childNode.selfAlign
+  var crossOffset: float32
+  if node.row:
+    let free = natural[slot].h - node.contentInsetY - natural[firstChild].h
+    case childAlign
+    of Align.Center:
+      crossOffset = free / 2
+    of Align.End:
+      crossOffset = free
+    else:
+      discard
+  result = (node.contentInsetY + crossOffset +
+    marginValue(childNode.margin[0]) + baseline, true)
+
 proc gridCellOccupied(scratch: GridScratch; base, columns, row,
                       column: int): bool =
   let index = base + row * columns + column
@@ -517,12 +574,47 @@ proc justifyOffsets(justify: Align; free: float32; count: int):
   else:
     (0'f32, 0'f32)
 
+proc gridItemHeight(node: ElementNode; natural: NaturalSize;
+                    width, heightBase: float32): float32 =
+  let height = node.height.resolve(heightBase)
+  if height.ok:
+    node.clampHeight(height.value, heightBase)
+  elif node.aspectRatio > 0:
+    node.clampHeight(
+      max(width - node.contentInsetX, 0'f32) / node.aspectRatio +
+        node.contentInsetY, heightBase)
+  else:
+    natural.h
+
 proc gridRows(nodes: seq[ElementNode]; natural: seq[NaturalSize]; parent: int;
               scratch: var GridScratch; first, pastLast, columns, rows,
               columnValues, rowValues: int; available, widthBase,
-              heightBase, columnGap: float32) =
+              heightBase, columnGap: float32;
+              baselineRows: var seq[float32]) =
   let grid = nodes[parent]
   let contributionFirst = scratch.contributions.len
+  baselineRows.setLen(rows)
+  for row in 0 ..< rows:
+    baselineRows[row] = 0
+
+  for itemIndex in first ..< pastLast:
+    var item = scratch.items[itemIndex]
+    let node = nodes[item.slot]
+    let areaWidth = scratch.values.gridArea(columnValues, item.col,
+      item.colSpan, columnGap)
+    let itemWidth = node.gridCellDimension(natural[item.slot], true,
+      areaWidth, widthBase, 0'f32, grid.gridItemAlign(node, true)).size
+    if item.rowSpan == 1 and node.byBaseline(
+        grid.gridItemAlign(node, false), false, true, false):
+      let itemHeight = node.gridItemHeight(natural[item.slot], itemWidth,
+        heightBase)
+      if not item.laidOut:
+        let measured = nodes.naturalBaseline(natural, item.slot)
+        item.baseline = marginValue(node.margin[0]) +
+          (if measured.ok: measured.value else: itemHeight)
+        scratch.items[itemIndex].baseline = item.baseline
+      baselineRows[item.row] = max(baselineRows[item.row], item.baseline)
+
   for itemIndex in first ..< pastLast:
     let item = scratch.items[itemIndex]
     let node = nodes[item.slot]
@@ -530,18 +622,14 @@ proc gridRows(nodes: seq[ElementNode]; natural: seq[NaturalSize]; parent: int;
       item.colSpan, columnGap)
     let itemWidth = node.gridCellDimension(natural[item.slot], true,
       areaWidth, widthBase, 0'f32, grid.gridItemAlign(node, true)).size
-    let height = node.height.resolve(heightBase)
-    let itemHeight = if height.ok:
-        node.clampHeight(height.value, heightBase)
-      elif node.aspectRatio > 0:
-        node.clampHeight(
-          max(itemWidth - node.contentInsetX, 0'f32) / node.aspectRatio +
-            node.contentInsetY, heightBase)
-      else:
-        natural[item.slot].h
+    let itemHeight = node.gridItemHeight(natural[item.slot], itemWidth,
+      heightBase)
+    var contribution = itemHeight + node.marginY
+    if item.rowSpan == 1 and node.byBaseline(
+        grid.gridItemAlign(node, false), false, true, false):
+      contribution += baselineRows[item.row] - item.baseline
     scratch.contributions.add(GridContribution(start: item.row,
-      span: item.rowSpan, minimum: itemHeight + node.marginY,
-      maximum: itemHeight + node.marginY))
+      span: item.rowSpan, minimum: contribution, maximum: contribution))
   sizeGridTracks(grid.rows, rows, available, grid.gapY, scratch,
     contributionFirst, scratch.contributions.len, false,
     grid.alignContent == Align.Auto, scratch.values, rowValues)
@@ -585,9 +673,10 @@ proc measureGrid(nodes: seq[ElementNode]; natural: seq[NaturalSize];
   else:
     (start: 0'f32, between: 0'f32)
   let rowsFirst = scratch.values.len
+  var baselineRows = newSeq[float32](placed.rows)
   gridRows(nodes, natural, parent, scratch, placed.first, placed.pastLast,
     placed.columns, placed.rows, columnsFirst, rowsFirst, rowAvailable,
-    widthBase, heightBase, grid.gapX + columnOffsets.between)
+    widthBase, heightBase, grid.gapX + columnOffsets.between, baselineRows)
   result.w = grid.gapX * float32(max(placed.columns - 1, 0))
   for index in 0 ..< placed.columns:
     result.w += scratch.values[columnsFirst + index]
@@ -635,6 +724,8 @@ proc measureTree(nodes: seq[ElementNode]; natural: var seq[NaturalSize];
       let em = if node.textStyle.size > 0: node.textStyle.size else: 16'f32
       contentW = max(contentW, em)
       contentH = max(contentH, em)
+    var baselineAscent = -Inf.float32
+    var baselineDescent = -Inf.float32
     var childCount = 0
     var child = int(node.firstChild)
     while child >= 0:
@@ -646,6 +737,17 @@ proc measureTree(nodes: seq[ElementNode]; natural: var seq[NaturalSize];
             let mainW = childNode.rowItemWidth(childSize)
             contentW += mainW + childNode.marginX
             contentH = max(contentH, childSize.h + childNode.marginY)
+            let align = if childNode.selfAlign == Align.Auto:
+                (if node.align == Align.Auto: Align.Stretch else: node.align)
+              else:
+                childNode.selfAlign
+            if childNode.byBaseline(align, true, false, node.wrapReverse):
+              let childBaseline = nodes.naturalBaseline(natural, child)
+              let baseline = marginValue(childNode.margin[0]) +
+                (if childBaseline.ok: childBaseline.value else: childSize.h)
+              baselineAscent = max(baselineAscent, baseline)
+              baselineDescent = max(baselineDescent,
+                childSize.h + childNode.marginY - baseline)
           else:
             contentW = max(contentW, childSize.w + childNode.marginX)
             let basis = childNode.basis.resolve(-1)
@@ -656,6 +758,9 @@ proc measureTree(nodes: seq[ElementNode]; natural: var seq[NaturalSize];
             contentH += mainH + childNode.marginY
           inc childCount
       child = int(childNode.nextSibling)
+
+    if finiteUi(baselineAscent):
+      contentH = max(contentH, baselineAscent + baselineDescent)
 
     if node.grid and not node.textInlineParagraph:
       let gridNatural = measureGrid(nodes, natural, slot, constraints, scratch)
@@ -860,6 +965,40 @@ proc crossSize(node: ElementNode; natural: NaturalSize; row: bool;
   else:
     node.clampWidth(value, base)
 
+proc boxBaseline(nodes: seq[ElementNode]; rects: seq[Rect];
+                 slot: int): tuple[value: float32, ok: bool] =
+  if slot <= 0 or slot >= nodes.len:
+    return
+  let node = nodes[slot]
+  if node.hasText and not node.textInline and not node.textOverlay and
+      node.shapedText != nil and node.shapedText.lines.len > 0:
+    return (rects[slot].y + node.contentInsetY +
+      node.shapedText.lines[0].baseline, true)
+
+  var firstChild = -1
+  var child = int(node.firstChild)
+  let align = if node.align == Align.Auto: Align.Stretch else: node.align
+  while child >= 0:
+    let childNode = nodes[child]
+    if not childNode.absolute and not childNode.textInline:
+      if firstChild < 0:
+        firstChild = child
+      let childAlign = if childNode.selfAlign == Align.Auto:
+          align
+        else:
+          childNode.selfAlign
+      if node.row and not node.grid and
+          childNode.byBaseline(childAlign, true, false, node.wrapReverse):
+        firstChild = child
+        break
+    child = int(childNode.nextSibling)
+  if firstChild < 0:
+    return
+
+  let firstBaseline = nodes.boxBaseline(rects, firstChild)
+  result = (value: (if firstBaseline.ok: firstBaseline.value
+    else: rects[firstChild].y + rects[firstChild].h), ok: true)
+
 proc placeAbsoluteChild(nodes: seq[ElementNode]; natural: seq[NaturalSize];
                         rects: var seq[Rect]; sizes, bases, minimum, maximum,
                         factors: var seq[float32]; flexSlots: var seq[int];
@@ -1033,6 +1172,7 @@ proc placeNode(nodes: seq[ElementNode]; natural: seq[NaturalSize];
   lineIndex = linesBase
   while lineIndex < flexLines.len:
     var line = flexLines[lineIndex]
+    var ascent, descent = -Inf.float32
     for itemIndex in line.first ..< line.pastLast:
       let childSlot = flexSlots[itemIndex]
       let childNode = nodes[childSlot]
@@ -1049,6 +1189,31 @@ proc placeNode(nodes: seq[ElementNode]; natural: seq[NaturalSize];
         crossBase, sizes[childSlot], 0'f32, crossBefore + crossAfter,
         Align.Start)
       line.cross = max(line.cross, extent + crossBefore + crossAfter)
+      let childAlign = if childNode.selfAlign == Align.Auto:
+          defaultAlign
+        else:
+          childNode.selfAlign
+      if childNode.byBaseline(childAlign, row, false, node.wrapReverse):
+        var baseline = extent
+        if row:
+          placeNode(nodes, natural, rects, sizes, bases, minimum, maximum,
+            factors, flexSlots, flexLines, gridScratch, childSlot,
+            Rect(x: 0, y: 0, w: sizes[childSlot], h: extent))
+          let measured = nodes.boxBaseline(rects, childSlot)
+          if measured.ok:
+            baseline = measured.value - rects[childSlot].y
+          baseline += crossBefore
+        elif node.rightToLeft:
+          baseline += crossBefore
+        else:
+          baseline = crossBefore
+        bases[childSlot] = baseline
+        ascent = max(ascent, baseline)
+        descent = max(descent,
+          extent + crossBefore + crossAfter - baseline)
+    if finiteUi(ascent):
+      line.baseline = ascent
+      line.cross = max(line.cross, ascent + descent)
     flexLines[lineIndex] = line
     inc lineIndex
 
@@ -1142,6 +1307,9 @@ proc placeNode(nodes: seq[ElementNode]; natural: seq[NaturalSize];
           crossOffset = crossFree / 2
         of Align.End:
           crossOffset = crossFree
+        of Align.Baseline:
+          if childNode.byBaseline(childAlign, row, false, node.wrapReverse):
+            crossOffset = line.baseline - bases[childSlot]
         else:
           discard
       crossOffset += crossBefore + linePosition
@@ -1243,9 +1411,29 @@ proc placeGridChildren(nodes: seq[ElementNode]; natural: seq[NaturalSize];
       itemSize.offset
 
   let rowsFirst = gridScratch.values.len
+  var baselineRows = newSeq[float32](placed.rows)
+  for itemIndex in placed.first ..< placed.pastLast:
+    let item = gridScratch.items[itemIndex]
+    let childSlot = item.slot
+    let child = nodes[childSlot]
+    if item.rowSpan != 1 or not child.byBaseline(
+        grid.gridItemAlign(child, false), false, true, false):
+      continue
+    let relativeIndex = itemIndex - placed.first
+    let width = gridScratch.values[itemValues + relativeIndex]
+    let height = child.gridItemHeight(natural[childSlot], width, innerH)
+    placeNode(nodes, natural, rects, sizes, bases, minimum, maximum,
+      factors, flexSlots, flexLines, gridScratch, childSlot,
+      Rect(x: 0, y: 0, w: width, h: height))
+    let measured = nodes.boxBaseline(rects, childSlot)
+    let baseline = marginValue(child.margin[0]) +
+      (if measured.ok: measured.value else: height)
+    gridScratch.items[itemIndex].baseline = baseline
+    gridScratch.items[itemIndex].laidOut = true
+
   gridRows(nodes, natural, parent, gridScratch, placed.first,
     placed.pastLast, placed.columns, placed.rows, columnsFirst, rowsFirst,
-    innerH, innerW, innerH, grid.gapX + xBetween)
+    innerH, innerW, innerH, grid.gapX + xBetween, baselineRows)
 
   var usedH = grid.gapY * float32(max(placed.rows - 1, 0))
   for index in 0 ..< placed.rows:
@@ -1291,10 +1479,14 @@ proc placeGridChildren(nodes: seq[ElementNode]; natural: seq[NaturalSize];
       item.rowSpan, grid.gapY + yBetween)
     let itemSize = child.gridCellDimension(natural[childSlot], false,
       area, innerH, width, grid.gridItemAlign(child, false))
+    let offsetY = if item.laidOut:
+        baselineRows[item.row] - item.baseline + marginValue(child.margin[0])
+      else:
+        itemSize.offset
     var childRect = Rect(
       x: innerX + gridScratch.values[columnPositions + firstPhysicalColumn] +
         offsetX,
-      y: innerY + gridScratch.values[rowPositions + item.row] + itemSize.offset,
+      y: innerY + gridScratch.values[rowPositions + item.row] + offsetY,
       w: width,
       h: itemSize.size)
     let left = child.inset[3].resolve(innerW)

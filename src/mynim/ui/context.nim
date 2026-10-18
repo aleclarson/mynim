@@ -385,9 +385,12 @@ type
   FlexLine = object
     first, pastLast: int
     main, cross: float32
+    baseline: float32
 
   GridItem = object
     slot, col, row, colSpan, rowSpan: int
+    baseline: float32
+    laidOut: bool
 
   GridContribution = object
     start, span: int
