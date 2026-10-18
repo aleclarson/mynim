@@ -1,5 +1,5 @@
 import std/[options, os, unittest]
-import mynim/plugins/terminal/internal/vt/[library, render, terminal]
+import mynim/plugins/terminal/internal/vt/[frame, library, render, terminal]
 
 suite "Ghostty terminal state":
   test "validates the library and dimensions before construction":
@@ -108,6 +108,15 @@ suite "Ghostty terminal state":
       inc rowCount
     check rowCount == 30
 
+    let copiedFrame = renderState.snapshot(terminal)
+    check copiedFrame.cols == 100
+    check copiedFrame.rows == 30
+    check copiedFrame.viewport.len == 30
+    check copiedFrame.viewport[0].viewportY == 0
+    check copiedFrame.viewport[0].cells[5].codepoints ==
+      @[uint32(ord('e')), 0x301'u32]
+    check copiedFrame.viewport[0].cells[6].style.bold
+
     renderState.clean()
     check renderState.dirty() == renderClean
 
@@ -119,6 +128,7 @@ suite "Ghostty terminal state":
     check renderState.dirty() != renderClean
     check (renderState.cursor().x, renderState.cursor().y) == (0, 0)
     check firstRow[0].codepoint == uint32(ord('h'))
+    check copiedFrame.viewport[0].cells[0].codepoints == @[uint32(ord('h'))]
 
     renderState.close()
     terminal.close()
