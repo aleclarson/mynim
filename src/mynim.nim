@@ -58,6 +58,7 @@ include mynim/core/paths
 include mynim/core/power
 include mynim/core/secrets
 include mynim/core/random
+include mynim/core/watch
 include mynim/core/pending
 
 when isMainModule:

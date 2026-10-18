@@ -1,0 +1,28 @@
+{
+  "name": "@mygo-plugins/watch",
+  "version": "0.5.5",
+  "description": "Watches files in directories a Mynim app grants to its pages",
+  "type": "module",
+  "sideEffects": false,
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    }
+  },
+  "types": "./src/index.ts",
+  "files": [
+    "dist",
+    "src/index.ts",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "bun build ./src/index.ts --outdir ./dist --target browser --external mygo-runtime",
+    "test": "bun test",
+    "prepublishOnly": "bun run build && bun test"
+  },
+  "peerDependencies": {
+    "mygo-runtime": "^0.5.5"
+  }
+}
