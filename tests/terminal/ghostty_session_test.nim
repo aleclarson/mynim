@@ -1,6 +1,6 @@
-import std/[options, os, sequtils, strutils, unittest]
+import std/[atomics, options, os, sequtils, strutils, unittest]
 import mynim/plugins/terminal/internal/[pty, session]
-import mynim/plugins/terminal/internal/vt/[frame, library]
+import mynim/plugins/terminal/internal/vt/[frame, input, library]
 
 proc text(frame: TerminalFrame): string =
   for row in frame.viewport:
@@ -29,6 +29,9 @@ suite "Ghostty PTY terminal session":
       PtyOptions(path: "/bin/sh", args: @["/bin/sh", "-c", script]),
       cols = 80, rows = 24)
     defer: session.close()
+    var wakeCount: Atomic[int]
+    session.setWake(proc() {.gcsafe.} =
+      discard wakeCount.fetchAdd(1, moRelaxed))
 
     check session.size() == (cols: 80, rows: 24)
     var ready = false
@@ -42,8 +45,13 @@ suite "Ghostty PTY terminal session":
       session.close()
       checkpoint("terminal did not print ready; session failure: " & failure)
     check ready
+    check wakeCount.load(moRelaxed) > 0
     if ready:
-      session.send("mynim-session-input\n")
+      session.sendKey(KeyEvent(action: keyPress, key: keyM, text: "m",
+        unshifted: uint32(ord('m'))))
+      session.sendKey(KeyEvent(action: keyRelease, key: keyM))
+      session.sendKey(KeyEvent(action: keyPress, key: keyEnter))
+      session.sendKey(KeyEvent(action: keyRelease, key: keyEnter))
       var exited = false
       for _ in 0 ..< 500:
         if session.processExitCode().isSome:
@@ -62,7 +70,7 @@ suite "Ghostty PTY terminal session":
         let contents = text(frame)
         let normalized = contents.splitWhitespace().join(" ")
         check contents.contains("ready")
-        check contents.contains("got:mynim-session-input")
+        check contents.contains("got:m")
         check normalized.contains("reply: 1b 5b 30 6e")
         check contents.contains("SYNC")
         let events = session.takeEvents()

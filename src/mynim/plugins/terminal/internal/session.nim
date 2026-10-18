@@ -2,7 +2,7 @@
 
 import std/[locks, options]
 import ./pty
-import ./vt/[effects, frame, library, render, terminal]
+import ./vt/[effects, encode, frame, input, library, render, terminal]
 
 type
   TerminalEventKind* = enum
@@ -19,6 +19,8 @@ type
     held*: bool
     exitCode*: int
 
+  TerminalWake* = proc() {.closure, gcsafe.}
+
   TerminalSessionData = object
     terminalGuard: Lock
     inputGuard: Lock
@@ -26,6 +28,8 @@ type
     library: GhosttyVT
     terminal: GhosttyTerminal
     renderState: GhosttyRenderState
+    keyEncoder: GhosttyKeyEncoder
+    mouseEncoder: GhosttyMouseEncoder
     process: Pty
     readerThread, writerThread: Thread[TerminalSession]
     readerStarted, writerStarted: bool
@@ -36,6 +40,7 @@ type
     inputError: string
     processExitCode: Option[int]
     events: seq[TerminalEvent]
+    wake: TerminalWake
     renderHeld: bool
     heldFrame: Option[TerminalFrame]
     cols, rows, cellWidth, cellHeight: int
@@ -59,12 +64,24 @@ proc `=copy`(destination: var TerminalSessionData;
 proc addEvent(session: TerminalSession; event: sink TerminalEvent) =
   session.events.add(event)
 
+proc signalWake(session: TerminalSession)
+
 proc recordInputError(session: TerminalSession; message: string) =
   session.inputGuard.acquire()
   if session.inputError.len == 0:
     session.inputError = message
   session.inputChanged.broadcast()
   session.inputGuard.release()
+  session.signalWake()
+
+proc signalWake(session: TerminalSession) =
+  var wake: TerminalWake
+  session.inputGuard.acquire()
+  wake = session.wake
+  session.inputGuard.release()
+  if wake != nil:
+    {.cast(gcsafe).}:
+      wake()
 
 proc queueInput(session: TerminalSession; data: openArray[byte];
                 fromCallback: bool): bool =
@@ -188,6 +205,7 @@ proc reader(session: TerminalSession) {.thread.} =
         session.recordInputError(error.msg)
         break
       session.terminalGuard.release()
+      session.signalWake()
 
     var exitCode = 0
     var hasExitCode = false
@@ -201,6 +219,7 @@ proc reader(session: TerminalSession) {.thread.} =
       session.addEvent(TerminalEvent(kind: terminalProcessExited,
         exitCode: exitCode))
     session.terminalGuard.release()
+    session.signalWake()
     session.inputGuard.acquire()
     if hasExitCode:
       session.processExitCode = some(exitCode)
@@ -254,6 +273,18 @@ proc releaseGhostty(session: TerminalSession) =
     except CatchableError as error:
       session.recordInputError(error.msg)
     session.callbacksInstalled = false
+  if not session.mouseEncoder.isNil:
+    try:
+      session.mouseEncoder.close()
+    except CatchableError as error:
+      session.recordInputError(error.msg)
+    session.mouseEncoder = nil
+  if not session.keyEncoder.isNil:
+    try:
+      session.keyEncoder.close()
+    except CatchableError as error:
+      session.recordInputError(error.msg)
+    session.keyEncoder = nil
   if not session.renderState.isNil:
     try:
       session.renderState.close()
@@ -297,6 +328,8 @@ proc newTerminalSession*(library: GhosttyVT; process: PtyOptions;
     result.terminal.setScrollbackMaxBytes(scrollbackMaxBytes)
     result.terminal.setDefaultCursor(cursorStyleBlock, false)
     result.terminal.setModeDefault(modeGraphemes, true)
+    result.keyEncoder = newGhosttyKeyEncoder(library)
+    result.mouseEncoder = newGhosttyMouseEncoder(library)
     result.renderState = newGhosttyRenderState(library)
     var processOptions = process
     processOptions.cols = cols
@@ -368,6 +401,58 @@ proc send*(session: TerminalSession; data: string) =
   ## Queues UTF-8 or VT-encoded input for the PTY.
   if data.len > 0:
     session.send(data.toOpenArrayByte(0, data.high))
+
+proc setWake*(session: TerminalSession; wake: TerminalWake) =
+  ## Sets a thread-safe UI wake callback for output and process events.
+  if session.isNil:
+    return
+  session.inputGuard.acquire()
+  session.wake = wake
+  session.inputGuard.release()
+
+proc sendKey*(session: TerminalSession; event: KeyEvent;
+              optionAsAlt = false) =
+  ## Syncs current Ghostty modes, encodes a key event, and queues its bytes.
+  if session.isNil:
+    raise newException(ValueError, "terminal session is nil")
+  session.lockTerminal()
+  var encoded: seq[byte]
+  try:
+    session.keyEncoder.sync(session.terminal, optionAsAlt)
+    encoded = session.keyEncoder.encode(event)
+  finally:
+    session.terminalGuard.release()
+  session.send(encoded)
+
+proc sendFocus*(session: TerminalSession; gained: bool) =
+  ## Sends a focus report only while the application has enabled mode 1004.
+  if session.isNil:
+    raise newException(ValueError, "terminal session is nil")
+  session.lockTerminal()
+  var report: seq[byte]
+  try:
+    if session.terminal.mode(modeFocusEvent):
+      report = encodeFocus(session.library, gained)
+  finally:
+    session.terminalGuard.release()
+  session.send(report)
+
+proc sendMouse*(session: TerminalSession; action: MouseAction;
+    button: MouseButton; mods: Mods; x, y: float32;
+    screenWidth, screenHeight, cellWidth, cellHeight, padLeft, padTop: int;
+    anyButtonPressed: bool) =
+  ## Syncs mouse modes and geometry, encodes one pointer event, and queues it.
+  if session.isNil:
+    raise newException(ValueError, "terminal session is nil")
+  session.lockTerminal()
+  var encoded: seq[byte]
+  try:
+    session.mouseEncoder.sync(session.terminal, screenWidth, screenHeight,
+      cellWidth, cellHeight, padLeft, padTop, anyButtonPressed)
+    encoded = session.mouseEncoder.encode(action, button, mods, x, y)
+  finally:
+    session.terminalGuard.release()
+  session.send(encoded)
 
 proc resize*(session: TerminalSession; cols, rows: int;
              cellWidth = 1; cellHeight = 1) =
@@ -514,3 +599,4 @@ proc close*(session: TerminalSession) =
   session.closed = true
   session.inputChanged.broadcast()
   session.inputGuard.release()
+  session.signalWake()
