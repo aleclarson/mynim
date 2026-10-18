@@ -76,11 +76,22 @@ type
     statement*: ShaderAstStmt
     error*: ShaderParseError
 
+  ShaderParameterDecl* = object
+    ## One or more names that share a shader type.
+    names*: seq[string]
+    typeExpr*: ShaderAstExpr
+
+  ParameterParseResult = object
+    declarations: seq[ShaderParameterDecl]
+    error: ShaderParseError
+
   ShaderFunctionDecl* = object
     ## A package-level function header, body syntax tree, and source tokens.
     name*: string
     token*: ShaderToken
     receiver*: bool
+    parameters*: seq[ShaderParameterDecl]
+    results*: seq[ShaderParameterDecl]
     hasBody*: bool
     body*: ShaderAstStmt
     bodyTokens*: seq[ShaderToken]
@@ -174,6 +185,8 @@ proc skipDeclaration(p: var Parser; consumeSeparator = true) =
 
 proc endPosition(source: string): tuple[line, column: int]
 proc parseShaderStatements*(tokens: seq[ShaderToken]): ShaderStatementResult
+proc parseParameterDeclarations(tokens: seq[ShaderToken]): ParameterParseResult
+proc parseResultDeclarations(tokens: seq[ShaderToken]): ParameterParseResult
 
 proc parseFunctionDecl(p: var Parser): ShaderFunctionDecl =
   discard p.advance() # func
@@ -181,6 +194,8 @@ proc parseFunctionDecl(p: var Parser): ShaderFunctionDecl =
     result.receiver = true
     var receiver: seq[ShaderToken]
     discard p.skipBalanced("(", ")", receiver)
+    if p.error.message.len > 0:
+      return
   let name = p.current
   if name.kind != stkIdentifier:
     p.fail("expected a function name")
@@ -191,12 +206,22 @@ proc parseFunctionDecl(p: var Parser): ShaderFunctionDecl =
   if p.matches("["):
     var typeParameters: seq[ShaderToken]
     discard p.skipBalanced("[", "]", typeParameters)
+    if p.error.message.len > 0:
+      return
   if not p.matches("("):
     p.fail("expected a parameter list after function name")
     return
   var parameters: seq[ShaderToken]
   discard p.skipBalanced("(", ")", parameters)
+  if p.error.message.len > 0:
+    return
+  let parsedParameters = parseParameterDeclarations(parameters)
+  if parsedParameters.error.message.len > 0:
+    p.error = parsedParameters.error
+    return
+  result.parameters = parsedParameters.declarations
 
+  var resultTokens: seq[ShaderToken]
   var parens = 0
   var brackets = 0
   var braces = 0
@@ -204,9 +229,19 @@ proc parseFunctionDecl(p: var Parser): ShaderFunctionDecl =
     let token = p.current
     if token.kind == stkSemicolon and parens == 0 and brackets == 0 and braces == 0:
       discard p.advance()
+      let parsedResults = parseResultDeclarations(resultTokens)
+      if parsedResults.error.message.len > 0:
+        p.error = parsedResults.error
+      else:
+        result.results = parsedResults.declarations
       return
     if token.text == "{" and parens == 0 and brackets == 0 and braces == 0 and
         (p.index == 0 or p.tokens[p.index - 1].text notin ["struct", "interface"]):
+      let parsedResults = parseResultDeclarations(resultTokens)
+      if parsedResults.error.message.len > 0:
+        p.error = parsedResults.error
+        return
+      result.results = parsedResults.declarations
       result.hasBody = p.skipBalanced("{", "}", result.bodyTokens)
       if p.error.message.len == 0 and not p.atEnd and
           p.current.kind != stkSemicolon:
@@ -220,6 +255,7 @@ proc parseFunctionDecl(p: var Parser): ShaderFunctionDecl =
     of "{": inc braces
     of "}": braces = max(0, braces - 1)
     else: discard
+    resultTokens.add token
     discard p.advance()
 
 proc parseShaderFile*(source: string): ShaderFileResult =
@@ -350,6 +386,109 @@ proc parseTypeExpression(p: var Parser): ShaderAstExpr =
       name: field.text,
       children: @[result]
     )
+
+proc parserFor(tokens: seq[ShaderToken]): Parser =
+  var eof = ShaderToken(line: 1, column: 1)
+  if tokens.len > 0:
+    let last = tokens[^1]
+    eof = ShaderToken(
+      offset: last.offset + last.text.len,
+      line: last.line,
+      column: last.column + last.text.len
+    )
+  Parser(tokens: tokens, eof: eof)
+
+proc commaSegments(tokens: seq[ShaderToken]): seq[seq[ShaderToken]] =
+  var start = 0
+  var parens = 0
+  var brackets = 0
+  var braces = 0
+  for i, token in tokens:
+    if token.text == "," and parens == 0 and brackets == 0 and braces == 0:
+      if start < i:
+        result.add tokens[start ..< i]
+      start = i + 1
+      continue
+    case token.text
+    of "(": inc parens
+    of ")": parens = max(0, parens - 1)
+    of "[": inc brackets
+    of "]": brackets = max(0, brackets - 1)
+    of "{": inc braces
+    of "}": braces = max(0, braces - 1)
+    else: discard
+  if start < tokens.len:
+    result.add tokens[start .. ^1]
+
+proc parseTypeTokens(tokens: seq[ShaderToken]): tuple[
+    typeExpr: ShaderAstExpr, error: ShaderParseError] =
+  var parser = parserFor(tokens)
+  result.typeExpr = parser.parseTypeExpression()
+  if parser.error.message.len == 0 and not parser.atEnd:
+    parser.fail("unexpected token '" & parser.current.text & "' after type")
+  result.error = parser.error
+
+proc parseParameterDeclarations(tokens: seq[ShaderToken]): ParameterParseResult =
+  if tokens.len == 0:
+    return
+  let segments = commaSegments(tokens)
+  var pendingNames: seq[string]
+  for i, segment in segments:
+    if segment.len == 1 and segment[0].kind == stkIdentifier and
+        i < segments.high:
+      pendingNames.add segment[0].text
+      continue
+
+    var matchedNamedType = false
+    for split in 1 ..< segment.len:
+      var prefixIsNames = true
+      var names: seq[string]
+      for token in segment[0 ..< split]:
+        if token.kind != stkIdentifier:
+          prefixIsNames = false
+          break
+        names.add token.text
+      if not prefixIsNames:
+        continue
+      let parsedType = parseTypeTokens(segment[split .. ^1])
+      if parsedType.error.message.len == 0:
+        result.declarations.add ShaderParameterDecl(
+          names: pendingNames & names,
+          typeExpr: parsedType.typeExpr
+        )
+        pendingNames.setLen(0)
+        matchedNamedType = true
+        break
+    if matchedNamedType:
+      continue
+
+    let parsedType = parseTypeTokens(segment)
+    if parsedType.error.message.len > 0:
+      result.error = parsedType.error
+      return
+    var names = pendingNames
+    if names.len == 0:
+      names.add ""
+    result.declarations.add ShaderParameterDecl(
+      names: names,
+      typeExpr: parsedType.typeExpr
+    )
+    pendingNames.setLen(0)
+  if pendingNames.len > 0:
+    let token = segments[^1][^1]
+    result.error = ShaderParseError(
+      message: "expected a type after parameter name",
+      offset: token.offset + token.text.len,
+      line: token.line,
+      column: token.column + token.text.len
+    )
+
+proc parseResultDeclarations(tokens: seq[ShaderToken]): ParameterParseResult =
+  if tokens.len == 0:
+    return
+  if tokens.len >= 2 and tokens[0].text == "(" and tokens[^1].text == ")":
+    return parseParameterDeclarations(tokens[1 ..< tokens.len - 1])
+  parseParameterDeclarations(tokens)
 
 proc parsePrefix(p: var Parser): ShaderAstExpr =
   let token = p.current

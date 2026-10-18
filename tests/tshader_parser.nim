@@ -106,6 +106,25 @@ suite "shader file parser":
     check malformed.error.message == "expected a parameter list after function name"
     check malformed.error.line == 2
 
+  test "parses grouped parameters and named result types":
+    let parsed = parseShaderFile("""
+      package main
+      func Fragment(dst vec4, pos vec2, x, y float, points []vec2) (color vec4) {}
+    """)
+    check parsed.error.message.len == 0
+    let function = parsed.file.functions[0]
+    check function.parameters.len == 4
+    check function.parameters[0].names == @["dst"]
+    check function.parameters[0].typeExpr.name == "vec4"
+    check function.parameters[1].names == @["pos"]
+    check function.parameters[2].names == @["x", "y"]
+    check function.parameters[2].typeExpr.name == "float"
+    check function.parameters[3].typeExpr.kind == saekArrayType
+    check function.parameters[3].typeExpr.operator == "slice"
+    check function.results.len == 1
+    check function.results[0].names == @["color"]
+    check function.results[0].typeExpr.name == "vec4"
+
   test "parses assignments, conditionals, loops, range, and return":
     let parsed = parseShaderFile("""
       package main
