@@ -5,7 +5,9 @@ import std/[locks, monotimes, tables, times]
 import ./gamepad/device
 import ./gamepad/types
 
-when defined(macosx):
+when defined(emscripten):
+  import ./gamepad/web as backend
+elif defined(macosx):
   import ./gamepad/macos as backend
 elif defined(linux) and (defined(amd64) or defined(arm64)):
   import ./gamepad/linux as backend

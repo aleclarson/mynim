@@ -153,6 +153,21 @@ proc jsCall*(h: JsValue, name: cstring, args: openArray[JsValue]): JsValue =
        return __myjs.keep(f.apply(o, __myjs.of(a)));""",
     "ii", hi(h), name))
 
+proc jsTryCall*(h: JsValue, name: cstring, args: openArray[JsValue]):
+    tuple[value: JsValue, ok: bool] =
+  ## Calls h.name(args...) as a method, returning ok=false if JS throws.
+  for a in args:
+    jsPushArg(a)
+  let value = asmInt(
+    """try {
+         var o = __myjs.vals[$0], f = o[UTF8ToString($1)];
+         var a = __myjs.take();
+         return __myjs.keep(f.apply(o, __myjs.of(a)));
+       } catch (e) { return 0; }""",
+    "ii", hi(h), name)
+  result.value = JsValue(value)
+  result.ok = value != 0
+
 proc jsInvoke*(h: JsValue, args: openArray[JsValue]): JsValue =
   ## h(args...) as a bare function.
   for a in args:
@@ -237,13 +252,19 @@ proc jsFuncOf*(fn: JsCallback): JsValue =
   cbHandle[id] = h
   h
 
+proc jsRelease*(h: JsValue) =
+  ## Drops a temporary JS value handle; reserved handles are left alone.
+  if hi(h) <= 4:
+    return
+  discard asmInt("delete __myjs.vals[$0]; __myjs.free.push($0);", "i", hi(h))
+
 proc jsFuncRelease*(h: JsValue) =
   for id, hh in cbHandle.pairs:
     if hh == h:
       cbTable.del(id)
       cbHandle.del(id)
       break
-  discard asmInt("delete __myjs.vals[$0]; __myjs.free.push($0);", "i", hi(h))
+  jsRelease(h)
 
 proc jsCopyToJS*(dst: JsValue, src: openArray[byte]) =
   ## Copy bytes into a JS Uint8Array (or ArrayBuffer view).
@@ -259,5 +280,24 @@ proc jsCopyFromJS*(dst: var openArray[byte], src: JsValue) =
     return
   discard asmInt("HEAPU8.set(__myjs.vals[$0], $1);",
           "ii", hi(src), cast[cint](cast[int](addr dst[0])))
+
+proc jsFloatArray*(value: JsValue; name: cstring;
+                   dst: var openArray[float32]): int =
+  ## Copies numeric, boolean, or GamepadButton values from a JS array.
+  if dst.len == 0:
+    return
+  let target = cast[cint](cast[int](addr dst[0]))
+  result = int(asmInt(
+    """var a = __myjs.vals[$0][UTF8ToString($1)];
+       if (!a || typeof a.length !== 'number') return 0;
+       var n = Math.min(a.length, $3), p = $2 >> 2;
+       for (var i = 0; i < n; i++) {
+         var v = a[i];
+         if (typeof v === 'object' && v !== null) v = v.value;
+         HEAPF32[p + i] = typeof v === 'boolean' ? (v ? 1 : 0) :
+           typeof v === 'number' ? v : 0;
+       }
+       return n;""",
+    "iiii", hi(value), name, target, dst.len.cint))
 
 proc jsGlobal*(): JsValue = jsGlobalV
