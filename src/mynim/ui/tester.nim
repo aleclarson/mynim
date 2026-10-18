@@ -473,6 +473,14 @@ proc menu*(t: Tester): seq[string] =
     else:
       result.add(item.label)
 
+proc menuShortcut*(t: Tester; label: string): string =
+  ## Returns a shown menu item's keyboard accelerator for assertions.
+  if t == nil or t.surface.menu == nil:
+    return
+  for item in t.surface.menu.items:
+    if item.label == label:
+      return item.accelerator
+
 proc chooseMenuItem*(t: Tester; path: varargs[string]): ref CatchableError =
   if t == nil or t.surface.menu == nil:
     return newException(ValueError, "ui: no context menu is shown")

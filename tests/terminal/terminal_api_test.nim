@@ -37,8 +37,11 @@ suite "native Terminal API":
       var options = defaultTerminalOptions()
       options.command = @["/bin/sh", "-c", "sleep 5"]
       options.noDefaultKeybinds = true
-      options.keybinds = @[TerminalKeybind(mods: ui.modCtrl, key: ui.keyF1,
-        action: terminalActionIncreaseFontSize)]
+      options.keybinds = @[
+        TerminalKeybind(mods: ui.modCtrl, key: ui.keyF1,
+          action: terminalActionIncreaseFontSize),
+        TerminalKeybind(mods: ui.modCtrl, key: ui.keyF2,
+          action: terminalActionCopy)]
       options.onZoom = proc(zoom: TerminalZoom): bool =
         zoomSteps = zoom.steps
         zoomReset = zoom.reset
@@ -59,6 +62,10 @@ suite "native Terminal API":
       tester.frame()
       check zoomSteps == 1
       check not zoomReset
+      tester.rightClickAt(20, 20)
+      check tester.menuShortcut("Copy") == "Ctrl+F2"
+      check tester.menuShortcut("Paste") == ""
+      tester.closeMenu()
       tester.scroll(20, 20, 0, 40)
       check scrolledRows == 3
 
@@ -670,6 +677,14 @@ sys.exit(0)
       tester.rightClickAt(30, 20)
       check tester.menu() == @[
         "Copy", "Paste", "Select All", "-", "Clear Scrollback"]
+      when defined(macosx):
+        check tester.menuShortcut("Copy") == "Super+C"
+        check tester.menuShortcut("Paste") == "Super+V"
+        check tester.menuShortcut("Select All") == "Super+A"
+      else:
+        check tester.menuShortcut("Copy") == "Ctrl+Shift+C"
+        check tester.menuShortcut("Paste") == "Ctrl+Shift+V"
+        check tester.menuShortcut("Select All") == "Ctrl+Shift+A"
       check tester.chooseMenuItem("Select All") == nil
       tester.rightClickAt(30, 20)
       check tester.chooseMenuItem("Copy") == nil

@@ -1041,6 +1041,22 @@ proc performAction(terminal: Terminal; services: ui.Services;
     services.invalidate()
     return true
 
+proc menuItem(terminal: Terminal; menu: ui.Menu; label: string;
+              action: TerminalAction): ui.MenuItem =
+  result = menu.item(label)
+  var fallback: TerminalKeybind
+  var hasFallback = false
+  for binding in terminal.keybinds:
+    if binding.action != action:
+      continue
+    if not binding.performable:
+      return result.shortcut(binding.mods, binding.key)
+    if not hasFallback:
+      fallback = binding
+      hasFallback = true
+  if hasFallback:
+    discard result.shortcut(fallback.mods, fallback.key)
+
 proc handleInput(terminal: Terminal; services: ui.Services;
                  event: ui.InputEvent): bool =
   if terminal == nil or terminal.closed:
@@ -1347,12 +1363,14 @@ proc view*(context: ui.Context; terminal: Terminal): ui.Element =
   discard result.contextMenu(proc(menu: ui.Menu) =
     let selected = terminal.session.selectedText()
     let text = if selected.isSome: selected.get() else: ""
-    if menu.item(messages.menuCopy())
+    if terminal.menuItem(menu, messages.menuCopy(), terminalActionCopy)
         .disabled(selected.isNone or text.len == 0).chosen:
       services.writeClipboard(text)
-    if menu.item(messages.menuPaste()).chosen:
+    if terminal.menuItem(menu, messages.menuPaste(), terminalActionPaste)
+        .chosen:
       terminal.pasteClipboard(services)
-    if menu.item(messages.menuSelectAll()).chosen:
+    if terminal.menuItem(menu, messages.menuSelectAll(),
+        terminalActionSelectAll).chosen:
       terminal.selectAll(services)
     menu.separator()
     if menu.item(messages.clearScrollback()).chosen:

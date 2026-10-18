@@ -19,6 +19,63 @@ proc item*(menu: Menu; label: string): MenuItem =
   ## Adds a selectable item to the menu.
   menu.addMenuItem(label, platform.menuItemNormal)
 
+proc menuShortcutKey(key: platform.Key): string =
+  if key >= platform.key0 and key <= platform.key9:
+    return $char(ord('0') + int(uint16(key) - uint16(platform.key0)))
+  if key >= platform.keyA and key <= platform.keyZ:
+    return $char(ord('A') + int(uint16(key) - uint16(platform.keyA)))
+  if key >= platform.keyF1 and key <= platform.keyF12:
+    return "F" & $(int(uint16(key) - uint16(platform.keyF1)) + 1)
+  case key
+  of platform.keyEnter: "Enter"
+  of platform.keyEscape: "Escape"
+  of platform.keyBackspace: "Backspace"
+  of platform.keyTab: "Tab"
+  of platform.keySpace: "Space"
+  of platform.keyDelete: "Delete"
+  of platform.keyInsert: "Insert"
+  of platform.keyHome: "Home"
+  of platform.keyEnd: "End"
+  of platform.keyPageUp: "PageUp"
+  of platform.keyPageDown: "PageDown"
+  of platform.keyLeft: "Left"
+  of platform.keyRight: "Right"
+  of platform.keyUp: "Up"
+  of platform.keyDown: "Down"
+  of platform.keyMinus: "-"
+  of platform.keyEqual: "="
+  of platform.keyComma: ","
+  of platform.keyPeriod: "."
+  of platform.keySlash: "/"
+  of platform.keySemicolon: ";"
+  of platform.keyQuote: "'"
+  of platform.keyBracketLeft: "["
+  of platform.keyBracketRight: "]"
+  of platform.keyBackslash: "\\"
+  of platform.keyBackquote: "`"
+  else: ""
+
+proc shortcut*(item: MenuItem; mods: platform.Modifiers;
+               key: platform.Key): MenuItem =
+  ## Shows the key binding beside an item in a native context menu.
+  if item == nil or item.snapshot == nil:
+    return item
+  let keyName = menuShortcutKey(key)
+  let knownMods = platform.modSuper or platform.modCtrl or platform.modAlt or
+    platform.modShift
+  if keyName.len == 0 or (mods and knownMods) != mods:
+    item.snapshot.accelerator = ""
+    return item
+  var parts: seq[string]
+  for (modifier, name) in [(platform.modSuper, "Super"),
+      (platform.modCtrl, "Ctrl"), (platform.modAlt, "Alt"),
+      (platform.modShift, "Shift")]:
+    if (mods and modifier) != 0:
+      parts.add(name)
+  parts.add(keyName)
+  item.snapshot.accelerator = parts.join("+")
+  item
+
 proc separator*(menu: Menu) =
   ## Adds a separator to the menu.
   discard menu.addMenuItem("", platform.menuItemSeparator)
