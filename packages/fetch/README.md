@@ -23,6 +23,9 @@ let plugin = newFetchPlugin(Options(proxy: newProxy("http://127.0.0.1:8080")))
 ```
 
 When `clientFactory` is set, configure the proxy on the client it returns.
+Otherwise, a nil `Options.proxy` uses the `http_proxy`/`HTTP_PROXY`,
+`https_proxy`/`HTTPS_PROXY`, and `no_proxy`/`NO_PROXY` environment variables;
+localhost and loopback targets bypass those proxies.
 An app can also provide `Options.cookieJar` callbacks: `cookies(url)` returns
 `name=value` request cookies, and `store(url, setCookieHeaders)` receives each
 raw `Set-Cookie` response field. The app owns matching, expiry, and persistence.

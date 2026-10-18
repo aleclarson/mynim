@@ -1,7 +1,9 @@
-import std/[asyncdispatch, asynchttpserver, asyncnet, httpclient, httpcore, strutils, uri]
+import std/[asyncdispatch, asynchttpserver, asyncnet, envvars, httpclient,
+            httpcore, strutils, uri]
 import mynim as core
 import mynim/internal/ctx
 import mynim/plugins/fetch as fetchPlugin
+import mynim/plugins/fetch/env_proxy
 import mynim/plugins/fetch/service
 
 var
@@ -15,6 +17,21 @@ var
 type CancelArgs = object
   ctx: CancelCtx
   port: uint16
+
+type SavedEnvironmentVariable = object
+  name: string
+  existed: bool
+  value: string
+
+proc saveEnvironment(names: openArray[string]): seq[SavedEnvironmentVariable] =
+  for name in names:
+    result.add SavedEnvironmentVariable(name: name, existed: existsEnv(name),
+      value: getEnv(name))
+
+proc restoreEnvironment(values: openArray[SavedEnvironmentVariable]) =
+  for value in values:
+    if value.existed: putEnv(value.name, value.value)
+    else: delEnv(value.name)
 
 proc serveLoop() {.async.} =
   var server = newAsyncHttpServer()
@@ -36,8 +53,12 @@ proc serveLoop() {.async.} =
           request.headers.getOrDefault("X-Check"),
         newHttpHeaders([("Content-Type", "text/plain")]))
     of "/proxy":
+      let target = if request.url.scheme.len == 0:
+          "relative:" & request.url.path
+        else:
+          request.url.scheme & "://" & request.url.hostname & request.url.path
       await request.respond(Http200,
-        request.url.scheme & "://" & request.url.hostname & request.url.path,
+        target,
         newHttpHeaders([("Content-Type", "text/plain")]))
     of "/jar-redirect":
       await request.respond(Http302, "",
@@ -70,10 +91,10 @@ proc serveLoop() {.async.} =
         discard
     else:
       await request.respond(Http404, "missing")
-    if handled >= 11:
+    if handled >= 13:
       server.close()
   try:
-    while handled < 11:
+    while handled < 13:
       await server.acceptRequest(respond)
   except CatchableError:
     discard
@@ -115,6 +136,56 @@ createThread(serverThread, runServer)
 serverPort = ready.recv()
 let port = serverPort
 let origin = "http://127.0.0.1:" & $port
+
+block environment_proxy_selection_honors_scheme_and_no_proxy:
+  let environment = EnvironmentProxy(
+    httpProxy: "proxy.example:8080",
+    httpsProxy: "https://secure-proxy.example:8443",
+    noProxy: "example.com,.internal.example,192.168.0.0/16,10.0.0.1:80"
+  )
+  let httpProxy = proxyForUrl(parseUri("http://outside.example/"), environment)
+  doAssert httpProxy != nil
+  doAssert httpProxy.url.scheme == "http"
+  doAssert httpProxy.url.hostname == "proxy.example"
+  doAssert httpProxy.url.port == "8080"
+  let httpsProxy = proxyForUrl(parseUri("https://outside.example/"), environment)
+  doAssert httpsProxy != nil
+  doAssert httpsProxy.url.hostname == "secure-proxy.example"
+  doAssert proxyForUrl(parseUri("http://example.com/"), environment) == nil
+  doAssert proxyForUrl(parseUri("http://api.example.com/"), environment) == nil
+  doAssert proxyForUrl(parseUri("http://internal.example/"), environment) != nil
+  doAssert proxyForUrl(parseUri("http://api.internal.example/"), environment) == nil
+  doAssert proxyForUrl(parseUri("http://192.168.4.5/"), environment) == nil
+  doAssert proxyForUrl(parseUri("http://10.0.0.1/"), environment) == nil
+  doAssert proxyForUrl(parseUri("https://10.0.0.1/"), environment) != nil
+  doAssert proxyForUrl(parseUri("http://127.0.0.1/"), environment) == nil
+  doAssertRaises ValueError:
+    discard proxyForUrl(parseUri("http://outside.example/"),
+      EnvironmentProxy(httpProxy: "proxy.example", cgi: true))
+
+block environment_proxy_is_used_and_loopback_is_bypassed:
+  let saved = saveEnvironment(["http_proxy", "HTTP_PROXY", "https_proxy",
+    "HTTPS_PROXY", "no_proxy", "NO_PROXY", "REQUEST_METHOD"])
+  defer: restoreEnvironment(saved)
+  putEnv("http_proxy", origin)
+  putEnv("HTTP_PROXY", "")
+  putEnv("https_proxy", "")
+  putEnv("HTTPS_PROXY", "")
+  putEnv("no_proxy", "")
+  putEnv("NO_PROXY", "")
+  putEnv("REQUEST_METHOD", "")
+
+  let (proxyParts, proxyError) = run(service.Request(
+    url: "http://example.invalid/proxy", httpMethod: "GET", redirect: "follow"))
+  doAssert proxyError == nil
+  doAssert proxyParts.len == 2
+  doAssert proxyParts[1].chunk == "http://example.invalid/proxy"
+
+  let (directParts, directError) = run(service.Request(
+    url: origin & "/proxy", httpMethod: "GET", redirect: "follow"))
+  doAssert directError == nil
+  doAssert directParts.len == 2
+  doAssert directParts[1].chunk == "relative:/proxy"
 
 block follow_streams_body_and_exposes_response_metadata:
   let (parts, err) = run(service.Request(url: origin & "/redirect", httpMethod: "GET",

@@ -4,6 +4,7 @@ import std/[asyncdispatch, asyncstreams, base64, httpclient, httpcore, json,
             options, strutils, uri]
 
 import mynim as core
+import mynim/plugins/fetch/env_proxy as fetchEnvProxy
 
 type
   Header* = object
@@ -37,10 +38,10 @@ type
   Options* = object
     ## Creates a new client per fetch call. The plugin closes it afterward.
     ## Leave nil to use Nim's default client. A custom factory must set
-    ## maxRedirects=0. When set, `proxy` is used only by the default client;
-    ## a custom factory configures its own proxy.
+    ## maxRedirects=0. A custom factory configures its own proxy and does not
+    ## use this option's environment-based proxy selection.
     clientFactory*: proc(): AsyncHttpClient {.closure.}
-    ## Optional HTTP proxy for the default client.
+    ## Explicit proxy override. Nil uses HTTP_PROXY/HTTPS_PROXY and NO_PROXY.
     proxy*: Proxy
     ## Optional cookie policy. The jar decides matching, expiry, and storage.
     cookieJar*: CookieJar
@@ -142,6 +143,14 @@ proc isSameOrSubdomain(host, parent: string): bool =
   normalizedHost.endsWith(normalizedParent) and
     normalizedHost[normalizedHost.len - normalizedParent.len - 1] == '.'
 
+proc sameProxy(left, right: Proxy): bool =
+  if left == nil or right == nil:
+    return left == nil and right == nil
+  left.url.scheme.toLowerAscii() == right.url.scheme.toLowerAscii() and
+    left.url.hostname.toLowerAscii() == right.url.hostname.toLowerAscii() and
+    left.url.port == right.url.port and left.url.username == right.url.username and
+    left.url.password == right.url.password
+
 proc httpMethod(value: string): HttpMethod =
   ## Maps the request methods supported by Nim's HTTP client.
   case value.toUpperAscii()
@@ -237,8 +246,21 @@ proc fetchAsync(options: Options; request: Request; ctx: core.CancelCtx;
     raise (if ctx.err() != nil: ctx.err() else:
       newException(ValueError, "fetch: request canceled"))
 
-  let client = if options.clientFactory == nil:
-      newAsyncHttpClient(maxRedirects = 0, proxy = options.proxy)
+  let usesDefaultClient = options.clientFactory == nil
+  let environment = if usesDefaultClient and options.proxy == nil:
+      fetchEnvProxy.fromEnvironment()
+    else:
+      default(fetchEnvProxy.EnvironmentProxy)
+  proc proxyFor(url: Uri): Proxy =
+    if options.proxy != nil:
+      options.proxy
+    elif usesDefaultClient:
+      fetchEnvProxy.proxyForUrl(url, environment)
+    else:
+      nil
+  var activeProxy = if usesDefaultClient: proxyFor(current) else: nil
+  var client = if usesDefaultClient:
+      newAsyncHttpClient(maxRedirects = 0, proxy = activeProxy)
     else:
       options.clientFactory()
   if client == nil:
@@ -284,6 +306,8 @@ proc fetchAsync(options: Options; request: Request; ctx: core.CancelCtx;
       await readAndDiscard(response, client, ctx)
       raise newException(ValueError, "fetch: too many redirects")
     let next = redirectUrl(current, location)
+    let nextProxy = if usesDefaultClient: proxyFor(next) else: activeProxy
+    let switchProxy = usesDefaultClient and not sameProxy(activeProxy, nextProxy)
     let hostChanged =
       next.hostname.toLowerAscii() != current.hostname.toLowerAscii()
     if not isSameOrSubdomain(next.hostname, initialHost):
@@ -297,6 +321,10 @@ proc fetchAsync(options: Options; request: Request; ctx: core.CancelCtx;
       headers.del("content-type")
       headers.del("transfer-encoding")
     await readAndDiscard(response, client, ctx)
+    if switchProxy:
+      client.close()
+      client = newAsyncHttpClient(maxRedirects = 0, proxy = nextProxy)
+      activeProxy = nextProxy
     current = next
     redirected = true
     inc redirects
