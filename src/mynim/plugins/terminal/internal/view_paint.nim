@@ -3,6 +3,7 @@
 import std/[math, options, strutils, tables, unicode]
 import mynim/ui as ui
 import ./vt/[frame, render, terminal]
+import ./view_boxes as boxes
 
 type
   TerminalPaintOptions* = object
@@ -57,6 +58,11 @@ type
     first, past: int
     kind: int
     color: ui.Color
+
+  VectorCell = object
+    column, width: int
+    codepoint: uint32
+    foreground: ui.Color
 
 const printableAscii = " !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~"
 
@@ -466,6 +472,20 @@ proc paintGlyphRuns(painter: var ui.Painter; runs: openArray[PaintedGlyphRun];
     painter.glyphs(run.glyphs, x, baseline,
       if override.a > 0: override else: run.foreground)
 
+proc paintVectorCells(painter: var ui.Painter; cells: openArray[VectorCell];
+    x, y, cellWidth, cellHeight: float32; selectedStart, selectedFinish: int;
+    selectionText: ui.Color) =
+  for cell in cells:
+    let selected = selectionText.a > 0 and
+      cell.column <= selectedFinish and
+      cell.column + cell.width - 1 >= selectedStart
+    let color = if selected: selectionText else: cell.foreground
+    painter.draw(cell.codepoint, ui.Rect(
+      x: x + float32(cell.column) * cellWidth,
+      y: y,
+      w: float32(cell.width) * cellWidth,
+      h: cellHeight), color)
+
 proc paintRowText(painter: var ui.Painter; bounds: ui.Rect;
     row: TerminalFrameRow; x, rowY, baseline, cellWidth, cellHeight,
     scale: float32; colors: RenderColors; selectionText, cursorText: ui.Color;
@@ -473,6 +493,7 @@ proc paintRowText(painter: var ui.Painter; bounds: ui.Rect;
     options: TerminalPaintOptions; cache: TerminalPaintCache) =
   var
     runs: seq[PaintedGlyphRun]
+    vectorCells: seq[VectorCell]
     runText = ""
     runColumns, runWidths: seq[int]
     activeStyle: TextStyle
@@ -481,9 +502,15 @@ proc paintRowText(painter: var ui.Painter; bounds: ui.Rect;
     if cell.cell.wide in {cellSpacerTail, cellSpacerHead}:
       continue
     let resolved = cell.paintCell(colors)
-    let value = cell.cellText(resolved)
+    var value = cell.cellText(resolved)
     if value.len == 0:
       continue
+    let cellsWide = if cell.cell.wide == cellWide: 2 else: 1
+    if not resolved.invisible and cell.codepoints.len == 1 and
+        boxes.drawn(cell.codepoints[0]):
+      vectorCells.add(VectorCell(column: col, width: cellsWide,
+        codepoint: cell.codepoints[0], foreground: resolved.foreground))
+      value = if cellsWide == 2: "  " else: " "
     let nextStyle = TextStyle(foreground: resolved.foreground,
       bold: resolved.bold, italic: resolved.italic)
     if hasStyle and activeStyle != nextStyle and not value.onlySpaces:
@@ -497,7 +524,6 @@ proc paintRowText(painter: var ui.Painter; bounds: ui.Rect;
     if not hasStyle:
       activeStyle = nextStyle
       hasStyle = true
-    let cellsWide = if cell.cell.wide == cellWide: 2 else: 1
     for runeIndex in 0 ..< value.runeLen:
       runColumns.add(col)
       runWidths.add(if runeIndex == 0: cellsWide else: 0)
@@ -530,6 +556,9 @@ proc paintRowText(painter: var ui.Painter; bounds: ui.Rect;
       painter.clip(right, 0, proc(target: var ui.Painter) =
         target.paintGlyphRuns(runs, x, baseline))
 
+  painter.paintVectorCells(vectorCells, x, rowY, cellWidth, cellHeight,
+    selectedStart, selectedFinish, selectionText)
+
   if blockCursor and cursorColumn >= 0 and cursorColumn < row.cells.len:
     let wide = row.cells[cursorColumn].cell.wide == cellWide
     let cursor = ui.Rect(x: x + float32(cursorColumn) * cellWidth,
@@ -538,7 +567,10 @@ proc paintRowText(painter: var ui.Painter; bounds: ui.Rect;
       for run in runs:
         for i, col in run.columns:
           if col == cursorColumn:
-            target.glyphs(run.glyphs[i .. i], x, baseline, cursorText))
+            target.glyphs(run.glyphs[i .. i], x, baseline, cursorText)
+      for cell in vectorCells:
+        if cell.column == cursorColumn:
+          target.draw(cell.codepoint, cursor, cursorText))
 
   painter.paintDecorations(row, x, rowY, cellWidth, baseline - rowY, scale,
     colors, selectedStart, selectedFinish, selectionText, options)
