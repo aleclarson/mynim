@@ -4,9 +4,17 @@ Build desktop applications in Nim with a native UI or a web frontend. The
 `nim-xplat` command creates projects, runs development builds with live reload,
 generates typed TypeScript clients, and packages apps for the current machine.
 
-This project is inspired by [MyGo](https://github.com/egoist/mygo). This is an
-early release; building for another operating system and code signing are not yet
-supported by the CLI.
+This project is inspired by [MyGo](https://github.com/egoist/mygo). The
+`nim-xplat` CLI is an early release; building for another operating system and
+code signing are not yet supported by the CLI.
+
+## MyGo port
+
+Mynim is the ongoing Nim port of MyGo. Its goal is to port the full desktop
+framework, including its native GPU-rendered UI, runtime, and platform
+integrations. The port is pre-alpha, unreleased, and experimental; it is
+incomplete, and its APIs and behavior may change. See
+[CONTRIBUTING.md](CONTRIBUTING.md) for the current port notes.
 
 ## Create an application
 
