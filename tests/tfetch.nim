@@ -60,6 +60,9 @@ proc serveLoop() {.async.} =
       await request.respond(Http200,
         target,
         newHttpHeaders([("Content-Type", "text/plain")]))
+    of "/proxy-switch":
+      await request.respond(Http302, "",
+        newHttpHeaders([("Location", "http://example.invalid/proxy")]))
     of "/jar-redirect":
       await request.respond(Http302, "",
         newHttpHeaders([("Location", "/jar"),
@@ -91,10 +94,10 @@ proc serveLoop() {.async.} =
         discard
     else:
       await request.respond(Http404, "missing")
-    if handled >= 13:
+    if handled >= 15:
       server.close()
   try:
-    while handled < 13:
+    while handled < 15:
       await server.acceptRequest(respond)
   except CatchableError:
     discard
@@ -186,6 +189,13 @@ block environment_proxy_is_used_and_loopback_is_bypassed:
   doAssert directError == nil
   doAssert directParts.len == 2
   doAssert directParts[1].chunk == "relative:/proxy"
+
+  let (switchParts, switchError) = run(service.Request(
+    url: origin & "/proxy-switch", httpMethod: "GET", redirect: "follow"))
+  doAssert switchError == nil
+  doAssert switchParts.len == 2
+  doAssert switchParts[0].redirected
+  doAssert switchParts[1].chunk == "http://example.invalid/proxy"
 
 block follow_streams_body_and_exposes_response_metadata:
   let (parts, err) = run(service.Request(url: origin & "/redirect", httpMethod: "GET",
