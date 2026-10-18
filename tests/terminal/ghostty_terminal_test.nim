@@ -27,6 +27,23 @@ suite "Ghostty terminal state":
 
     check terminal.size() == (cols: 80, rows: 24)
     check terminal.cursor() == (x: 0, y: 0)
+    terminal.setTerminfoName("xterm-256color")
+    terminal.setScrollbackMaxBytes(1024 * 1024)
+    check terminal.scrollbackMaxBytes() == 1024 * 1024'u64
+    terminal.setDefaultCursor(cursorStyleUnderline, blink = false)
+    terminal.setModeDefault(modeGraphemes, true)
+    check terminal.mode(modeGraphemes)
+    terminal.setMode(modeFocusEvent, true)
+    check terminal.mode(modeFocusEvent)
+    terminal.setMode(modeFocusEvent, false)
+    check not terminal.mode(modeFocusEvent)
+    terminal.setResizePullScrollback(false)
+    check uint16(ansiMode(20)) == 0x8014'u16
+    expect ValueError:
+      terminal.setScrollbackMaxBytes(-1)
+    expect ValueError:
+      discard ansiMode(0x8000)
+
     terminal.write("hello\e[1;6He\u0301\e[1mB\e[0m" &
       "\e[38;5;123mP\e[0m\e[38;2;1;2;3mR\e[0m\e[2;4H")
     check terminal.cursor() == (x: 3, y: 1)
@@ -85,6 +102,7 @@ suite "Ghostty terminal state":
     terminal.reset()
     check terminal.size() == (cols: 100, rows: 30)
     check terminal.cursor() == (x: 0, y: 0)
+    check terminal.mode(modeGraphemes)
     renderState.update(terminal)
     check renderState.dirty() != renderClean
     check (renderState.cursor().x, renderState.cursor().y) == (0, 0)

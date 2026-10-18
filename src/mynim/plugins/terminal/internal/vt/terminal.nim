@@ -20,10 +20,19 @@ type
   TerminalString {.bycopy.} = object
     data: pointer
     length: csize_t
+  TerminalModeConfig {.bycopy.} = object
+    mode: uint16
+    value: bool
 
   GhosttyTerminal* = ref object
     library: GhosttyVT
     handle: pointer
+  TerminalMode* = distinct uint16
+  CursorStyle* = enum
+    cursorStyleBar = 0
+    cursorStyleBlock = 1
+    cursorStyleUnderline = 2
+    cursorStyleBlockHollow = 3
 
 const
   success: GhosttyResult = 0
@@ -33,11 +42,37 @@ const
   dataCursorY = 4'i32
   dataTitle = 12'i32
   dataPwd = 13'i32
+  dataMode = 37'i32
+  dataScrollbackMaxBytes = 34'i32
+  optionTerminfoName = 37'i32
+  optionDefaultCursorStyle = 22'i32
+  optionDefaultCursorBlink = 23'i32
+  optionScrollbackMaxBytes = 27'i32
+  optionModeDefault = 33'i32
+  optionMode = 34'i32
+  optionResizePullScrollback = 40'i32
+  modeAnsiMask = 0x8000'u16
+
+  modeCursorKeys* = TerminalMode(1)
+  modeCursorVisible* = TerminalMode(25)
+  modeFocusEvent* = TerminalMode(1004)
+  modeAltScroll* = TerminalMode(1007)
+  modeBracketedPaste* = TerminalMode(2004)
+  modeSyncOutput* = TerminalMode(2026)
+  modeGraphemes* = TerminalMode(2027)
+  modePasteEvents* = TerminalMode(5522)
+
+type
+  TerminalSetProc = proc(terminal: pointer; option: int32;
+    value: pointer): GhosttyResult {.cdecl.}
 
 static:
   doAssert sizeof(TerminalString) == 2 * sizeof(pointer)
   doAssert offsetOf(TerminalString, data) == 0
   doAssert offsetOf(TerminalString, length) == sizeof(pointer)
+  doAssert sizeof(TerminalModeConfig) == 4
+  doAssert offsetOf(TerminalModeConfig, mode) == 0
+  doAssert offsetOf(TerminalModeConfig, value) == 2
 
 proc requiredSymbol(library: GhosttyVT; name: string): pointer =
   result = library.symbol(name)
@@ -89,6 +124,13 @@ proc ghosttyLibrary*(terminal: GhosttyTerminal): GhosttyVT =
   ## Returns the library backing an open terminal.
   discard requireHandle(terminal)
   terminal.library
+
+proc setOption(terminal: GhosttyTerminal; option: int32; value: pointer;
+               operation: string) =
+  let handle = requireHandle(terminal)
+  let setData = cast[TerminalSetProc](requiredSymbol(terminal.library,
+    "ghostty_terminal_set"))
+  checkResult(operation, setData(handle, option, value))
 
 proc close*(terminal: GhosttyTerminal) =
   ## Frees the Ghostty state; close it before unloading its library.
@@ -179,3 +221,71 @@ proc title*(terminal: GhosttyTerminal): string =
 proc pwd*(terminal: GhosttyTerminal): string =
   ## Returns the current working directory reported by the running program.
   getString(terminal, dataPwd)
+
+proc setTerminfoName*(terminal: GhosttyTerminal; name: string) =
+  ## Sets the terminfo name returned by XTGETTCAP for TN.
+  var value = TerminalString(length: csize_t(name.len))
+  if name.len > 0:
+    value.data = cast[pointer](unsafeAddr name[0])
+  terminal.setOption(optionTerminfoName, addr value, "setting terminfo name")
+
+proc setScrollbackMaxBytes*(terminal: GhosttyTerminal; maxBytes: int) =
+  ## Sets the approximate scrollback byte limit; zero disables scrollback.
+  if maxBytes < 0 or uint64(maxBytes) > uint64(high(csize_t)):
+    raise newException(ValueError, "terminal scrollback limit is out of range")
+  var value = csize_t(maxBytes)
+  terminal.setOption(optionScrollbackMaxBytes, addr value,
+    "setting scrollback limit")
+
+proc scrollbackMaxBytes*(terminal: GhosttyTerminal): uint64 =
+  ## Returns the configured approximate scrollback byte limit.
+  let handle = requireHandle(terminal)
+  var value: csize_t
+  let getData = cast[TerminalGetProc](requiredSymbol(terminal.library,
+    "ghostty_terminal_get"))
+  checkResult("scrollback query", getData(handle, dataScrollbackMaxBytes,
+    addr value))
+  uint64(value)
+
+proc setDefaultCursor*(terminal: GhosttyTerminal; style: CursorStyle;
+                       blink: bool) =
+  ## Sets the style and blink setting restored by DECSCUSR 0.
+  var rawStyle = int32(ord(style))
+  var rawBlink = blink
+  terminal.setOption(optionDefaultCursorStyle, addr rawStyle,
+    "setting default cursor style")
+  terminal.setOption(optionDefaultCursorBlink, addr rawBlink,
+    "setting default cursor blink")
+
+proc setMode*(terminal: GhosttyTerminal; mode: TerminalMode; value: bool) =
+  ## Sets a terminal mode without changing its reset default.
+  var config = TerminalModeConfig(mode: uint16(mode), value: value)
+  terminal.setOption(optionMode, addr config, "setting terminal mode")
+
+proc setModeDefault*(terminal: GhosttyTerminal; mode: TerminalMode;
+                     value: bool) =
+  ## Sets a mode and the value restored by a full reset.
+  var config = TerminalModeConfig(mode: uint16(mode), value: value)
+  terminal.setOption(optionModeDefault, addr config,
+    "setting terminal mode default")
+
+proc mode*(terminal: GhosttyTerminal; mode: TerminalMode): bool =
+  ## Reports whether a terminal mode is currently active.
+  let handle = requireHandle(terminal)
+  var config = TerminalModeConfig(mode: uint16(mode))
+  let getData = cast[TerminalGetProc](requiredSymbol(terminal.library,
+    "ghostty_terminal_get"))
+  checkResult("terminal mode query", getData(handle, dataMode, addr config))
+  config.value
+
+proc setResizePullScrollback*(terminal: GhosttyTerminal; enabled: bool) =
+  ## Controls whether a larger screen pulls rows back from scrollback.
+  var value = enabled
+  terminal.setOption(optionResizePullScrollback, addr value,
+    "setting scrollback resize behavior")
+
+proc ansiMode*(value: int): TerminalMode =
+  ## Packs a standard ANSI mode number into Ghostty's 16-bit mode value.
+  if value < 0 or value > 0x7FFF:
+    raise newException(ValueError, "ANSI terminal mode is out of range")
+  TerminalMode(uint16(value) or modeAnsiMask)
