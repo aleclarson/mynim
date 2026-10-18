@@ -41,7 +41,7 @@ suite "native Terminal API":
     check cols > 0 and rows > 0
     check (cols, rows) != (80, 24)
 
-  test "encodes typed text and special keys through the native view":
+  test "encodes typed text and pastes clipboard through the native view":
     if getEnv("MYNIM_GHOSTTY_VT").len == 0:
       skip()
     when defined(windows):
@@ -49,7 +49,8 @@ suite "native Terminal API":
     else:
       let terminal = newTerminal(TerminalOptions(command: @[
         "/bin/bash", "-c",
-        "read -t 5 -r value || exit 98; test \"$value\" = m"]))
+        "read -t 5 -r value || exit 98; test \"$value\" = m || exit 99; " &
+        "read -t 30 -n 6 -r value || exit 98; test \"$value\" = pasted"]))
       defer: terminal.close()
       let tester = ui.newTester(proc(c: ui.Context) =
         discard view(c, terminal).size(800, 500)
@@ -59,6 +60,9 @@ suite "native Terminal API":
       tester.clickAt(20, 20)
       tester.typeKey(0, ui.keyM, "m")
       tester.key(0, ui.keyEnter)
+      tester.setClipboard("pasted")
+      tester.rightClickAt(30, 20)
+      check tester.chooseMenuItem("Paste") == nil
       check terminal.waitForExit() == 0
 
   test "selects terminal output and copies it through UI commands":
@@ -117,3 +121,18 @@ suite "native Terminal API":
       let topLine = tester.clipboard()
       check topLine.startsWith("line ")
       check parseInt(topLine[5 .. ^1]) < 10
+      tester.rightClickAt(30, 20)
+      check tester.menu() == @[
+        "Copy", "Paste", "Select All", "-", "Clear Scrollback"]
+      check tester.chooseMenuItem("Select All") == nil
+      tester.rightClickAt(30, 20)
+      check tester.chooseMenuItem("Copy") == nil
+      let allScrollback = tester.clipboard()
+      check allScrollback.contains("line 000")
+      tester.rightClickAt(30, 20)
+      check tester.chooseMenuItem("Clear Scrollback") == nil
+      tester.rightClickAt(30, 20)
+      check tester.chooseMenuItem("Select All") == nil
+      tester.rightClickAt(30, 20)
+      check tester.chooseMenuItem("Copy") == nil
+      check tester.clipboard().len < allScrollback.len

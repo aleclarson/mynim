@@ -373,6 +373,19 @@ proc copySelection(terminal: Terminal; services: ui.Services;
     services.invalidate()
   true
 
+proc selectAll(terminal: Terminal; services: ui.Services) =
+  if terminal.session.selectAll() and
+      terminal.options.copyOnSelect == copyOnSelectClipboard:
+    discard terminal.copySelection(services, clear = false)
+  services.invalidate()
+
+proc pasteClipboard(terminal: Terminal; services: ui.Services) =
+  terminal.state.preedit.setLen(0)
+  terminal.state.hasPendingKey = false
+  terminal.session.scrollToBottom()
+  terminal.session.clearSelection()
+  terminal.session.paste(services.readClipboard())
+
 proc tickSelection(terminal: Terminal) =
   if not terminal.state.selecting or not terminal.state.ticking or
       not terminal.state.hasGrid:
@@ -554,17 +567,10 @@ proc handleInput(terminal: Terminal; services: ui.Services;
       discard terminal.copySelection(services, clear = false)
       return true
     if event.text == "selectAll":
-      if terminal.session.selectAll() and
-          terminal.options.copyOnSelect == copyOnSelectClipboard:
-        discard terminal.copySelection(services, clear = false)
-      services.invalidate()
+      terminal.selectAll(services)
       return true
     if event.text == "paste" or event.text == "pasteAndMatchStyle":
-      terminal.state.preedit.setLen(0)
-      terminal.state.hasPendingKey = false
-      terminal.session.scrollToBottom()
-      terminal.session.clearSelection()
-      terminal.session.paste(services.readClipboard())
+      terminal.pasteClipboard(services)
       return true
     return false
   of ui.InputKind.InputPointerDown, ui.InputKind.InputPointerUp,
@@ -757,6 +763,21 @@ proc view*(context: ui.Context; terminal: Terminal): ui.Element =
 
   discard result.handleInput(proc(event: ui.InputEvent): bool =
     terminal.handleInput(services, event))
+  discard result.contextMenu(proc(menu: ui.Menu) =
+    let selected = terminal.session.selectedText()
+    let text = if selected.isSome: selected.get() else: ""
+    if menu.item("Copy")
+        .disabled(selected.isNone or text.len == 0).chosen:
+      services.writeClipboard(text)
+    if menu.item("Paste").chosen:
+      terminal.pasteClipboard(services)
+    if menu.item("Select All").chosen:
+      terminal.selectAll(services)
+    menu.separator()
+    if menu.item("Clear Scrollback").chosen:
+      terminal.session.clearScrollback()
+      services.invalidate()
+  )
   discard result.cursor(ui.cursorText)
   let draw = proc(painter: var ui.Painter; bounds: ui.Rect) =
     terminal.state.bounds = bounds

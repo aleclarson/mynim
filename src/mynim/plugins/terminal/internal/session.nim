@@ -621,6 +621,18 @@ proc selectedText*(session: TerminalSession): Option[string] =
   finally:
     session.terminalGuard.release()
 
+proc clearScrollback*(session: TerminalSession) =
+  ## Clears retained terminal history by feeding the emulator CSI 3 J.
+  if session.isNil:
+    raise newException(ValueError, "terminal session is nil")
+  session.lockTerminal()
+  try:
+    session.terminal.setSelection(none(GhosttySelection))
+    let command = [27'u8, 91'u8, 51'u8, 74'u8]
+    session.terminal.write(command)
+  finally:
+    session.terminalGuard.release()
+
 proc scrollForSelection*(session: TerminalSession; rows: int) =
   ## Scrolls the viewport and keeps terminal access serialized with its gesture.
   if session.isNil:
