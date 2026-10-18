@@ -1,9 +1,10 @@
 ## RFC 6455 client transport used by the page WebSocket plugin.
 
-import std/[asyncdispatch, asyncnet, base64, monotimes, net, sha1,
+import std/[asyncdispatch, asyncnet, base64, httpclient, monotimes, net, sha1,
             strutils, sysrand, tables, times, unicode, uri, dynlib]
 import core/locks
 import mynim/internal/ctx
+import mynim/plugins/fetch/env_proxy as fetchEnvProxy
 
 when defined(ssl):
   import std/openssl
@@ -25,6 +26,8 @@ type
     maxMessageSize*: int64
     closeTimeoutMs*: int
     tlsContext*: SslContext
+    ## Overrides HTTP_PROXY/HTTPS_PROXY and NO_PROXY when set.
+    proxy*: Proxy
 
   ProtocolFailure* = object of CatchableError
     closeCode*: int
@@ -259,6 +262,140 @@ proc socketSend(socket: AsyncSocket; data: string; ctx: CancelCtx) {.async.} =
     await sleepAsync(readPollMs)
   future.read()
 
+proc socketReadExact(socket: AsyncSocket; count: int; ctx: CancelCtx):
+    Future[string] {.async.} =
+  while result.len < count:
+    let pending = socket.recv(count - result.len)
+    while not pending.finished:
+      if ctx.done():
+        socket.close()
+        raise newException(ValueError, "websocket: connection canceled")
+      await sleepAsync(readPollMs)
+    let part = pending.read()
+    if part.len == 0:
+      raise newException(IOError, "websocket: proxy closed the connection")
+    result.add part
+
+proc socketPort(value: string; defaultPort: int): Port =
+  var number = defaultPort
+  if value.len > 0:
+    try: number = parseInt(value)
+    except ValueError:
+      raise newException(ValueError, "websocket: invalid proxy port")
+  if number < 1 or number > 65535:
+    raise newException(ValueError, "websocket: invalid proxy port")
+  Port(number)
+
+proc proxyPort(proxy: Proxy): Port =
+  let defaultPort = case proxy.url.scheme.toLowerAscii()
+    of "https": 443
+    of "socks5", "socks5h": 1080
+    else: 80
+  socketPort(proxy.url.port, defaultPort)
+
+proc proxyFor(options: Options; parts: tuple[host, hostHeader, resource: string,
+                     port: Port, secure: bool, url: Uri]): Proxy =
+  if options.proxy != nil:
+    return options.proxy
+  var target = parts.url
+  target.scheme = if parts.secure: "https" else: "http"
+  fetchEnvProxy.proxyForUrl(target, fetchEnvProxy.fromEnvironment())
+
+proc socks5Connect(socket: AsyncSocket; proxy: Proxy; host: string;
+                   port: Port; ctx: CancelCtx) {.async.} =
+  let username = proxy.url.username
+  let password = proxy.url.password
+  if username.len > 255 or password.len > 255:
+    raise newException(ValueError, "websocket: SOCKS5 credentials are too long")
+  let methods = if username.len == 0: "\x05\x01\x00"
+                else: "\x05\x02\x00\x02"
+  await socketSend(socket, methods, ctx)
+  let selected = await socketReadExact(socket, 2, ctx)
+  if selected[0] != '\x05':
+    raise newException(IOError, "websocket: invalid SOCKS5 greeting")
+  case selected[1]
+  of '\x00':
+    if username.len > 0:
+      raise newException(IOError, "websocket: SOCKS5 proxy refused authentication")
+  of '\x02':
+    if username.len == 0:
+      raise newException(IOError, "websocket: SOCKS5 proxy requires credentials")
+    var auth = "\x01" & char(username.len) & username & char(password.len) & password
+    await socketSend(socket, auth, ctx)
+    let authReply = await socketReadExact(socket, 2, ctx)
+    if authReply[0] != '\x01' or authReply[1] != '\x00':
+      raise newException(IOError, "websocket: SOCKS5 authentication failed")
+  else:
+    raise newException(IOError, "websocket: SOCKS5 proxy selected an unsupported method")
+
+  var connect = "\x05\x01\x00"
+  var address: IpAddress
+  try:
+    address = parseIpAddress(host)
+    if address.family == IpAddressFamily.IPv4:
+      connect.add '\x01'
+      for octet in address.address_v4: connect.add char(octet)
+    else:
+      connect.add '\x04'
+      for octet in address.address_v6: connect.add char(octet)
+  except ValueError:
+    if host.len > 255:
+      raise newException(ValueError, "websocket: SOCKS5 target hostname is too long")
+    connect.add '\x03' & char(host.len) & host
+  let portNumber = int(port)
+  connect.add char((portNumber shr 8) and 0xff)
+  connect.add char(portNumber and 0xff)
+  await socketSend(socket, connect, ctx)
+  let response = await socketReadExact(socket, 4, ctx)
+  if response[0] != '\x05' or response[2] != '\x00':
+    raise newException(IOError, "websocket: invalid SOCKS5 connection response")
+  if response[1] != '\x00':
+    raise newException(IOError,
+      "websocket: SOCKS5 connection failed with code " & $ord(response[1]))
+  case response[3]
+  of '\x01': discard await socketReadExact(socket, 4, ctx)
+  of '\x04': discard await socketReadExact(socket, 16, ctx)
+  of '\x03':
+    let size = await socketReadExact(socket, 1, ctx)
+    discard await socketReadExact(socket, ord(size[0]), ctx)
+  else:
+    raise newException(IOError, "websocket: invalid SOCKS5 address type")
+  discard await socketReadExact(socket, 2, ctx)
+
+proc readHandshake(socket: AsyncSocket; ctx: CancelCtx;
+                   firstRead: Future[string]): Future[string] {.async.}
+
+proc connectHttpProxy(socket: AsyncSocket; parts: tuple[host, hostHeader, resource: string,
+                           port: Port, secure: bool, url: Uri]; proxy: Proxy;
+                       ctx: CancelCtx) {.async.} =
+  let targetHost = if ':' in parts.host: "[" & parts.host & "]" else: parts.host
+  let authority = targetHost & ":" & $int(parts.port)
+  var wire = "CONNECT " & authority & " HTTP/1.1\r\nHost: " & authority & "\r\n"
+  if proxy.url.username.len > 0:
+    wire.add "Proxy-Authorization: Basic " &
+      encode(proxy.url.username & ":" & proxy.url.password) & "\r\n"
+  wire.add "\r\n"
+  await socketSend(socket, wire, ctx)
+  let response = await readHandshake(socket, ctx, nil)
+  let lineEnd = response.find("\r\n")
+  if lineEnd < 0:
+    raise newException(IOError, "websocket: malformed proxy CONNECT response")
+  let status = strutils.splitWhitespace(response[0..<lineEnd])
+  if status.len < 2 or status[1] != "200":
+    raise newException(IOError, "websocket: proxy CONNECT failed with " &
+      (if status.len > 1: status[1] else: "an invalid response"))
+
+proc dialSocket(host: string; port: Port; ctx: CancelCtx):
+    Future[AsyncSocket] {.async.} =
+  let pending = asyncnet.dial(host, port, buffered = false)
+  while not pending.finished:
+    if ctx.done():
+      pending.addCallback(proc(future: Future[AsyncSocket]) {.gcsafe.} =
+        if not future.failed: future.read().close())
+      raise newException(ValueError, "websocket: connection canceled")
+    await sleepAsync(readPollMs)
+  return pending.read()
+
 proc readHandshake(socket: AsyncSocket; ctx: CancelCtx;
                     firstRead: Future[string]): Future[string] {.async.} =
   var response = ""
@@ -317,6 +454,16 @@ proc dialAsync*(options: Options; request: HandshakeRequest;
                 protocols: seq[string]; ctx: CancelCtx):
                 Future[WebSocketConn] {.async.} =
   let parts = urlParts(request.url)
+  let proxy = options.proxyFor(parts)
+  let proxyScheme = if proxy == nil: "" else: proxy.url.scheme.toLowerAscii()
+  if proxy != nil and proxy.url.hostname.len == 0:
+    raise newException(ValueError, "websocket: proxy URL must include a hostname")
+  if parts.secure and proxyScheme == "https":
+    raise newException(ValueError,
+      "websocket: secure WebSocket over an HTTPS proxy is unsupported")
+  if proxyScheme notin ["", "http", "https", "socks5", "socks5h"]:
+    raise newException(ValueError,
+      "websocket: unsupported proxy scheme " & proxyScheme.escape())
   var nonce = urandom(16)
   let key = encode(nonce)
   let headers = normalizedHeaders(request, protocols, key)
@@ -332,14 +479,29 @@ proc dialAsync*(options: Options; request: HandshakeRequest;
   var socket: AsyncSocket
   var firstRead: Future[string]
   try:
-    let connectFuture = asyncnet.dial(parts.host, parts.port, buffered = false)
-    while not connectFuture.finished:
-      if ctx.done():
-        connectFuture.addCallback(proc(future: Future[AsyncSocket]) {.gcsafe.} =
-          if not future.failed: future.read().close())
-        raise newException(ValueError, "websocket: connection canceled")
-      await sleepAsync(readPollMs)
-    socket = connectFuture.read()
+    let dialHost = if proxy == nil: parts.host else: proxy.url.hostname
+    let dialPort = if proxy == nil: parts.port else: proxy.proxyPort()
+    socket = await dialSocket(dialHost, dialPort, ctx)
+    if proxyScheme in ["socks5", "socks5h"]:
+      await socks5Connect(socket, proxy, parts.host, parts.port, ctx)
+    elif proxyScheme == "http" and parts.secure:
+      await connectHttpProxy(socket, parts, proxy, ctx)
+    elif proxyScheme == "https":
+      when defined(ssl):
+        var tlsContext = options.tlsContext
+        if tlsContext == nil: tlsContext = newContext()
+        tlsContext.wrapConnectedSocket(socket, handshakeAsClient,
+          proxy.url.hostname)
+        if not isIpAddress(proxy.url.hostname) and
+            SSL_set_tlsext_host_name(socket.sslHandle(),
+              proxy.url.hostname.cstring) != 1:
+          raise newException(IOError,
+            "websocket: could not set proxy TLS server name")
+        firstRead = await beginTlsHandshake(socket, tlsContext,
+          proxy.url.hostname, ctx)
+      else:
+        raise newException(ValueError,
+          "websocket: this build does not include TLS support")
     if parts.secure:
       when defined(ssl):
         var tlsContext = options.tlsContext
@@ -353,8 +515,23 @@ proc dialAsync*(options: Options; request: HandshakeRequest;
         raise newException(ValueError,
           "websocket: this build does not include TLS support")
 
-    var wire = "GET " & parts.resource & " HTTP/1.1\r\nHost: " & hostHeader & "\r\n"
+    var requestTarget = parts.resource
+    if proxy != nil and not parts.secure and proxyScheme in ["http", "https"]:
+      var absoluteUrl = parts.url
+      absoluteUrl.scheme = "http"
+      requestTarget = $absoluteUrl
+    var wire = "GET " & requestTarget & " HTTP/1.1\r\nHost: " & hostHeader & "\r\n"
     wire.add headers.wire
+    if proxy != nil and not parts.secure and proxyScheme in ["http", "https"] and
+        proxy.url.username.len > 0:
+      var hasProxyAuthorization = false
+      for header in headers.values:
+        if header.name.toLowerAscii() == "proxy-authorization":
+          hasProxyAuthorization = true
+          break
+      if not hasProxyAuthorization:
+        wire.add "Proxy-Authorization: Basic " &
+          encode(proxy.url.username & ":" & proxy.url.password) & "\r\n"
     wire.add "\r\n"
     await socketSend(socket, wire, ctx)
     let response = await readHandshake(socket, ctx, firstRead)

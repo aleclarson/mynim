@@ -31,3 +31,10 @@ defaults to a 64 MiB incoming-message limit and a five-second close handshake
 timeout. For `wss:` connections it verifies the certificate chain and the URL
 hostname before sending handshake headers. A custom Nim `tlsContext` must keep
 peer certificate verification enabled.
+
+The native plugin uses `http_proxy`/`HTTP_PROXY` for `ws:` and
+`https_proxy`/`HTTPS_PROXY` for `wss:`, subject to `no_proxy`/`NO_PROXY` and
+the loopback bypass. Set `Options.proxy` to override the environment. HTTP
+proxies support direct `ws:` forwarding and `wss:` CONNECT tunnels; SOCKS5
+proxies support both schemes. An HTTPS proxy can carry `ws:`, but `wss:` over
+an HTTPS proxy is not supported by Nim's current socket TLS wrapper.
