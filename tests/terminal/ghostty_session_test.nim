@@ -184,7 +184,14 @@ reply = read_until(b'status=DONE')
 ok = b'status=OK' in reply and b'status=EPERM' not in reply and b'status=DATA' not in reply
 marker = b'EMPTY_OK' if ok else b'EMPTY_BAD:' + base64.b64encode(reply)
 os.write(1, b'\r\n' + marker + b'\r\n')
-sys.exit(0 if ok else 17)
+if not ok:
+    sys.exit(17)
+os.write(1, b'\r\nNOT_TAKEN_READY\r\n')
+event = read_until(b'status=DONE')
+if b'status=DONE' not in event:
+    os.write(1, b'\r\nNO_THIRD_EVENT\r\n')
+    sys.exit(18)
+sys.exit(0)
 """
     let session = newTerminalSession(library,
       PtyOptions(path: "/usr/bin/python3",
@@ -219,6 +226,15 @@ sys.exit(0 if ok else 17)
       check secondReady
       if secondReady:
         session.pasteData(transfer.textData(""))
+      var thirdReady = false
+      for _ in 0 ..< 500:
+        if text(session.snapshot()).contains("NOT_TAKEN_READY"):
+          thirdReady = true
+          break
+        sleep(10)
+      check thirdReady
+      if thirdReady:
+        session.pasteData(transfer.textData("not read"))
       let exitCode = session.waitForExit()
       let contents = text(session.snapshot())
       check exitCode == 0
@@ -226,3 +242,14 @@ sys.exit(0 if ok else 17)
         checkpoint("paste child exited " & $exitCode & ": " & contents)
       check contents.contains("FIRST_OK")
       check contents.contains("EMPTY_OK")
+      sleep(5100)
+      let progress = session.takeEvents().filterIt(
+        it.kind == terminalPasteProgress)
+      let statuses = progress.mapIt(it.pasteProgress.status)
+      check pasteOffered in statuses
+      check pasteSending in statuses
+      check pasteSent in statuses
+      check pasteNotTaken in statuses
+      check progress.anyIt(it.pasteProgress.status == pasteSent and
+        it.pasteProgress.sent == it.pasteProgress.total and
+        it.pasteProgress.total > 0)

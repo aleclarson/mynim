@@ -1,6 +1,6 @@
 ## A PTY process connected to a serialized Ghostty terminal and render state.
 
-import std/[base64, locks, options, os, strutils, unicode]
+import std/[base64, locks, monotimes, options, os, strutils, times, unicode]
 import mynim/transfer as transfer
 import ./pty
 import ./vt/[effects, encode, frame, input, library, render, selection, terminal]
@@ -15,12 +15,31 @@ type
     terminalNotification,
     terminalClipboardWrite,
     terminalClipboardRead,
+    terminalPasteProgress,
     terminalProcessExited
+
+  TerminalPasteStatus* = enum
+    ## The program was told which formats this paste offers.
+    pasteOffered,
+    ## The protocol reply is being written to the PTY.
+    pasteSending,
+    ## The complete protocol reply was written to the PTY.
+    pasteSent,
+    ## The program did not read the offer within five seconds.
+    pasteNotTaken,
+    ## The paste had no text and the program could not read paste events.
+    pasteNoText
+
+  TerminalPasteProgress* = object
+    status*: TerminalPasteStatus
+    ## Encoded protocol reply bytes written so far and in total.
+    sent*, total*: int64
 
   TerminalEvent* = object
     kind*: TerminalEventKind
     title*, pwd*, body*, clipboardText*: string
     clipboardRead*: ClipboardReadRequest
+    pasteProgress*: TerminalPasteProgress
     held*: bool
     exitCode*: int
 
@@ -44,9 +63,14 @@ type
     mime: string
     data: seq[byte]
 
+  InputPacket = object
+    data: seq[byte]
+    pasteTotal: int64
+
   PasteOffer = object
     mimes: seq[string]
     contents: seq[PasteContent]
+    hasNonText: bool
 
   TerminalWake* = proc() {.closure.}
   TerminalNotify = proc(title, body: string) {.closure.}
@@ -68,7 +92,7 @@ type
     launchPending, launchRequested, processReady: bool
     callbacksInstalled: bool
     closed, closing, writerStop, readerDone: bool
-    inputQueue: seq[seq[byte]]
+    inputQueue: seq[InputPacket]
     inputQueueBytes: int
     inputError: string
     processExitCode: Option[int]
@@ -80,6 +104,10 @@ type
     clipboardReadPolicy: ClipboardReadPolicy
     pasteOffers: system.Channel[PasteOffer]
     pasteOffersOpen: bool
+    pasteReplyCapturing: bool
+    pasteReplyBytes: seq[byte]
+    pasteOfferActive, pasteOfferNotTakenReported: bool
+    pasteOfferDeadline: MonoTime
     capturingClipboardRead: ClipboardReadRequest
     nextClipboardReadId: uint64
     renderHeld: bool
@@ -129,7 +157,7 @@ proc signalWake(session: TerminalSession) =
       wake()
 
 proc queueInput(session: TerminalSession; data: openArray[byte];
-                fromCallback: bool): bool =
+                fromCallback: bool; pasteTotal = 0'i64): bool =
   if data.len == 0:
     return true
   session.inputGuard.acquire()
@@ -146,7 +174,8 @@ proc queueInput(session: TerminalSession; data: openArray[byte];
     return false
   var copied = newSeq[byte](data.len)
   copyMem(addr copied[0], unsafeAddr data[0], data.len)
-  session.inputQueue.add(move(copied))
+  session.inputQueue.add(InputPacket(data: move(copied),
+    pasteTotal: pasteTotal))
   session.inputQueueBytes += data.len
   session.inputChanged.broadcast()
   session.inputGuard.release()
@@ -237,12 +266,20 @@ proc offerMime(format: transfer.Format): string =
     return
   format
 
-proc newPasteOffer(data: transfer.Data): PasteOffer =
+proc newPasteOffer(data: transfer.Data;
+                   held: openArray[transfer.Format]): PasteOffer =
   let snapshot = data.snapshot()
   for format in snapshot.formats():
     let mime = offerMime(format)
     if mime.len > 0 and mime notin result.mimes:
       result.mimes.add(mime)
+    if format != transfer.Text:
+      result.hasNonText = true
+  if held.len > 0:
+    result.hasNonText = false
+  for format in held:
+    if format != transfer.Text:
+      result.hasNonText = true
   for mime in result.mimes:
     var read = snapshot.read(transfer.Format(mime))
     if read.err != nil and mime == transfer.URIList:
@@ -260,7 +297,8 @@ proc readPasteMime(offer: PasteOffer; mime: string): seq[byte] =
     if content.mime == mime:
       return content.data
 
-proc answerPasteOffer(request: ptr GhosttyClipboardRead; offer: PasteOffer) =
+proc answerPasteOffer(session: TerminalSession;
+    request: ptr GhosttyClipboardRead; offer: PasteOffer) =
   if request.isNil or request.reply == nil:
     return
   var mimeNames: seq[string]
@@ -302,7 +340,23 @@ proc answerPasteOffer(request: ptr GhosttyClipboardRead; offer: PasteOffer) =
     reply.available = cast[ptr UncheckedArray[GhosttyString]](
       addr available[0])
     reply.availableLen = csize_t(available.len)
-  request.reply(cast[pointer](request), addr reply)
+  if contents.len > 0:
+    session.pasteReplyBytes.setLen(0)
+    session.pasteReplyCapturing = true
+    try:
+      request.reply(cast[pointer](request), addr reply)
+    finally:
+      session.pasteReplyCapturing = false
+    let response = move(session.pasteReplyBytes)
+    if response.len > 0:
+      let total = int64(response.len)
+      if session.queueInput(response, fromCallback = true,
+          pasteTotal = total):
+        session.addEvent(TerminalEvent(kind: terminalPasteProgress,
+          pasteProgress: TerminalPasteProgress(status: pasteSending,
+            total: total)))
+  else:
+    request.reply(cast[pointer](request), addr reply)
 
 proc onWritePty(rawTerminal, userdata: pointer;
                 data: ptr UncheckedArray[byte]; length: csize_t) {.cdecl.} =
@@ -312,6 +366,9 @@ proc onWritePty(rawTerminal, userdata: pointer;
       uint64(length) > uint64(high(int)):
     return
   try:
+    if session.pasteReplyCapturing:
+      session.pasteReplyBytes.add(data.toOpenArray(0, int(length) - 1))
+      return
     let pending = session.capturingClipboardRead
     if pending != nil:
       let response = rawString(data, length)
@@ -469,8 +526,9 @@ proc onClipboardRead(rawTerminal, userdata: pointer;
     let pending = session.pasteOffers.tryRecv()
     if pending.dataAvailable:
       let offer = pending.msg
+      session.pasteOfferActive = false
       try:
-        answerPasteOffer(request, offer)
+        answerPasteOffer(session, request, offer)
       except CatchableError as error:
         session.recordInputError(error.msg)
       return
@@ -704,19 +762,30 @@ proc writer(session: TerminalSession) {.thread.} =
         session.inputQueueBytes = 0
         session.inputGuard.release()
         break
-      var data = move(session.inputQueue[0])
+      var packet = move(session.inputQueue[0])
       session.inputQueue.delete(0)
-      session.inputQueueBytes -= data.len
+      session.inputQueueBytes -= packet.data.len
       session.inputGuard.release()
 
       var offset = 0
       try:
-        while offset < data.len:
-          let written = session.process.write(data.toOpenArray(offset,
-            data.high))
+        while offset < packet.data.len:
+          let finish = min(offset + 64 * 1024, packet.data.len)
+          let written = session.process.write(packet.data.toOpenArray(offset,
+            finish - 1))
           if written <= 0:
             raise newException(IOError, "terminal PTY accepted no input")
           offset += written
+          if packet.pasteTotal > 0:
+            let sent = int64(offset)
+            let status = if offset == packet.data.len: pasteSent
+              else: pasteSending
+            session.terminalGuard.acquire()
+            session.addEvent(TerminalEvent(kind: terminalPasteProgress,
+              pasteProgress: TerminalPasteProgress(status: status,
+                sent: sent, total: packet.pasteTotal)))
+            session.terminalGuard.release()
+            session.signalWake()
       except CatchableError as error:
         session.recordInputError(error.msg)
         session.inputGuard.acquire()
@@ -1218,18 +1287,23 @@ proc clearPasteOffers(session: TerminalSession) =
     pending.msg = PasteOffer()
     pending = session.pasteOffers.tryRecv()
 
-proc pasteData*(session: TerminalSession; data: transfer.Data) =
+proc pasteData*(session: TerminalSession; data: transfer.Data;
+                held: openArray[transfer.Format] = []) =
   ## Offers clipboard MIME types to mode 5522, or sends its text normally.
   ## Transfer providers are materialized on the caller thread before the
   ## offer crosses to the PTY reader thread.
   if session.isNil:
     raise newException(ValueError, "terminal session is nil")
-  var offer = newPasteOffer(data)
+  var offer = newPasteOffer(data, held)
   session.lockTerminal()
   var encoded: seq[byte]
   var offered = false
   try:
     session.clearPasteOffers()
+    session.pasteOfferActive = false
+    session.pasteOfferNotTakenReported = false
+    session.pasteOfferDeadline = MonoTime()
+    let hasNonText = offer.hasNonText
     var fallbackText: string
     for content in offer.contents:
       if content.mime == transfer.Text:
@@ -1239,9 +1313,17 @@ proc pasteData*(session: TerminalSession; data: transfer.Data) =
     if mimes.len > 0 and session.terminal.mode(modePasteEvents):
       session.pasteOffers.send(move(offer))
       offered = session.terminal.pasteEvent(mimes)
-      if not offered:
+      if offered:
+        session.pasteOfferActive = true
+        session.pasteOfferDeadline = getMonoTime() + initDuration(seconds = 5)
+        session.addEvent(TerminalEvent(kind: terminalPasteProgress,
+          pasteProgress: TerminalPasteProgress(status: pasteOffered)))
+      else:
         session.clearPasteOffers()
     if not offered:
+      if fallbackText.len == 0 and hasNonText:
+        session.addEvent(TerminalEvent(kind: terminalPasteProgress,
+          pasteProgress: TerminalPasteProgress(status: pasteNoText)))
       encoded = encodePaste(session.library, fallbackText,
         session.terminal.mode(modeBracketedPaste))
     session.terminal.scrollToBottom()
@@ -1396,8 +1478,26 @@ proc takeEvents*(session: TerminalSession): seq[TerminalEvent] =
   if session.isNil:
     return
   session.terminalGuard.acquire()
+  if session.pasteOfferActive and not session.pasteOfferNotTakenReported and
+      session.pasteOfferDeadline != MonoTime() and
+      getMonoTime() >= session.pasteOfferDeadline:
+    session.pasteOfferNotTakenReported = true
+    session.addEvent(TerminalEvent(kind: terminalPasteProgress,
+      pasteProgress: TerminalPasteProgress(status: pasteNotTaken)))
   result = move(session.events)
   session.events = @[]
+  session.terminalGuard.release()
+
+proc pasteOfferDelay*(session: TerminalSession): Option[Duration] =
+  ## Returns the remaining delay before a pending offer reports not taken.
+  if session.isNil:
+    return none(Duration)
+  session.terminalGuard.acquire()
+  if session.pasteOfferActive and not session.pasteOfferNotTakenReported and
+      session.pasteOfferDeadline != MonoTime():
+    let remaining = session.pasteOfferDeadline - getMonoTime()
+    result = some(if remaining > initDuration(milliseconds = 0): remaining
+      else: initDuration(milliseconds = 0))
   session.terminalGuard.release()
 
 proc processExitCode*(session: TerminalSession): Option[int] =

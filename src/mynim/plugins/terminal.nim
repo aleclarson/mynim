@@ -10,6 +10,7 @@ import mynim/plugins/terminal/native_library
 
 export view_paint.TerminalGrid, view_paint.TerminalPaintOptions,
   view_paint.defaultTerminalPaintOptions
+export session.TerminalPasteStatus, session.TerminalPasteProgress
 
 type
   ## Selects what happens to terminal text when a selection ends.
@@ -82,6 +83,9 @@ type
     ## On the UI thread, receives every clipboard representation before paste;
     ## return true to handle it instead of sending clipboard text to the program.
     onPaste*: proc(data: transfer.Data): bool {.closure.}
+    ## Receives clipboard paste progress on the UI thread, including mode 5522.
+    ## Progress byte counts include the encoded protocol reply written so far.
+    onPasteStatus*: proc(progress: TerminalPasteProgress) {.closure.}
     theme*, darkTheme*: TerminalTheme
     onTitle*: proc(title: string) {.closure.}
     onExit*: proc(exitCode: int) {.closure.}
@@ -519,7 +523,8 @@ proc pasteClipboard(terminal: Terminal; services: ui.Services) =
   terminal.state.hasPendingKey = false
   terminal.session.scrollToBottom()
   terminal.session.clearSelection()
-  terminal.session.pasteData(data)
+  # Keep the original clipboard formats for PasteNoText when only text was read.
+  terminal.session.pasteData(data, formats)
 
 proc tickSelection(terminal: Terminal) =
   if not terminal.state.selecting or not terminal.state.ticking or
@@ -692,6 +697,9 @@ proc dispatchEvents(terminal: Terminal; services: ui.Services) =
           terminal.session.resolveClipboardRead(source, allowed)
         terminal.state.clipboardReads.add(PendingClipboardRead(
           source: source, request: request))
+    of terminalPasteProgress:
+      if terminal.options.onPasteStatus != nil:
+        terminal.options.onPasteStatus(event.pasteProgress)
     of terminalPwdChanged, terminalRenderHoldChanged, terminalReset,
         terminalNotification:
       discard
@@ -1022,6 +1030,9 @@ proc view*(context: ui.Context; terminal: Terminal): ui.Element =
   terminal.state.scrollbarWidth = uiTheme.scrollbarWidth
   terminal.session.setWake(proc() = services.invalidate())
   terminal.dispatchEvents(services)
+  let pasteOfferDelay = terminal.session.pasteOfferDelay()
+  if pasteOfferDelay.isSome:
+    context.after(pasteOfferDelay.get())
   terminal.answerClipboardReads(context, services)
   result = ui.box(context).direction(ui.Direction.LeftToRight).focusable()
     .focusRing(false).clip().label("Terminal")

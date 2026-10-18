@@ -356,6 +356,31 @@ suite "native Terminal API":
       check offeredText == "pasted"
       check terminal.waitForExit() == 0
 
+  test "reports when an image-only paste cannot be offered":
+    if getEnv("MYNIM_GHOSTTY_VT").len == 0:
+      skip()
+    when defined(windows):
+      skip()
+    else:
+      var statuses: seq[TerminalPasteStatus]
+      var options = defaultTerminalOptions()
+      options.command = @["/bin/sh", "-c", "sleep 5"]
+      options.onPasteStatus = proc(progress: TerminalPasteProgress) =
+        statuses.add(progress.status)
+      let terminal = newTerminal(options)
+      defer: terminal.close()
+      let tester = ui.newTester(proc(c: ui.Context) =
+        discard view(c, terminal).size(800, 500)
+      , 800, 500)
+      defer: tester.close()
+      tester.setFocused(true)
+      tester.clickAt(20, 20)
+      tester.setClipboardData(transfer.newData(transfer.newItem(
+        transfer.bytes(transfer.PNG, @[137'u8, 80, 78, 71]))))
+      tester.command("paste")
+      tester.frame()
+      check pasteNoText in statuses
+
   test "falls back to text paste when the paste callback declines":
     if getEnv("MYNIM_GHOSTTY_VT").len == 0:
       skip()
