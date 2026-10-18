@@ -117,3 +117,18 @@ suite "SQLite database API":
       check error.code == 19
       check error.extendedCode == 2067
       check error.msg.contains("UNIQUE constraint failed")
+
+  test "bundled build includes FTS5 and R*Tree without loadable extensions":
+    let db = sqliteDb.open(":memory:")
+    defer: db.close()
+    discard db.execute("CREATE VIRTUAL TABLE documents USING fts5(body)")
+    discard db.execute("INSERT INTO documents VALUES ('searchable text')")
+    check db.query("SELECT body FROM documents WHERE documents MATCH 'searchable'")
+      .rows[0][0] == textValue("searchable text")
+
+    discard db.execute("CREATE VIRTUAL TABLE points USING rtree(id, left, right)")
+    discard db.execute("INSERT INTO points VALUES (1, 2.0, 3.0)")
+    check db.query("SELECT id FROM points WHERE left <= 2.0 AND right >= 2.0")
+      .rows[0][0] == integerValue(1)
+    expect SqliteError:
+      discard db.execute("SELECT load_extension('missing')")

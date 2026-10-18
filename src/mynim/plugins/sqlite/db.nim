@@ -1,8 +1,7 @@
 ## A small SQLite C API binding used by the SQLite plugin and native apps.
-## The SQLite shared library is loaded at runtime; no header or cgo binding is
-## required to compile Mynim.
+## The pinned SQLite amalgamation is compiled into the Mynim executable.
 
-import std/[dynlib, locks, math, strutils]
+import std/[locks, math, strutils]
 
 type
   SqliteDb = pointer
@@ -42,7 +41,6 @@ type
   Interrupt = proc(db: SqliteDb) {.cdecl.}
 
   SqliteApi = object
-    library: LibHandle
     openV2: OpenV2
     closeDb: CloseDb
     errorMessage: ErrorMessage
@@ -117,12 +115,6 @@ type
     handleMutex: Lock
     closing: bool
 
-var sqliteApi: SqliteApi
-var sqliteApiReady = false
-var sqliteApiError = ""
-var sqliteApiLock: Lock
-initLock(sqliteApiLock)
-
 const
   sqliteOk = 0
   sqliteRow = 100
@@ -138,76 +130,75 @@ const
 
 let transient = cast[SqliteDestructor](cast[pointer](-1))
 
-proc loadFunction[T](lib: LibHandle; name: string): T =
-  let address = symAddr(lib, name)
-  if address == nil:
-    raise newException(LibraryError, "sqlite: missing symbol " & name)
-  cast[T](address)
+{.compile: "native/sqlite3.c".}
+{.passC: "-DSQLITE_THREADSAFE=1 -DSQLITE_DQS=0 -DSQLITE_DEFAULT_FOREIGN_KEYS=1 " &
+        "-DSQLITE_ENABLE_FTS5=1 -DSQLITE_ENABLE_RTREE=1 " &
+        "-DSQLITE_OMIT_LOAD_EXTENSION=1 -DSQLITE_OMIT_DEPRECATED=1 " &
+        "-DSQLITE_OMIT_SHARED_CACHE=1".}
+when not defined(windows):
+  {.passL: "-lm".}
 
-proc loadSqliteApi() =
-  sqliteApiLock.acquire()
-  defer: sqliteApiLock.release()
-  if sqliteApiReady:
-    if sqliteApiError.len > 0:
-      raise newException(LibraryError, sqliteApiError)
-    return
-  sqliteApiReady = true
+proc cOpenV2(filename: cstring; db: ptr SqliteDb; flags: cint;
+              vfs: cstring): cint {.importc: "sqlite3_open_v2", cdecl.}
+proc cCloseDb(db: SqliteDb): cint {.importc: "sqlite3_close", cdecl.}
+proc cErrorMessage(db: SqliteDb): cstring {.importc: "sqlite3_errmsg", cdecl.}
+proc cExtendedCode(db: SqliteDb): cint {.importc: "sqlite3_extended_errcode", cdecl.}
+proc cExtendedResults(db: SqliteDb; enabled: cint): cint {.importc: "sqlite3_extended_result_codes", cdecl.}
+proc cBusyTimeout(db: SqliteDb; milliseconds: cint): cint {.importc: "sqlite3_busy_timeout", cdecl.}
+proc cPrepareV2(db: SqliteDb; sql: cstring; bytes: cint;
+                stmt: ptr SqliteStmt; tail: ptr cstring): cint {.importc: "sqlite3_prepare_v2", cdecl.}
+proc cFinalizeStmt(stmt: SqliteStmt): cint {.importc: "sqlite3_finalize", cdecl.}
+proc cParameterCount(stmt: SqliteStmt): cint {.importc: "sqlite3_bind_parameter_count", cdecl.}
+proc cBindNull(stmt: SqliteStmt; index: cint): cint {.importc: "sqlite3_bind_null", cdecl.}
+proc cBindInt64(stmt: SqliteStmt; index: cint; value: int64): cint {.importc: "sqlite3_bind_int64", cdecl.}
+proc cBindDouble(stmt: SqliteStmt; index: cint; value: cdouble): cint {.importc: "sqlite3_bind_double", cdecl.}
+proc cBindText(stmt: SqliteStmt; index: cint; value: cstring; bytes: cint;
+               freeValue: SqliteDestructor): cint {.importc: "sqlite3_bind_text", cdecl.}
+proc cBindBlob(stmt: SqliteStmt; index: cint; value: pointer; bytes: cint;
+               freeValue: SqliteDestructor): cint {.importc: "sqlite3_bind_blob", cdecl.}
+proc cStepStmt(stmt: SqliteStmt): cint {.importc: "sqlite3_step", cdecl.}
+proc cColumnCount(stmt: SqliteStmt): cint {.importc: "sqlite3_column_count", cdecl.}
+proc cColumnName(stmt: SqliteStmt; index: cint): cstring {.importc: "sqlite3_column_name", cdecl.}
+proc cColumnType(stmt: SqliteStmt; index: cint): cint {.importc: "sqlite3_column_type", cdecl.}
+proc cColumnInt64(stmt: SqliteStmt; index: cint): int64 {.importc: "sqlite3_column_int64", cdecl.}
+proc cColumnDouble(stmt: SqliteStmt; index: cint): cdouble {.importc: "sqlite3_column_double", cdecl.}
+proc cColumnText(stmt: SqliteStmt; index: cint): pointer {.importc: "sqlite3_column_text", cdecl.}
+proc cColumnBlob(stmt: SqliteStmt; index: cint): pointer {.importc: "sqlite3_column_blob", cdecl.}
+proc cColumnBytes(stmt: SqliteStmt; index: cint): cint {.importc: "sqlite3_column_bytes", cdecl.}
+proc cChanges(db: SqliteDb): cint {.importc: "sqlite3_changes", cdecl.}
+proc cTotalChanges(db: SqliteDb): cint {.importc: "sqlite3_total_changes", cdecl.}
+proc cLastInsertRowId(db: SqliteDb): int64 {.importc: "sqlite3_last_insert_rowid", cdecl.}
+proc cInterrupt(db: SqliteDb) {.importc: "sqlite3_interrupt", cdecl.}
 
-  when defined(macosx):
-    const names = [
-      "libsqlite3.dylib",
-      "/usr/lib/libsqlite3.dylib",
-      "/opt/homebrew/opt/sqlite/lib/libsqlite3.dylib",
-      "/usr/local/opt/sqlite/lib/libsqlite3.dylib",
-    ]
-  elif defined(windows):
-    const names = ["sqlite3.dll", "winsqlite3.dll"]
-  else:
-    const names = ["libsqlite3.so.0", "libsqlite3.so"]
-
-  var lib: LibHandle
-  for name in names:
-    lib = loadLib(name)
-    if lib != nil: break
-  if lib == nil:
-    sqliteApiError = "sqlite: could not load a system SQLite library"
-    raise newException(LibraryError, sqliteApiError)
-
-  try:
-    sqliteApi = SqliteApi(
-      library: lib,
-      openV2: loadFunction[OpenV2](lib, "sqlite3_open_v2"),
-      closeDb: loadFunction[CloseDb](lib, "sqlite3_close"),
-      errorMessage: loadFunction[ErrorMessage](lib, "sqlite3_errmsg"),
-      extendedCode: loadFunction[ExtendedCode](lib, "sqlite3_extended_errcode"),
-      extendedResults: loadFunction[ExtendedResults](lib, "sqlite3_extended_result_codes"),
-      busyTimeout: loadFunction[BusyTimeout](lib, "sqlite3_busy_timeout"),
-      prepareV2: loadFunction[PrepareV2](lib, "sqlite3_prepare_v2"),
-      finalizeStmt: loadFunction[FinalizeStmt](lib, "sqlite3_finalize"),
-      parameterCount: loadFunction[ParameterCount](lib, "sqlite3_bind_parameter_count"),
-      bindNull: loadFunction[BindNull](lib, "sqlite3_bind_null"),
-      bindInt64: loadFunction[BindInt64](lib, "sqlite3_bind_int64"),
-      bindDouble: loadFunction[BindDouble](lib, "sqlite3_bind_double"),
-      bindText: loadFunction[BindText](lib, "sqlite3_bind_text"),
-      bindBlob: loadFunction[BindBlob](lib, "sqlite3_bind_blob"),
-      stepStmt: loadFunction[StepStmt](lib, "sqlite3_step"),
-      columnCount: loadFunction[ColumnCount](lib, "sqlite3_column_count"),
-      columnName: loadFunction[ColumnName](lib, "sqlite3_column_name"),
-      columnType: loadFunction[ColumnType](lib, "sqlite3_column_type"),
-      columnInt64: loadFunction[ColumnInt64](lib, "sqlite3_column_int64"),
-      columnDouble: loadFunction[ColumnDouble](lib, "sqlite3_column_double"),
-      columnText: loadFunction[ColumnText](lib, "sqlite3_column_text"),
-      columnBlob: loadFunction[ColumnBlob](lib, "sqlite3_column_blob"),
-      columnBytes: loadFunction[ColumnBytes](lib, "sqlite3_column_bytes"),
-      changes: loadFunction[Changes](lib, "sqlite3_changes"),
-      totalChanges: loadFunction[TotalChanges](lib, "sqlite3_total_changes"),
-      lastInsertRowId: loadFunction[LastInsertRowId](lib, "sqlite3_last_insert_rowid"),
-      interrupt: loadFunction[Interrupt](lib, "sqlite3_interrupt"),
-    )
-  except CatchableError as error:
-    unloadLib(lib)
-    sqliteApiError = error.msg
-    raise
+let sqliteApi = SqliteApi(
+  openV2: cOpenV2,
+  closeDb: cCloseDb,
+  errorMessage: cErrorMessage,
+  extendedCode: cExtendedCode,
+  extendedResults: cExtendedResults,
+  busyTimeout: cBusyTimeout,
+  prepareV2: cPrepareV2,
+  finalizeStmt: cFinalizeStmt,
+  parameterCount: cParameterCount,
+  bindNull: cBindNull,
+  bindInt64: cBindInt64,
+  bindDouble: cBindDouble,
+  bindText: cBindText,
+  bindBlob: cBindBlob,
+  stepStmt: cStepStmt,
+  columnCount: cColumnCount,
+  columnName: cColumnName,
+  columnType: cColumnType,
+  columnInt64: cColumnInt64,
+  columnDouble: cColumnDouble,
+  columnText: cColumnText,
+  columnBlob: cColumnBlob,
+  columnBytes: cColumnBytes,
+  changes: cChanges,
+  totalChanges: cTotalChanges,
+  lastInsertRowId: cLastInsertRowId,
+  interrupt: cInterrupt,
+)
 
 proc nullValue*(): SqlValue = SqlValue(kind: sqlNull)
 proc integerValue*(value: int64): SqlValue = SqlValue(kind: sqlInteger, integer: value)
@@ -246,7 +237,6 @@ proc open*(path: string; options = OpenOptions()): Database =
   ## Opens a database path or `:memory:` and enables foreign-key constraints.
   if path.len == 0 or '\0' in path:
     raise newException(ValueError, "sqlite: database path must be nonempty and contain no NUL")
-  loadSqliteApi()
   var flags = openReadWrite or openCreate or openFullMutex
   if options.readOnly:
     flags = openReadOnly or openFullMutex

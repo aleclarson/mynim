@@ -29,7 +29,6 @@ Files live in the app's user-data directory. Page connections close when the
 page navigates away or the app quits. The Nim plugin can set a database
 directory and lock timeout with `newSqlitePlugin(Options(...))`.
 
-Mynim currently loads the operating system's SQLite shared library at runtime.
-The upstream plugin ships prebuilt SQLite libraries, so bundling and packaging
-those libraries remains a parity gap, especially on Windows and Linux systems
-without SQLite installed.
+Mynim compiles its pinned SQLite amalgamation into the app, so the app does not
+need a system SQLite installation at runtime. The bundled build enables FTS5
+and R*Tree, enforces foreign keys by default, and omits extension loading.
