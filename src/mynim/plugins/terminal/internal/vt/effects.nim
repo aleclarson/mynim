@@ -21,7 +21,8 @@ type
   TerminalResetFn* = proc(terminal, userdata: pointer) {.cdecl.}
   TerminalClipboardWriteFn* = proc(terminal, userdata: pointer;
     request: ptr GhosttyClipboardWrite) {.cdecl.}
-  TerminalClipboardReadFn* = proc(terminal, userdata, request: pointer) {.cdecl.}
+  TerminalClipboardReadFn* = proc(terminal, userdata: pointer;
+    request: ptr GhosttyClipboardRead) {.cdecl.}
   TerminalDesktopNotificationFn* = proc(terminal, userdata: pointer;
     notification: ptr GhosttyTerminalDesktopNotification) {.cdecl.}
   TerminalCallbacks* = object

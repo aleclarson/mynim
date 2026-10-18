@@ -2,6 +2,7 @@
 
 import std/[math, monotimes, options, os, strutils, tables, times, unicode]
 import mynim/ui as ui
+import mynim/transfer as transfer
 import mynim/plugins/terminal/internal/[links, pty, session, view_paint]
 import mynim/plugins/terminal/internal/vt/[input as vtInput, library,
     terminal as vtTerminal]
@@ -17,6 +18,27 @@ type
     copyOnSelectNone,
     ## Copy the selected text to the system clipboard.
     copyOnSelectClipboard
+
+  TerminalClipboardAccess* = enum
+    ## Program reads are refused by default.
+    clipboardReadDeny,
+    ## Program reads receive the requested representations.
+    clipboardReadAllow,
+    ## Program reads wait for an app callback or native UI prompt.
+    clipboardReadAsk
+
+  TerminalClipboardRequest* = ref object
+    ## A terminal program's deferred request to read clipboard data.
+    mimes*: seq[string]
+    list*, primary*: bool
+    text*: string
+    resolve: proc(allowed: bool) {.closure.}
+
+  PendingClipboardRead = ref object
+    source: ClipboardReadRequest
+    request: TerminalClipboardRequest
+    asked: bool
+    promptText: string
 
   TerminalTheme* = ref object
     foreground*, background*: ui.Color
@@ -42,12 +64,19 @@ type
     noBlink*, optionAsAlt*: bool
     ## Prevents terminal programs from writing to the system clipboard.
     noClipboardWrite*: bool
+    ## Controls terminal programs' clipboard reads; denied by default.
+    clipboardRead*: TerminalClipboardAccess
     theme*, darkTheme*: TerminalTheme
     onTitle*: proc(title: string) {.closure.}
     onExit*: proc(exitCode: int) {.closure.}
     onBell*: proc() {.closure.}
     ## Receives OSC desktop notifications on the terminal worker thread.
     onNotify*: proc(title, body: string) {.closure.}
+    ## Runs on the UI thread for `clipboardReadAsk`. Allow and deny may be
+    ## called later from any thread; the first answer wins. Without a callback,
+    ## the terminal shows its own prompt. Leaving a request unanswered keeps
+    ## it pending.
+    onClipboardRequest*: proc(request: TerminalClipboardRequest) {.closure.}
     onKey*: proc(mods: ui.Modifiers; key: ui.Key): bool {.closure.}
     ## Handles a modifier-clicked terminal link and reports whether it opened.
     openLink*: proc(link: string): bool {.closure.}
@@ -66,6 +95,9 @@ type
     pendingTyped: bool
     pendingKey: PendingTerminalKey
     takenKeys: seq[ui.Key]
+    clipboardReads: seq[PendingClipboardRead]
+    clipboardPromptId: uint64
+    clipboardPromptOpen: bool
     appliedTheme: TerminalTheme
 
   Terminal* = ref object
@@ -108,6 +140,16 @@ let
 proc defaultTerminalOptions*(): TerminalOptions =
   TerminalOptions(font: defaultTerminalPaintOptions(),
     scrollbackMaxBytes: 10 * 1024 * 1024)
+
+proc allow*(request: TerminalClipboardRequest) =
+  ## Allows this read once its view can fetch the clipboard on the UI thread.
+  if request != nil and request.resolve != nil:
+    request.resolve(true)
+
+proc deny*(request: TerminalClipboardRequest) =
+  ## Refuses this read with the protocol response Ghostty held back.
+  if request != nil and request.resolve != nil:
+    request.resolve(false)
 
 proc normalized(options: TerminalOptions): TerminalOptions =
   result = options
@@ -200,6 +242,10 @@ proc newTerminal*(options = defaultTerminalOptions()): Terminal =
       processOptions(options), cursorBlink = not options.noBlink,
       scrollbackMaxBytes = max(options.scrollbackMaxBytes, 0),
       noClipboardWrite = options.noClipboardWrite,
+      clipboardReadPolicy = case options.clipboardRead
+        of clipboardReadDeny: clipboardAccessDeny
+        of clipboardReadAllow: clipboardAccessAllow
+        of clipboardReadAsk: clipboardAccessAsk,
       onNotify = options.onNotify)
   except CatchableError:
     result.library.close()
@@ -469,6 +515,124 @@ proc applyTheme(terminal: Terminal; dark: bool): TerminalTheme =
     return terminal.options.theme
   if dark: defaultDarkTerminalTheme else: defaultLightTerminalTheme
 
+proc offerMime(format: transfer.Format): string =
+  if format == transfer.FileList:
+    return transfer.URIList
+  if format.find('/') <= 0 or format.contains({' ', '\t'}) or
+      format.startsWith("application/x-mygo-"):
+    return
+  format
+
+proc readClipboardFormat(data: transfer.Data; mime: string): seq[byte] =
+  let read = data.read(transfer.Format(mime))
+  if read.err == nil:
+    return read.data
+  if mime == transfer.URIList:
+    let files = data.read(transfer.FileList)
+    if files.err == nil:
+      return files.data
+
+proc clipboardContents(services: ui.Services; request: ClipboardReadRequest):
+    tuple[contents: seq[(string, seq[byte])], available: seq[string]] =
+  var formats = @[transfer.Text]
+  for mime in request.mimes:
+    let format = transfer.Format(mime)
+    if format notin formats:
+      formats.add(format)
+    if mime == transfer.URIList and transfer.FileList notin formats:
+      formats.add(transfer.FileList)
+  let data = services.readClipboardData(formats)
+  for mime in request.mimes:
+    let bytes = readClipboardFormat(data, mime)
+    if bytes.len > 0:
+      result.contents.add((mime, bytes))
+  let text = readClipboardFormat(data, transfer.Text)
+  if text.len > 0 and "text/plain" notin request.mimes:
+    result.contents.add(("text/plain", text))
+  for format in services.clipboardFormats():
+    let mime = offerMime(format)
+    if mime.len > 0 and mime notin result.available:
+      result.available.add(mime)
+
+proc previewClipboardText(text: string): string =
+  var oneLine = text
+  for character in ['\n', '\r', '\t']:
+    oneLine = oneLine.replace($character, " ")
+  let runes = toRunes(oneLine)
+  if runes.len > 200:
+    for index in 0 ..< 200:
+      result.add(toUTF8(runes[index]))
+    result.add("…")
+  else:
+    result = oneLine
+
+proc clipboardReadMessage(request: PendingClipboardRead): string =
+  if request.promptText.len > 0:
+    return previewClipboardText(request.promptText)
+  if request.source.mimes.len > 0:
+    return request.source.mimes.join(" ")
+  "Clipboard is empty."
+
+proc finishClipboardRead(terminal: Terminal; services: ui.Services;
+    pending: PendingClipboardRead; allowed: bool) =
+  if allowed:
+    let data = services.clipboardContents(pending.source)
+    terminal.session.answerClipboardRead(pending.source, true,
+      data.contents, data.available)
+  else:
+    terminal.session.answerClipboardRead(pending.source, false, [], [])
+
+proc answerClipboardReads(terminal: Terminal; context: ui.Context;
+                          services: ui.Services) =
+  while terminal.state.clipboardReads.len > 0:
+    let pending = terminal.state.clipboardReads[0]
+    let answer = terminal.session.clipboardReadAnswer(pending.source)
+    if answer != 0:
+      terminal.finishClipboardRead(services, pending, answer == 1)
+      if terminal.state.clipboardPromptId == pending.source.id:
+        terminal.state.clipboardPromptId = 0
+        terminal.state.clipboardPromptOpen = false
+      terminal.state.clipboardReads.delete(0)
+      continue
+
+    if terminal.options.clipboardRead == clipboardReadAllow or
+        (pending.source.list and pending.source.mimes.len == 0):
+      terminal.finishClipboardRead(services, pending, true)
+      terminal.state.clipboardReads.delete(0)
+      continue
+    if terminal.options.clipboardRead != clipboardReadAsk:
+      terminal.state.clipboardReads.delete(0)
+      continue
+
+    if terminal.options.onClipboardRequest != nil:
+      if not pending.asked:
+        pending.request.text = services.readClipboard()
+        pending.asked = true
+        terminal.options.onClipboardRequest(pending.request)
+        let callbackAnswer = terminal.session.clipboardReadAnswer(
+          pending.source)
+        if callbackAnswer != 0:
+          terminal.finishClipboardRead(services, pending,
+            callbackAnswer == 1)
+          terminal.state.clipboardReads.delete(0)
+          continue
+      return
+
+    if terminal.state.clipboardPromptId != pending.source.id:
+      terminal.state.clipboardPromptId = pending.source.id
+      terminal.state.clipboardPromptOpen = true
+      pending.promptText = services.readClipboard()
+    let choice = context.alertDialog(terminal.state.clipboardPromptOpen,
+      "Clipboard access", pending.clipboardReadMessage(), "Deny", "Allow")
+    if choice == ui.AlertDismissed or choice >= 0:
+      let allowed = choice == 1
+      terminal.finishClipboardRead(services, pending, allowed)
+      terminal.state.clipboardPromptId = 0
+      terminal.state.clipboardPromptOpen = false
+      terminal.state.clipboardReads.delete(0)
+      continue
+    return
+
 proc dispatchEvents(terminal: Terminal; services: ui.Services) =
   for event in terminal.session.takeEvents():
     case event.kind
@@ -483,6 +647,18 @@ proc dispatchEvents(terminal: Terminal; services: ui.Services) =
         terminal.options.onExit(event.exitCode)
     of terminalClipboardWrite:
       services.writeClipboard(event.clipboardText)
+    of terminalClipboardRead:
+      let source = event.clipboardRead
+      if source != nil:
+        var request = TerminalClipboardRequest(
+          list: source.list, primary: source.primary)
+        request.mimes = newSeq[string](source.mimes.len)
+        for index, mime in source.mimes:
+          request.mimes[index] = mime
+        request.resolve = proc(allowed: bool) =
+          terminal.session.resolveClipboardRead(source, allowed)
+        terminal.state.clipboardReads.add(PendingClipboardRead(
+          source: source, request: request))
     of terminalPwdChanged, terminalRenderHoldChanged, terminalReset,
         terminalNotification:
       discard
@@ -797,6 +973,7 @@ proc view*(context: ui.Context; terminal: Terminal): ui.Element =
   terminal.state.scrollbarWidth = uiTheme.scrollbarWidth
   terminal.session.setWake(proc() = services.invalidate())
   terminal.dispatchEvents(services)
+  terminal.answerClipboardReads(context, services)
   result = ui.box(context).direction(ui.Direction.LeftToRight).focusable()
     .focusRing(false).clip().label("Terminal")
   let focused = result.focused()

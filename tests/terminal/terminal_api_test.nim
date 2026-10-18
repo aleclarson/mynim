@@ -90,6 +90,143 @@ suite "native Terminal API":
       check terminal.waitForExit() == 0
       check terminal.failure().len == 0
 
+  test "allows OSC 52 reads through the UI clipboard service":
+    if getEnv("MYNIM_GHOSTTY_VT").len == 0:
+      skip()
+    when defined(windows):
+      skip()
+    else:
+      let script = "stty -echo -icanon min 0 time 10; " &
+        "printf '\\033]52;c;?\\033\\\\'; " &
+        "expected=$(printf '\\033]52;c;YWxsb3dlZA==\\033\\\\'); " &
+        "response=$(dd bs=1 count=${#expected} 2>/dev/null); " &
+        "stty icanon echo; test \"$response\" = \"$expected\""
+      let terminal = newTerminal(TerminalOptions(
+        command: @["/bin/sh", "-c", "read start; " & script],
+        clipboardRead: clipboardReadAllow))
+      defer: terminal.close()
+      let tester = ui.newTester(proc(c: ui.Context) =
+        discard view(c, terminal).size(800, 500)
+      , 800, 500)
+      defer: tester.close()
+      tester.setClipboard("allowed")
+      terminal.send("go\n")
+      for _ in 0 ..< 200:
+        tester.frame()
+        if terminal.processExitCode().isSome:
+          break
+        sleep(10)
+      check terminal.processExitCode().get() == 0
+      check terminal.failure().len == 0
+
+  test "asks the app before allowing an OSC 52 clipboard read":
+    if getEnv("MYNIM_GHOSTTY_VT").len == 0:
+      skip()
+    when defined(windows):
+      skip()
+    else:
+      let script = "stty -echo -icanon min 0 time 10; " &
+        "printf '\\033]52;c;?\\033\\\\'; " &
+        "expected=$(printf '\\033]52;c;Y2FsbGJhY2s=\\033\\\\'); " &
+        "response=$(dd bs=1 count=${#expected} 2>/dev/null); " &
+        "stty icanon echo; test \"$response\" = \"$expected\""
+      var callbackCount = 0
+      var options = defaultTerminalOptions()
+      options.command = @["/bin/sh", "-c", "read start; " & script]
+      options.clipboardRead = clipboardReadAsk
+      options.onClipboardRequest = proc(request: TerminalClipboardRequest) =
+        inc callbackCount
+        check request.mimes == @["text/plain"]
+        request.allow()
+      let terminal = newTerminal(options)
+      defer: terminal.close()
+      let tester = ui.newTester(proc(c: ui.Context) =
+        discard view(c, terminal).size(800, 500)
+      , 800, 500)
+      defer: tester.close()
+      tester.setClipboard("callback")
+      terminal.send("go\n")
+      for _ in 0 ..< 200:
+        tester.frame()
+        if terminal.processExitCode().isSome:
+          break
+        sleep(10)
+      check terminal.processExitCode().get() == 0
+      check terminal.failure().len == 0
+      check callbackCount == 1
+
+  test "shows a prompt for app-less clipboard read approval":
+    if getEnv("MYNIM_GHOSTTY_VT").len == 0:
+      skip()
+    when defined(windows):
+      skip()
+    else:
+      let expected = "\x1b]52;c;cHJvbXB0\x1b\\"
+      let script = "read start; stty -echo -icanon min 0 time 10; " &
+        "printf '\\033]52;c;?\\033\\\\'; " &
+        "expected='" & expected & "'; " &
+        "response=$(dd bs=1 count=${#expected} 2>/dev/null); " &
+        "stty icanon echo; test \"$response\" = \"$expected\""
+      let terminal = newTerminal(TerminalOptions(
+        command: @["/bin/sh", "-c", script],
+        clipboardRead: clipboardReadAsk))
+      defer: terminal.close()
+      let tester = ui.newTester(proc(c: ui.Context) =
+        discard view(c, terminal).size(800, 500)
+      , 800, 500)
+      defer: tester.close()
+      tester.setClipboard("prompt")
+      terminal.send("go\n")
+      var promptShown = false
+      for _ in 0 ..< 200:
+        tester.frame()
+        if tester.hasText("Clipboard access"):
+          promptShown = true
+          break
+        sleep(10)
+      check promptShown
+      check tester.click("Allow") == nil
+      for _ in 0 ..< 200:
+        tester.frame()
+        if terminal.processExitCode().isSome:
+          break
+        sleep(10)
+      check terminal.processExitCode().get() == 0
+      check terminal.failure().len == 0
+
+  test "answers Kitty clipboard reads with their requested MIME data":
+    if getEnv("MYNIM_GHOSTTY_VT").len == 0:
+      skip()
+    when defined(windows):
+      skip()
+    else:
+      let expected =
+        "\x1b]5522;type=read:status=OK:id=x\x1b\\" &
+        "\x1b]5522;type=read:status=DATA:id=x:mime=dGV4dC9wbGFpbg==;a2l0dHk=\x1b\\" &
+        "\x1b]5522;type=read:status=DONE:id=x\x1b\\"
+      let script = "read start; stty -echo -icanon min 0 time 20; " &
+        "printf '\\033]5522;type=read:id=x;dGV4dC9wbGFpbg==\\033\\\\'; " &
+        "expected='" & expected & "'; " &
+        "response=$(dd bs=1 count=${#expected} 2>/dev/null); " &
+        "stty icanon echo; test \"$response\" = \"$expected\""
+      let terminal = newTerminal(TerminalOptions(
+        command: @["/bin/sh", "-c", script],
+        clipboardRead: clipboardReadAllow))
+      defer: terminal.close()
+      let tester = ui.newTester(proc(c: ui.Context) =
+        discard view(c, terminal).size(800, 500)
+      , 800, 500)
+      defer: tester.close()
+      tester.setClipboard("kitty")
+      terminal.send("go\n")
+      for _ in 0 ..< 300:
+        tester.frame()
+        if terminal.processExitCode().isSome:
+          break
+        sleep(10)
+      check terminal.processExitCode().get() == 0
+      check terminal.failure().len == 0
+
   test "builds a GPU scene and sizes the PTY from the native view":
     if getEnv("MYNIM_GHOSTTY_VT").len == 0:
       skip()

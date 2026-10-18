@@ -38,6 +38,19 @@ type
     ctx*: pointer
     reply*: GhosttyClipboardWriteReplyFn
 
+  GhosttyClipboardReadReplyFn* = proc(read, reply: pointer) {.cdecl.}
+
+  GhosttyClipboardRead* {.bycopy.} = object
+    size*: csize_t
+    location*: int32
+    mimes*: ptr UncheckedArray[GhosttyString]
+    mimesLen*: csize_t
+    list*: bool
+    name*: GhosttyString
+    granted*, canRemember*: bool
+    ctx*: pointer
+    reply*: GhosttyClipboardReadReplyFn
+
   GhosttyTerminalDesktopNotification* {.bycopy.} = object
     size*: csize_t
     title*, body*: GhosttyString
@@ -75,6 +88,16 @@ static:
     6 * sizeof(pointer) + 1
   doAssert offsetOf(GhosttyClipboardWrite, ctx) == 7 * sizeof(pointer)
   doAssert offsetOf(GhosttyClipboardWrite, reply) == 8 * sizeof(pointer)
+  doAssert sizeof(GhosttyClipboardRead) == 10 * sizeof(pointer)
+  doAssert offsetOf(GhosttyClipboardRead, mimes) == 2 * sizeof(pointer)
+  doAssert offsetOf(GhosttyClipboardRead, mimesLen) == 3 * sizeof(pointer)
+  doAssert offsetOf(GhosttyClipboardRead, list) == 4 * sizeof(pointer)
+  doAssert offsetOf(GhosttyClipboardRead, name) == 5 * sizeof(pointer)
+  doAssert offsetOf(GhosttyClipboardRead, granted) == 7 * sizeof(pointer)
+  doAssert offsetOf(GhosttyClipboardRead, canRemember) ==
+    7 * sizeof(pointer) + 1
+  doAssert offsetOf(GhosttyClipboardRead, ctx) == 8 * sizeof(pointer)
+  doAssert offsetOf(GhosttyClipboardRead, reply) == 9 * sizeof(pointer)
   doAssert sizeof(GhosttyTerminalDesktopNotification) == 5 * sizeof(pointer)
   doAssert offsetOf(GhosttyTerminalDesktopNotification, title) == sizeof(pointer)
   doAssert offsetOf(GhosttyTerminalDesktopNotification, body) == 3 * sizeof(pointer)
@@ -200,6 +223,16 @@ proc parseManifest*(data: string): GhosttyManifest =
     sizeof(GhosttyClipboardWriteReply), [
       ("result", offsetOf(GhosttyClipboardWriteReply, result)),
       ("remember", offsetOf(GhosttyClipboardWriteReply, remember))])
+  requireLayout(types, "GhosttyClipboardRead", sizeof(GhosttyClipboardRead), [
+    ("location", offsetOf(GhosttyClipboardRead, location)),
+    ("mimes", offsetOf(GhosttyClipboardRead, mimes)),
+    ("mimes_len", offsetOf(GhosttyClipboardRead, mimesLen)),
+    ("list", offsetOf(GhosttyClipboardRead, list)),
+    ("name", offsetOf(GhosttyClipboardRead, name)),
+    ("granted", offsetOf(GhosttyClipboardRead, granted)),
+    ("can_remember", offsetOf(GhosttyClipboardRead, canRemember)),
+    ("ctx", offsetOf(GhosttyClipboardRead, ctx)),
+    ("reply", offsetOf(GhosttyClipboardRead, reply))])
   requireLayout(types, "GhosttyTerminalDesktopNotification",
     sizeof(GhosttyTerminalDesktopNotification), [
       ("title", offsetOf(GhosttyTerminalDesktopNotification, title)),

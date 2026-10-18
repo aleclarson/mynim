@@ -1,6 +1,6 @@
 ## A PTY process connected to a serialized Ghostty terminal and render state.
 
-import std/[locks, options, strutils, unicode]
+import std/[base64, locks, options, strutils, unicode]
 import ./pty
 import ./vt/[effects, encode, frame, input, library, render, selection, terminal]
 
@@ -13,13 +13,30 @@ type
     terminalReset,
     terminalNotification,
     terminalClipboardWrite,
+    terminalClipboardRead,
     terminalProcessExited
 
   TerminalEvent* = object
     kind*: TerminalEventKind
     title*, pwd*, body*, clipboardText*: string
+    clipboardRead*: ClipboardReadRequest
     held*: bool
     exitCode*: int
+
+  ClipboardReadPolicy* = enum
+    clipboardAccessDeny,
+    clipboardAccessAllow,
+    clipboardAccessAsk
+
+  ClipboardReadRequest* = ref object
+    id*: uint64
+    mimes*: seq[string]
+    list*, primary*: bool
+    text*: string
+    kitty: bool
+    kittyId, prefix, terminator, refusal: string
+    ready, suppressOnly, completed: bool
+    answer: int8
 
   TerminalWake* = proc() {.closure.}
   TerminalNotify = proc(title, body: string) {.closure.}
@@ -47,6 +64,9 @@ type
     wake: TerminalWake
     onNotify: TerminalNotify
     noClipboardWrite: bool
+    clipboardReadPolicy: ClipboardReadPolicy
+    capturingClipboardRead: ClipboardReadRequest
+    nextClipboardReadId: uint64
     renderHeld: bool
     heldFrame: Option[TerminalFrame]
     cols, rows, cellWidth, cellHeight: int
@@ -117,6 +137,82 @@ proc queueInput(session: TerminalSession; data: openArray[byte];
   session.inputGuard.release()
   true
 
+proc rawString(data: ptr UncheckedArray[byte]; length: csize_t): string =
+  if data.isNil or length == 0 or uint64(length) > uint64(high(int)):
+    return
+  result = newString(int(length))
+  copyMem(addr result[0], data, result.len)
+
+proc copyGhosttyString(value: GhosttyString; valid: var bool): string
+
+proc parseClipboardRefusal(request: ClipboardReadRequest;
+                           response: string): bool =
+  if response.startsWith("\x1b]52;"):
+    let first = response.find(';')
+    if first < 0:
+      return false
+    let secondRel = response.find(';', first + 1)
+    if secondRel < 0:
+      return false
+    let second = secondRel
+    request.kitty = false
+    request.prefix = response[0 .. second]
+    request.terminator = response[second + 1 .. ^1]
+    request.refusal = response
+    return true
+  if not response.startsWith("\x1b]5522;type=read:status="):
+    return false
+  request.kitty = true
+  request.refusal = response
+  if response.endsWith("\x1b\\"):
+    request.terminator = "\x1b\\"
+  elif response.endsWith("\x07"):
+    request.terminator = "\x07"
+  else:
+    request.terminator = "\x1b\\"
+  request.kittyId.setLen(0)
+  let marker = response.find(":id=")
+  if marker >= 0:
+    let start = marker + 4
+    var finish = response.len
+    for index in start ..< response.len:
+      if response[index] == ':' or response[index] == '\x1b' or
+          response[index] == '\x07':
+        finish = index
+        break
+    if finish > start:
+      request.kittyId = response[start ..< finish]
+  true
+
+proc copyBytes(value: string): seq[byte] =
+  result = newSeq[byte](value.len)
+  for index, character in value:
+    result[index] = byte(character)
+
+proc copyClipboardRead(session: TerminalSession;
+                       request: ptr GhosttyClipboardRead):
+    ClipboardReadRequest =
+  if request.isNil or request.size < csize_t(sizeof(GhosttyClipboardRead)):
+    return
+  if uint64(request.mimesLen) > uint64(high(int)) or
+      (request.mimesLen > 0 and request.mimes.isNil):
+    return
+  inc session.nextClipboardReadId
+  if session.nextClipboardReadId == 0:
+    inc session.nextClipboardReadId
+  result = ClipboardReadRequest(
+    id: session.nextClipboardReadId,
+    list: request.list,
+    primary: request.location != clipboardLocationStandard,
+    suppressOnly: request.canRemember)
+  if request.mimesLen > 0:
+    for mime in request.mimes.toOpenArray(0, int(request.mimesLen) - 1):
+      var valid = true
+      let copied = copyGhosttyString(mime, valid)
+      if not valid:
+        return nil
+      result.mimes.add(copied)
+
 proc onWritePty(rawTerminal, userdata: pointer;
                 data: ptr UncheckedArray[byte]; length: csize_t) {.cdecl.} =
   discard rawTerminal
@@ -125,6 +221,16 @@ proc onWritePty(rawTerminal, userdata: pointer;
       uint64(length) > uint64(high(int)):
     return
   try:
+    let pending = session.capturingClipboardRead
+    if pending != nil:
+      let response = rawString(data, length)
+      session.capturingClipboardRead = nil
+      if pending.parseClipboardRefusal(response):
+        pending.ready = true
+        if not pending.suppressOnly:
+          session.addEvent(TerminalEvent(kind: terminalClipboardRead,
+            clipboardRead: pending))
+        return
     discard session.queueInput(toOpenArray(data, 0, int(length) - 1), true)
   except CatchableError as error:
     session.recordInputError(error.msg)
@@ -256,11 +362,130 @@ proc onClipboardWrite(rawTerminal, userdata: pointer;
       session.recordInputError(error.msg)
   replyFn(request, addr reply)
 
-proc onClipboardReadDenied(rawTerminal, userdata, request: pointer) {.cdecl.} =
-  ## Leave reads unanswered so Ghostty emits the protocol's denied response.
+proc onClipboardRead(rawTerminal, userdata: pointer;
+                     request: ptr GhosttyClipboardRead) {.cdecl.} =
+  ## Leave denied reads to Ghostty. Allowed reads defer its refusal until
+  ## the UI thread has read the clipboard and can encode the response.
   discard rawTerminal
-  discard userdata
-  discard request
+  let session = cast[TerminalSession](userdata)
+  if session.isNil or request.isNil or request.size <
+      csize_t(sizeof(GhosttyClipboardRead)):
+    return
+  if session.clipboardReadPolicy == clipboardAccessDeny and
+      not request.canRemember:
+    return
+  try:
+    let pending = session.copyClipboardRead(request)
+    if pending == nil:
+      return
+    pending.suppressOnly = request.canRemember
+    session.capturingClipboardRead = pending
+  except CatchableError as error:
+    session.recordInputError(error.msg)
+
+proc stringFromBytes(data: openArray[byte]): string =
+  result = newString(data.len)
+  for index, value in data:
+    result[index] = char(value)
+
+proc clipboardBytes(contents: openArray[(string, seq[byte])];
+                    mime: string): seq[byte] =
+  for (name, data) in contents:
+    if name == mime:
+      return data
+
+proc kittyClipboardAnswer(request: ClipboardReadRequest;
+    contents: openArray[(string, seq[byte])]; available: openArray[string]):
+    string =
+  proc packet(status: string; primaryLocation = false): string =
+    result = "\x1b]5522;type=read:status=" & status
+    if primaryLocation and request.primary:
+      result.add(":loc=primary")
+    if request.kittyId.len > 0:
+      result.add(":id=" & request.kittyId)
+
+  let terminator = if request.terminator.len > 0:
+      request.terminator else: "\x1b\\"
+  result.add(packet("OK", primaryLocation = true))
+  result.add(terminator)
+  if request.list:
+    result.add(packet("DATA"))
+    result.add(":mime=" & base64.encode("."))
+    var listed: string
+    for mime in available:
+      let separator = if listed.len > 0: 1 else: 0
+      if listed.len + separator + mime.len + 1 > 4096:
+        break
+      if separator > 0:
+        listed.add(' ')
+      listed.add(mime)
+    listed.add('\n')
+    if listed.len > 1:
+      result.add(';' & base64.encode(listed))
+    result.add(terminator)
+  for mime in request.mimes:
+    let data = clipboardBytes(contents, mime)
+    var offset = 0
+    while offset < data.len:
+      let finish = min(offset + 4096, data.len)
+      result.add(packet("DATA"))
+      result.add(":mime=" & base64.encode(mime) & ";")
+      result.add(base64.encode(stringFromBytes(data.toOpenArray(offset,
+        finish - 1))))
+      result.add(terminator)
+      offset = finish
+  result.add(packet("DONE"))
+  result.add(terminator)
+
+proc clipboardAnswer(request: ClipboardReadRequest; allowed: bool;
+    contents: openArray[(string, seq[byte])]; available: openArray[string]):
+    seq[byte] =
+  var response: string
+  if not allowed:
+    response = request.refusal
+  elif request.kitty:
+    response = kittyClipboardAnswer(request, contents, available)
+  else:
+    response = request.prefix &
+      base64.encode(stringFromBytes(clipboardBytes(contents, "text/plain"))) &
+      request.terminator
+  copyBytes(response)
+
+proc clipboardReadAnswer*(session: TerminalSession;
+                          request: ClipboardReadRequest): int8 =
+  if session.isNil or request.isNil:
+    return
+  session.terminalGuard.acquire()
+  if request.completed:
+    result = -1
+  else:
+    result = request.answer
+  session.terminalGuard.release()
+
+proc resolveClipboardRead*(session: TerminalSession;
+    request: ClipboardReadRequest; allowed: bool) =
+  if session.isNil or request.isNil:
+    return
+  var wake = false
+  session.terminalGuard.acquire()
+  if not request.completed and request.answer == 0:
+    request.answer = if allowed: 1'i8 else: 2'i8
+    wake = true
+  session.terminalGuard.release()
+  if wake:
+    session.signalWake()
+
+proc answerClipboardRead*(session: TerminalSession;
+    request: ClipboardReadRequest; allowed: bool;
+    contents: openArray[(string, seq[byte])]; available: openArray[string]) =
+  if session.isNil or request.isNil:
+    return
+  session.terminalGuard.acquire()
+  if request.ready and not request.completed:
+    let response = request.clipboardAnswer(allowed, contents, available)
+    discard session.queueInput(response, false)
+    request.completed = true
+  session.terminalGuard.release()
 
 proc onDesktopNotification(rawTerminal, userdata: pointer;
     notification: ptr GhosttyTerminalDesktopNotification) {.cdecl.} =
@@ -290,7 +515,7 @@ proc sessionCallbacks(): TerminalCallbacks =
     renderHold: onRenderHold,
     reset: onReset,
     clipboardWrite: onClipboardWrite,
-    clipboardRead: onClipboardReadDenied,
+    clipboardRead: onClipboardRead,
     desktopNotification: onDesktopNotification)
 
 proc dispatchNotifications(session: TerminalSession) =
@@ -438,6 +663,7 @@ proc newTerminalSession*(library: GhosttyVT; process: PtyOptions;
     terminfoName = "xterm-256color";
     scrollbackMaxBytes = defaultScrollbackBytes;
     noClipboardWrite = false;
+    clipboardReadPolicy = clipboardAccessDeny;
     onNotify: TerminalNotify = nil): TerminalSession =
   ## Starts a PTY-backed Ghostty terminal and its input/output workers.
   if library.isNil:
@@ -459,6 +685,7 @@ proc newTerminalSession*(library: GhosttyVT; process: PtyOptions;
   result.cellWidth = cellWidth
   result.cellHeight = cellHeight
   result.noClipboardWrite = noClipboardWrite
+  result.clipboardReadPolicy = clipboardReadPolicy
   result.onNotify = onNotify
 
   try:
