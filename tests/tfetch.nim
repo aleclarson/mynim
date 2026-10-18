@@ -1,5 +1,5 @@
-import std/[asyncdispatch, asynchttpserver, asyncnet, envvars, httpclient,
-            httpcore, strutils, uri]
+import std/[asyncdispatch, asynchttpserver, asyncnet, asyncstreams, envvars,
+            httpclient, httpcore, strutils, uri]
 import mynim as core
 import mynim/internal/ctx
 import mynim/plugins/fetch as fetchPlugin
@@ -237,6 +237,43 @@ block request_body_and_headers_are_sent:
   doAssert parts.len == 2
   doAssert parts[0].status == 201
   doAssert parts[1].chunk == "PATCH:payload:sent"
+
+block custom_transport_receives_extension_methods_and_streams_response:
+  var received: TransportRequest
+  var calls = 0
+  proc roundTrip(request: TransportRequest; ctx: CancelCtx):
+      Future[AsyncResponse] {.async.} =
+    received = request
+    inc calls
+    let stream = newFutureStream[string]("testFetchTransport")
+    await stream.write(request.httpMethod & ":" & request.body & ":" &
+      request.headers.getOrDefault("x-check"))
+    stream.complete()
+    return AsyncResponse(version: "HTTP/1.1", status: "207 Multi-Status",
+      headers: newHttpHeaders([("X-Transport", "custom")]), bodyStream: stream)
+
+  let options = Options(transport: roundTrip)
+  let (parts, err) = run(service.Request(url: "http://example.invalid/custom",
+    httpMethod: "PROPFIND", headers: @[Header(name: "X-Check", value: "sent")],
+    body: "payload", hasBody: true, redirect: "follow"), options)
+  doAssert err == nil
+  doAssert received.url == parseUri("http://example.invalid/custom")
+  doAssert received.httpMethod == "PROPFIND"
+  doAssert received.hasBody
+  doAssert received.headers.getOrDefault("x-check") == "sent"
+  doAssert parts.len == 2
+  doAssert parts[0].status == 207
+  doAssert Header(name: "x-transport", value: "custom") in parts[0].headers
+  doAssert parts[1].chunk == "PROPFIND:payload:sent"
+  doAssert calls == 1
+
+  let (invalidParts, invalidError) = run(service.Request(
+    url: "http://example.invalid/custom", httpMethod: "PROPFIND\r\nX-Evil: yes",
+    redirect: "follow"), options)
+  doAssert invalidParts.len == 0
+  doAssert invalidError != nil
+  doAssert "invalid HTTP method" in invalidError.msg
+  doAssert calls == 1
 
 block configured_proxy_receives_absolute_http_target:
   let proxied = Options(proxy: newProxy(origin))

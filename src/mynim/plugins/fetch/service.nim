@@ -18,6 +18,14 @@ type
     hasBody*: bool
     redirect*: string
 
+  TransportRequest* = object
+    ## One HTTP hop after Mynim has applied cookies and redirect policy.
+    url*: Uri
+    httpMethod*: string
+    headers*: HttpHeaders
+    body*: string
+    hasBody*: bool
+
   Part* = object
     ## The response head first, followed by parts with raw body bytes.
     status*: int
@@ -28,6 +36,8 @@ type
 
   SendPart* = proc(part: Part): ref CatchableError {.closure.}
   AllowRequest* = proc(request: Request): bool {.closure.}
+  RoundTrip* = proc(request: TransportRequest; ctx: core.CancelCtx):
+      Future[AsyncResponse] {.closure.}
 
   CookieJar* = object
     ## Returns `name=value` pairs to send for a request URL.
@@ -36,6 +46,11 @@ type
     store*: proc(url: Uri; setCookieHeaders: seq[string]) {.closure.}
 
   Options* = object
+    ## Performs each HTTP hop. The transport owns proxy selection, network
+    ## resources, and cancellation; it must observe ctx and return a response
+    ## whose bodyStream remains readable until consumed. When set, it takes
+    ## precedence over clientFactory and proxy.
+    transport*: RoundTrip
     ## Creates a new client per fetch call. The plugin closes it afterward.
     ## Leave nil to use Nim's default client. A custom factory must set
     ## maxRedirects=0. A custom factory configures its own proxy and does not
@@ -167,6 +182,15 @@ proc httpMethod(value: string): HttpMethod =
     raise newException(ValueError,
       "fetch: unsupported HTTP method " & value.escape())
 
+proc isHttpToken(value: string): bool =
+  if value.len == 0:
+    return false
+  for ch in value:
+    if not (ch in {'A'..'Z', 'a'..'z', '0'..'9'} or
+        ch in "!#$%&'*+-.^_`|~"):
+      return false
+  true
+
 proc redirectUrl(base: Uri; location: string): Uri =
   let reference = parseUri(location)
   if reference.scheme.len == 0:
@@ -183,12 +207,12 @@ proc waitCancelable[T](future: Future[T]; client: AsyncHttpClient;
   ## closing the socket also unregisters it from the right event dispatcher.
   while not future.finished:
     if ctx.done():
-      client.close()
+      if client != nil: client.close()
       raise (if ctx.err() != nil: ctx.err() else:
         newException(ValueError, "fetch: request canceled"))
     await sleepAsync(cancelPollMs)
   if ctx.done():
-    client.close()
+    if client != nil: client.close()
     raise (if ctx.err() != nil: ctx.err() else:
       newException(ValueError, "fetch: request canceled"))
   return future.read()
@@ -230,6 +254,9 @@ proc fetchAsync(options: Options; request: Request; ctx: core.CancelCtx;
       "fetch: unsupported URL scheme " & current.scheme.escape())
   if request.httpMethod.len == 0:
     raise newException(ValueError, "fetch: method cannot be empty")
+  if not isHttpToken(request.httpMethod):
+    raise newException(ValueError,
+      "fetch: invalid HTTP method " & request.httpMethod.escape())
   if request.redirect notin ["follow", "manual", "error"]:
     raise newException(ValueError,
       "fetch: invalid redirect mode " & request.redirect.escape())
@@ -246,7 +273,7 @@ proc fetchAsync(options: Options; request: Request; ctx: core.CancelCtx;
     raise (if ctx.err() != nil: ctx.err() else:
       newException(ValueError, "fetch: request canceled"))
 
-  let usesDefaultClient = options.clientFactory == nil
+  let usesDefaultClient = options.transport == nil and options.clientFactory == nil
   let environment = if usesDefaultClient and options.proxy == nil:
       fetchEnvProxy.fromEnvironment()
     else:
@@ -259,17 +286,21 @@ proc fetchAsync(options: Options; request: Request; ctx: core.CancelCtx;
     else:
       nil
   var activeProxy = if usesDefaultClient: proxyFor(current) else: nil
-  var client = if usesDefaultClient:
-      newAsyncHttpClient(maxRedirects = 0, proxy = activeProxy)
-    else:
-      options.clientFactory()
-  if client == nil:
-    raise newException(ValueError, "fetch: client factory returned nil")
-  defer: client.close()
+  var client: AsyncHttpClient
+  if options.transport == nil:
+    client = if usesDefaultClient:
+        newAsyncHttpClient(maxRedirects = 0, proxy = activeProxy)
+      else:
+        options.clientFactory()
+    if client == nil:
+      raise newException(ValueError, "fetch: client factory returned nil")
+  defer:
+    if client != nil: client.close()
 
   var headers = toHttpHeaders(request.headers)
   var httpVerb = request.httpMethod
   var body = if request.hasBody: request.body else: ""
+  var hasBody = request.hasBody
   var redirected = false
   var redirects = 0
   let redirectLimit =
@@ -282,8 +313,20 @@ proc fetchAsync(options: Options; request: Request; ctx: core.CancelCtx;
         newException(ValueError, "fetch: request canceled"))
     var requestHeaders = copyHeaders(headers)
     addJarCookies(requestHeaders, options.cookieJar, current)
-    response = await waitCancelable(
-      client.request(current, httpMethod(httpVerb), body, requestHeaders), client, ctx)
+    if options.transport != nil:
+      let transportRequest = TransportRequest(url: current, httpMethod: httpVerb,
+        headers: requestHeaders, body: body, hasBody: hasBody)
+      let pending = options.transport(transportRequest, ctx)
+      if pending == nil:
+        raise newException(ValueError,
+          "fetch: transport returned no response future")
+      response = await waitCancelable(pending, client, ctx)
+      if response == nil or response.bodyStream == nil:
+        raise newException(ValueError,
+          "fetch: transport returned an incomplete response")
+    else:
+      response = await waitCancelable(
+        client.request(current, httpMethod(httpVerb), body, requestHeaders), client, ctx)
     let status = int(response.code)
     if options.cookieJar.store != nil:
       var setCookieHeaders: seq[string]
@@ -318,6 +361,7 @@ proc fetchAsync(options: Options; request: Request; ctx: core.CancelCtx;
     if status in [301, 302, 303] and httpVerb.toUpperAscii() notin ["GET", "HEAD"]:
       httpVerb = "GET"
       body = ""
+      hasBody = false
       headers.del("content-type")
       headers.del("transfer-encoding")
     await readAndDiscard(response, client, ctx)

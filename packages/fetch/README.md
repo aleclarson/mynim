@@ -26,6 +26,13 @@ When `clientFactory` is set, configure the proxy on the client it returns.
 Otherwise, a nil `Options.proxy` uses the `http_proxy`/`HTTP_PROXY`,
 `https_proxy`/`HTTPS_PROXY`, and `no_proxy`/`NO_PROXY` environment variables;
 localhost and loopback targets bypass those proxies.
+For full control of HTTP I/O, `Options.transport` supplies a round-trip callback
+for each redirect hop. It receives the resolved URL, validated method token,
+headers, and body, then returns an `AsyncResponse` with a readable body stream.
+This supports extension methods such as `PROPFIND`. The custom transport owns
+proxy selection and must observe the supplied cancellation context; Mynim still
+applies redirect and cookie policy and streams the returned response. When set,
+it takes precedence over `clientFactory` and `proxy`.
 An app can also provide `Options.cookieJar` callbacks: `cookies(url)` returns
 `name=value` request cookies, and `store(url, setCookieHeaders)` receives each
 raw `Set-Cookie` response field. The app owns matching, expiry, and persistence.
