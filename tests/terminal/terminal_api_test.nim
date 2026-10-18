@@ -321,15 +321,43 @@ suite "native Terminal API":
       check tester.chooseMenuItem("Paste") == nil
       check terminal.waitForExit() == 0
 
+  test "pastes clipboard on configured right-click":
+    if getEnv("MYNIM_GHOSTTY_VT").len == 0:
+      skip()
+    when defined(windows):
+      skip()
+    else:
+      var options = defaultTerminalOptions()
+      options.command = @[
+        "/bin/bash", "-c",
+        "read -t 5 -r value || exit 98; test \"$value\" = m || exit 99; " &
+        "read -t 30 -n 6 -r value || exit 98; test \"$value\" = pasted"]
+      options.rightClick = rightClickPaste
+      let terminal = newTerminal(options)
+      defer: terminal.close()
+      let tester = ui.newTester(proc(c: ui.Context) =
+        discard view(c, terminal).size(800, 500)
+      , 800, 500)
+      defer: tester.close()
+      tester.setFocused(true)
+      tester.clickAt(20, 20)
+      tester.typeKey(0, ui.keyM, "m")
+      tester.key(0, ui.keyEnter)
+      tester.setClipboard("pasted")
+      tester.rightClickAt(30, 20)
+      check terminal.waitForExit() == 0
+
   test "selects terminal output and copies it through UI commands":
     if getEnv("MYNIM_GHOSTTY_VT").len == 0:
       skip()
     when defined(windows):
       skip()
     else:
-      let terminal = newTerminal(TerminalOptions(command: @[
-        "/bin/sh", "-c", "printf hello"],
-        copyOnSelect: copyOnSelectClipboard))
+      var options = defaultTerminalOptions()
+      options.command = @["/bin/sh", "-c", "printf hello"]
+      options.copyOnSelect = copyOnSelectClipboard
+      options.rightClick = rightClickCopy
+      let terminal = newTerminal(options)
       defer: terminal.close()
       check terminal.waitForExit() == 0
       let tester = ui.newTester(proc(c: ui.Context) =
@@ -350,6 +378,9 @@ suite "native Terminal API":
       tester.press(10, 12)
       tester.move(50, 12)
       tester.release(50, 12)
+      check tester.clipboard() == "hello"
+      tester.setClipboard("stale")
+      tester.rightClickAt(30, 20)
       check tester.clipboard() == "hello"
 
   test "drags the terminal scrollbar to older output":

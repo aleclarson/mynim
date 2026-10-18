@@ -19,6 +19,18 @@ type
     ## Copy the selected text to the system clipboard.
     copyOnSelectClipboard
 
+  TerminalRightClickAction* = enum
+    ## Show the native Copy/Paste/Select All context menu.
+    rightClickContextMenu,
+    ## Paste clipboard text when the pointer secondary-clicks.
+    rightClickPaste,
+    ## Copy selected text and clear the selection.
+    rightClickCopy,
+    ## Copy a selection, or paste when there is no selection.
+    rightClickCopyOrPaste,
+    ## Consume the secondary click without an action.
+    rightClickIgnore
+
   TerminalClipboardAccess* = enum
     ## Program reads are refused by default.
     clipboardReadDeny,
@@ -61,6 +73,7 @@ type
     font*: TerminalPaintOptions
     scrollbackMaxBytes*: int
     copyOnSelect*: TerminalCopyOnSelect
+    rightClick*: TerminalRightClickAction
     noBlink*, optionAsAlt*: bool
     ## Prevents terminal programs from writing to the system clipboard.
     noClipboardWrite*: bool
@@ -857,6 +870,22 @@ proc handleInput(terminal: Terminal; services: ui.Services;
         terminal.state.pointerPressed)
       if event.kind == ui.InputKind.InputPointerMove:
         return sent
+      return true
+
+    if event.button == 1 and event.kind in {
+        ui.InputKind.InputPointerDown, ui.InputKind.InputPointerUp} and
+        terminal.options.rightClick != rightClickContextMenu:
+      if event.kind == ui.InputKind.InputPointerDown:
+        case terminal.options.rightClick
+        of rightClickPaste:
+          terminal.pasteClipboard(services)
+        of rightClickCopy:
+          discard terminal.copySelection(services, clear = true)
+        of rightClickCopyOrPaste:
+          if not terminal.copySelection(services, clear = true):
+            terminal.pasteClipboard(services)
+        of rightClickContextMenu, rightClickIgnore:
+          discard
       return true
 
     if event.kind == ui.InputKind.InputPointerDown and event.button == 0:
