@@ -500,7 +500,8 @@ proc newListState*(estimatedRowHeight = 28'f32; rowGap = 0'f32;
                    rowLabel: ListRowLabel = nil;
                    rowHeader: ListRowHeader = nil;
                    reorder: ListRowReorder = nil;
-                   cellSelect = false): ListState =
+                   cellSelect = false;
+                   dragSelect = false): ListState =
   ## Creates persistent state for a virtualized list.
   ##
   ## rowKey should return a stable, unique key for each logical row. When a
@@ -510,7 +511,8 @@ proc newListState*(estimatedRowHeight = 28'f32; rowGap = 0'f32;
   ## and type-to-select. select also enables keyboard selection.
   ## followEnd starts at and follows the end until the user scrolls away.
   ## multiSelectable enables multi-row selection and modifier handling;
-  ## cellSelect also enables it and lets a Table choose column blocks. rowKey
+  ## cellSelect also enables it and lets a Table choose column blocks;
+  ## dragSelect also enables it and chooses a row range by dragging. rowKey
   ## keeps those choices with their rows as they move.
   ## rowLabel names rows for accessibility and enables type-to-select.
   ## rowHeader marks section headers, which stay pinned while their rows scroll
@@ -533,9 +535,10 @@ proc newListState*(estimatedRowHeight = 28'f32; rowGap = 0'f32;
   result.rowReorder = reorder
   result.keepOffset = keepOffset
   result.selectionEnabled = selectable or multiSelectable or cellSelect or
-    rowLabel != nil
-  result.multiSelectionEnabled = multiSelectable or cellSelect
+    dragSelect or rowLabel != nil
+  result.multiSelectionEnabled = multiSelectable or cellSelect or dragSelect
   result.cellSelectEnabled = cellSelect
+  result.dragSelectEnabled = dragSelect
   result.followEnd = followEnd
   result.selectedRow = -1
   result.editRow = -1
@@ -643,6 +646,69 @@ proc enableCellSelection*(state: ListState): ListState =
   state.multiSelectionEnabled = true
   state.cellSelectEnabled = true
   state
+
+proc enableDragSelection*(state: ListState): ListState =
+  ## Enables row-range selection by dragging across a list or table.
+  if state == nil:
+    raise newException(ValueError, "ui: list state cannot be nil")
+  if not state.multiSelectionEnabled and state.selectedRow >= 0:
+    discard state.setListRowSelected(state.selectedRow, true)
+  state.selectionEnabled = true
+  state.multiSelectionEnabled = true
+  state.dragSelectEnabled = true
+  state
+
+proc beginListDragSelect(state: ListState; row: int; identity: uint64;
+                         x, y: float32; mods: platform.Modifiers): bool =
+  if state == nil or (not state.dragSelectEnabled and
+      not state.cellSelectEnabled) or row < 0 or row >= state.rowCount or
+      state.isListHeader(row):
+    return false
+  state.dragSelectCandidate = true
+  state.dragSelectActive = false
+  state.dragSelectPressHandled = false
+  state.dragSelectOrigin = row
+  state.dragSelectLastRow = -1
+  state.dragSelectOriginIdentity = identity
+  state.dragSelectPressX = x
+  state.dragSelectPressY = y
+  state.dragSelectPressMods = mods
+  state.dragSelectFromColumn.setLen(0)
+  true
+
+proc startListDragSelect(state: ListState): bool =
+  if state == nil or not state.dragSelectCandidate or state.dragSelectActive:
+    return false
+  when defined(macosx):
+    const commandMask = platform.modSuper
+  else:
+    const commandMask = platform.modCtrl
+  state.dragSelectAdd = (state.dragSelectPressMods and commandMask) != 0
+  let extend = (state.dragSelectPressMods and platform.modShift) != 0
+  if not extend:
+    if state.dragSelectAdd:
+      if not state.listRowIsSelected(state.dragSelectOrigin):
+        discard state.setListRowSelected(state.dragSelectOrigin, true)
+      state.setListCursor(state.dragSelectOrigin, pivot = true)
+    else:
+      state.select(state.dragSelectOrigin)
+  state.dragSelectActive = true
+  true
+
+proc finishListDragSelect(state: ListState) =
+  if state == nil:
+    return
+  state.dragSelectCandidate = false
+  state.dragSelectActive = false
+  state.dragSelectAdd = false
+  state.dragSelectPressHandled = false
+  state.dragSelectLastRow = -1
+  state.dragSelectOriginIdentity = 0
+  state.dragSelectFromColumn.setLen(0)
+
+proc dragSelecting*(state: ListState): bool =
+  ## Reports whether this list or table currently has an active drag selection.
+  state != nil and state.dragSelectActive
 
 proc isSelected*(state: ListState; row: int): bool =
   ## Reports whether row belongs to this list's multi-selection.

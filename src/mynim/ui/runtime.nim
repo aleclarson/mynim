@@ -25,7 +25,7 @@ type
     focusGroupLast: Table[uint64, uint64]
     modalFocusReturns: Table[uint64, uint64]
     activeModalIdentity: uint64
-    listReorder, tableReorder: ListState
+    listReorder, tableReorder, dragSelectState: ListState
     gridReorder: GridState
     pointerCursor: platform.Cursor
     hasPointerCursor: bool
@@ -1990,6 +1990,8 @@ proc sliderKey(rt: Runtime; key: platform.Key;
   true
 
 proc autoScrollListReorder(rt: Runtime; state: ListState): bool
+proc autoScrollListDragSelect(rt: Runtime; state: ListState): bool
+proc cancelListDragSelect(rt: Runtime)
 proc gridReorderTarget(rt: Runtime; state: GridState)
 proc autoScrollGridReorder(rt: Runtime; state: GridState): bool
 proc paintLocalDrag(rt: Runtime; frame: var scene.Scene)
@@ -2252,6 +2254,16 @@ proc renderFrame(rt: Runtime; presentFrame = true) =
   rt.applyModalFocus(layout, previousFocusIdentity)
   rt.frameLayout = layout
   rt.updatePointerCursor()
+  if presentFrame and rt.dragSelectState != nil:
+    let state = rt.dragSelectState
+    if state.frameOwner == cast[pointer](layout.owner) and
+        state.generation == layout.generation:
+      if layout.updateListDragSelect(state, rt.pointerX, rt.pointerY):
+        rt.requestFrame()
+      if rt.autoScrollListDragSelect(state):
+        rt.requestFrame()
+    else:
+      rt.cancelListDragSelect()
   if presentFrame and rt.listReorder != nil and
       rt.listReorder.reorderDragging and rt.autoScrollListReorder(rt.listReorder):
     rt.requestFrame()
@@ -2358,6 +2370,11 @@ proc cancelListReorder(rt: Runtime) =
     rt.listReorder.cancelListReorder()
     rt.listReorder = nil
 
+proc cancelListDragSelect(rt: Runtime) =
+  if rt.dragSelectState != nil:
+    rt.dragSelectState.finishListDragSelect()
+    rt.dragSelectState = nil
+
 proc cancelGridReorder(rt: Runtime) =
   if rt.gridReorder != nil:
     rt.gridReorder.cancelGridReorder()
@@ -2382,6 +2399,36 @@ proc beginListReorder(rt: Runtime; target: Element) =
       if ok and node.listState.beginListReorder(node.listRowIndex, x, y):
         rt.listReorder = node.listState
         return
+    slot = int(node.parent)
+
+proc beginListDragSelect(rt: Runtime; target: Element; mods: platform.Modifiers) =
+  rt.cancelListDragSelect()
+  if rt.pointerDraggableIdentity != 0 or target.owner == nil or
+      target.owner != rt.frameLayout.owner:
+    return
+  var slot = int(target.slot)
+  while slot > 0 and slot < target.owner.nodes.len:
+    let node = target.owner.nodes[slot]
+    if node.listState != nil and node.listRowIndex >= 0 and
+        not node.listRowHeader and not node.listRowAction:
+      if target.owner.textInputSlot(slot) >= 0:
+        return
+      if node.listState.beginListDragSelect(node.listRowIndex, node.identity,
+          rt.pressX, rt.pressY, mods):
+        let state = node.listState
+        rt.dragSelectState = state
+        let column = rt.frameLayout.tableColumnAt(state,
+          rt.pressX, rt.pressY)
+        let alreadyChosen = if state.cellSelectEnabled and column >= 0:
+            state.cellSelected(node.listRowIndex, column)
+          else:
+            state.isSelected(node.listRowIndex)
+        if not alreadyChosen:
+          state.clickListRow(node.listRowIndex, mods)
+          rt.frameLayout.clickTableCell(state, rt.pressX, rt.pressY, mods)
+          state.dragSelectPressHandled = true
+          rt.requestFrame()
+      return
     slot = int(node.parent)
 
 proc beginGridReorder(rt: Runtime; target: Element) =
@@ -2599,6 +2646,49 @@ proc autoScrollListReorder(rt: Runtime; state: ListState): bool =
   scroll.stopScrollMotion()
   scroll.offsetY = min(max(old + delta, 0'f32), scroll.maxY)
   scroll.offsetY != old
+
+proc autoScrollListDragSelect(rt: Runtime; state: ListState): bool =
+  if state == nil or not state.dragSelectActive or not rt.hasPointer or
+      rt.frameLayout.owner == nil:
+    return false
+  let slot = int(state.frameSlot)
+  let owner = rt.frameLayout.owner
+  if slot <= 0 or slot >= owner.nodes.len or
+      state.frameOwner != cast[pointer](owner) or
+      state.generation != rt.frameLayout.generation:
+    return false
+  let node = owner.nodes[slot]
+  let scroll = node.scrollState
+  if scroll == nil:
+    return false
+  let (x, y, valid) = rt.frameLayout.localPoint(slot,
+    rt.pointerX, rt.pointerY)
+  if not valid:
+    return false
+  let rect = rt.frameLayout.rects[slot]
+  const edge = 32'f32
+  let speed = proc(at, size: float32): float32 =
+    if at < edge:
+      -min(edge - at, edge * 2) / 2
+    elif at > size - edge:
+      min(at - (size - edge), edge * 2) / 2
+    else:
+      0'f32
+  var dx, dy: float32
+  if state.cellSelectEnabled and node.scrollX:
+    dx = speed(x - rect.x, rect.w)
+    if node.rightToLeft:
+      dx = -dx
+  if node.scrollY:
+    dy = speed(y - rect.y, rect.h)
+  if dx == 0 and dy == 0:
+    return false
+  scroll.stopScrollMotion()
+  let oldX = scroll.offsetX
+  let oldY = scroll.offsetY
+  scroll.offsetX = min(max(oldX + dx, 0'f32), scroll.maxX)
+  scroll.offsetY = min(max(oldY + dy, 0'f32), scroll.maxY)
+  scroll.offsetX != oldX or scroll.offsetY != oldY
 
 proc gridReorderTarget(rt: Runtime; state: GridState) =
   let owner = rt.frameLayout.owner
@@ -3264,6 +3354,17 @@ proc event(rt: Runtime; ev: platform.SurfaceEvent): bool =
       return false
     rt.updatePointerDraggable()
     rt.refreshPointer()
+    if rt.dragSelectState != nil:
+      let state = rt.dragSelectState
+      if state.frameOwner == cast[pointer](rt.frameLayout.owner) and
+          state.generation == rt.frameLayout.generation:
+        if rt.frameLayout.updateListDragSelect(state,
+            rt.pointerX, rt.pointerY):
+          rt.requestFrame()
+        if rt.autoScrollListDragSelect(state):
+          rt.requestFrame()
+      else:
+        rt.cancelListDragSelect()
     if moved and rt.pressTarget.owner == nil:
       let handlerSlot = rt.frameLayout.inputHandlerAt(rt.pointerX,
         rt.pointerY)
@@ -3319,7 +3420,7 @@ proc event(rt: Runtime; ev: platform.SurfaceEvent): bool =
           rt.frameLayout.rects, x):
         rt.requestFrame()
       return false
-    if rt.startDragFromPress():
+    if rt.dragSelectState == nil and rt.startDragFromPress():
       if rt.pointerDraggableIdentity != 0:
         rt.pointerDraggableReleasePending = true
         rt.pointerDraggableCanceled = true
@@ -3447,6 +3548,7 @@ proc event(rt: Runtime; ev: platform.SurfaceEvent): bool =
     if not rt.beginTableResize(rt.pressTarget):
       rt.beginTableReorder(rt.pressTarget)
     rt.beginPointerDraggable()
+    rt.beginListDragSelect(rt.pressTarget, ev.mods)
     if rt.pressTarget.owner != nil:
       var slot = int(rt.pressTarget.slot)
       if rt.pressTarget.owner == rt.frameLayout.owner and
@@ -3579,6 +3681,18 @@ proc event(rt: Runtime; ev: platform.SurfaceEvent): bool =
       rt.refreshPointer()
       rt.requestFrame()
       return true
+    if rt.dragSelectState != nil:
+      let state = rt.dragSelectState
+      let dragged = state.dragSelectActive
+      let pressHandled = state.dragSelectPressHandled
+      rt.cancelListDragSelect()
+      if dragged or pressHandled:
+        rt.pressTarget = Element()
+        rt.pressMods = 0
+        rt.pressHoverSlots.setLen(0)
+        rt.refreshPointer()
+        rt.requestFrame()
+        return true
     let previousHover = rt.hoverSlots
     let previousPressed = rt.pressedSlots
     rt.pointerX = float32(ev.x)
@@ -3896,6 +4010,7 @@ proc event(rt: Runtime; ev: platform.SurfaceEvent): bool =
       rt.scrollbarDrag.state.scrollbarDragging = false
       rt.scrollbarDrag = ScrollbarDrag()
     rt.cancelListReorder()
+    rt.cancelListDragSelect()
     rt.cancelGridReorder()
     rt.cancelTableReorder()
     rt.cancelKeyPress()
@@ -4185,6 +4300,7 @@ proc close(rt: Runtime) =
     rt.conn.surface.setTextInput(platform.TextInputState())
     rt.hasTextInputState = false
   rt.cancelListReorder()
+  rt.cancelListDragSelect()
   rt.cancelGridReorder()
   rt.cancelTableReorder()
   rt.closed = true

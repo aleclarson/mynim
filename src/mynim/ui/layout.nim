@@ -4506,6 +4506,88 @@ proc clickTableCell(layout: LayoutResult; state: ListState;
     cells = ColumnRange(cursor: column.id, anchor: column.id)
   state.cells = cells
 
+proc listRowAtPointer(layout: LayoutResult; state: ListState;
+                       x, y: float32): int =
+  result = -1
+  let owner = layout.owner
+  if owner == nil or state == nil or
+      layout.generation != state.generation or
+      state.frameOwner != cast[pointer](owner):
+    return
+  var firstSlot, lastSlot = -1
+  for slot in 1..<owner.nodes.len:
+    let node = owner.nodes[slot]
+    if node.listState == state and node.listRowIndex >= 0:
+      let rect = layout.rects[slot]
+      if layout.containsPointer(slot, x, y) and
+          layout.insideClips(slot, x, y):
+        return node.listRowIndex
+      if firstSlot < 0 or rect.y < layout.rects[firstSlot].y:
+        firstSlot = slot
+      if lastSlot < 0 or rect.y + rect.h >
+          layout.rects[lastSlot].y + layout.rects[lastSlot].h:
+        lastSlot = slot
+  if firstSlot > 0:
+    let (_, localY, valid) = layout.localPoint(firstSlot, x, y)
+    if valid and localY < layout.rects[firstSlot].y:
+      return owner.nodes[firstSlot].listRowIndex
+  if lastSlot > 0:
+    let (_, localY, valid) = layout.localPoint(lastSlot, x, y)
+    if valid and localY >= layout.rects[lastSlot].y +
+        layout.rects[lastSlot].h:
+      return owner.nodes[lastSlot].listRowIndex
+
+proc updateListDragSelect(layout: LayoutResult; state: ListState;
+                          x, y: float32): bool =
+  if state == nil or not state.dragSelectCandidate or
+      state.frameOwner != cast[pointer](layout.owner) or
+      state.generation != layout.generation:
+    return false
+  if not state.dragSelectActive:
+    let dx = x - state.dragSelectPressX
+    let dy = y - state.dragSelectPressY
+    if dx * dx + dy * dy < 16'f32:
+      return false
+    if not state.startListDragSelect():
+      return false
+    state.dragSelectLastRow = state.dragSelectOrigin
+    if state.cellSelectEnabled:
+      let extend = (state.dragSelectPressMods and platform.modShift) != 0
+      let anchor = state.tableColumnIndex(state.cells.anchor)
+      if extend and anchor >= 0 and
+          not state.tableColumns[anchor].rowHeader:
+        state.dragSelectFromColumn = state.cells.anchor
+      else:
+        let column = layout.tableColumnAt(state, state.dragSelectPressX,
+          state.dragSelectPressY)
+        if column >= 0:
+          if state.tableColumns[column].rowHeader:
+            state.cells.all = true
+          else:
+            state.dragSelectFromColumn = state.tableColumns[column].id
+    result = true
+
+  let row = layout.listRowAtPointer(state, x, y)
+  if row >= 0 and not state.isListHeader(row) and
+      row != state.dragSelectLastRow:
+    state.extendListSelection(row, keep = state.dragSelectAdd)
+    state.dragSelectLastRow = row
+    result = true
+
+  if state.cellSelectEnabled:
+    let fromIndex = state.tableColumnIndex(state.dragSelectFromColumn)
+    if fromIndex >= 0 and not state.tableColumns[fromIndex].rowHeader:
+      var to = layout.tableColumnAt(state, x, y)
+      if to >= 0 and state.tableColumns[to].rowHeader:
+        let direction = if to > fromIndex: -1 else: 1
+        to = state.nextTableColumn(to, direction)
+      if to >= 0:
+        let cells = ColumnRange(cursor: state.tableColumns[to].id,
+          anchor: state.dragSelectFromColumn)
+        if state.cells != cells:
+          state.cells = cells
+          result = true
+
 proc scrollIntoView*(e: Element): Element =
   ## Scrolls the element's ancestors just enough to show it in each viewport.
   result = e

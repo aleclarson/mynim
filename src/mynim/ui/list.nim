@@ -61,6 +61,10 @@ proc list*(c: Context; state: ListState; count: Natural;
   if state.frameOwner == cast[pointer](c.owner) and
       state.generation == c.owner.generation:
     raise newException(ValueError, "ui: one ListState cannot build two lists in a frame")
+  if (state.dragSelectEnabled or state.cellSelectEnabled) and
+      state.rowReorder != nil:
+    raise newException(ValueError,
+      "ui: a list cannot drag-select and reorder rows at the same time")
 
   state.editables = state.editablesNow
   state.editablesNow = false

@@ -374,6 +374,14 @@ type
     tableGeneration: uint32
     tableRightToLeft: bool
     cellSelectEnabled: bool
+    dragSelectEnabled: bool
+    dragSelectCandidate, dragSelectActive, dragSelectAdd: bool
+    dragSelectPressHandled: bool
+    dragSelectOrigin, dragSelectLastRow: int
+    dragSelectOriginIdentity: uint64
+    dragSelectPressX, dragSelectPressY: float32
+    dragSelectPressMods: platform.Modifiers
+    dragSelectFromColumn: string
     tableFitColumn: string
     headerCacheRow, headerCacheFrom, headerCacheStop: int
     headerCacheValid: bool
