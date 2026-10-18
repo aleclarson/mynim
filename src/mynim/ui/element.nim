@@ -375,6 +375,7 @@ type
     tableRightToLeft: bool
     cellSelectEnabled: bool
     dragSelectEnabled: bool
+    menuKeepsSelection: bool
     dragSelectCandidate, dragSelectActive, dragSelectAdd: bool
     dragSelectPressHandled: bool
     dragSelectOrigin, dragSelectLastRow: int

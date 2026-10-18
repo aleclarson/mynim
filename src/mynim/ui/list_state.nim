@@ -501,7 +501,8 @@ proc newListState*(estimatedRowHeight = 28'f32; rowGap = 0'f32;
                    rowHeader: ListRowHeader = nil;
                    reorder: ListRowReorder = nil;
                    cellSelect = false;
-                   dragSelect = false): ListState =
+                   dragSelect = false;
+                   menuKeepsSelection = false): ListState =
   ## Creates persistent state for a virtualized list.
   ##
   ## rowKey should return a stable, unique key for each logical row. When a
@@ -513,7 +514,8 @@ proc newListState*(estimatedRowHeight = 28'f32; rowGap = 0'f32;
   ## multiSelectable enables multi-row selection and modifier handling;
   ## cellSelect also enables it and lets a Table choose column blocks;
   ## dragSelect also enables it and chooses a row range by dragging. rowKey
-  ## keeps those choices with their rows as they move.
+  ## keeps those choices with their rows as they move. menuKeepsSelection
+  ## leaves the row and cell choice as it is when a context menu opens.
   ## rowLabel names rows for accessibility and enables type-to-select.
   ## rowHeader marks section headers, which stay pinned while their rows scroll
   ## under them and are omitted from selection and keyboard navigation.
@@ -539,6 +541,7 @@ proc newListState*(estimatedRowHeight = 28'f32; rowGap = 0'f32;
   result.multiSelectionEnabled = multiSelectable or cellSelect or dragSelect
   result.cellSelectEnabled = cellSelect
   result.dragSelectEnabled = dragSelect
+  result.menuKeepsSelection = menuKeepsSelection
   result.followEnd = followEnd
   result.selectedRow = -1
   result.editRow = -1
@@ -656,6 +659,13 @@ proc enableDragSelection*(state: ListState): ListState =
   state.selectionEnabled = true
   state.multiSelectionEnabled = true
   state.dragSelectEnabled = true
+  state
+
+proc setMenuKeepsSelection*(state: ListState; keep: bool): ListState =
+  ## Controls whether a row or cell context menu preserves the current choice.
+  if state == nil:
+    raise newException(ValueError, "ui: list state cannot be nil")
+  state.menuKeepsSelection = keep
   state
 
 proc beginListDragSelect(state: ListState; row: int; identity: uint64;

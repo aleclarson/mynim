@@ -2420,7 +2420,8 @@ proc beginListDragSelect(rt: Runtime; target: Element; mods: platform.Modifiers)
         let column = rt.frameLayout.tableColumnAt(state,
           rt.pressX, rt.pressY)
         let alreadyChosen = if state.cellSelectEnabled and column >= 0:
-            state.cellSelected(node.listRowIndex, column)
+            state.cellSelected(node.listRowIndex,
+              state.tableColumns[column].column)
           else:
             state.isSelected(node.listRowIndex)
         if not alreadyChosen:
@@ -2526,6 +2527,8 @@ proc showTableHeaderMenu(rt: Runtime; target: Element;
     )
   true
 
+proc selectContextMenuRow(rt: Runtime; target: Element; x, y: float32)
+
 proc showContextMenu(rt: Runtime; target: Element; x, y: float32): bool =
   if rt.closed or rt.conn.popupMenu == nil or
       target.owner == nil or target.owner != rt.frameLayout.owner:
@@ -2547,6 +2550,8 @@ proc showContextMenu(rt: Runtime; target: Element; x, y: float32): bool =
   if build == nil:
     return false
 
+  rt.selectContextMenuRow(target, x, y)
+
   let opening = newUiMenu(0, "", rightToLeft)
   build(opening)
   if opening.snapshot.items.len > 0:
@@ -2565,6 +2570,33 @@ proc showContextMenu(rt: Runtime; target: Element; x, y: float32): bool =
           rt.requestFrame()
     )
   true
+
+proc selectContextMenuRow(rt: Runtime; target: Element; x, y: float32) =
+  let owner = rt.frameLayout.owner
+  if owner == nil or target.owner != owner:
+    return
+  var slot = int(target.slot)
+  while slot > 0 and slot < owner.nodes.len:
+    let node = owner.nodes[slot]
+    if node.listState != nil and node.listRowIndex >= 0:
+      if node.listRowHeader or node.listRowAction or
+          owner.effectivelyDisabled(slot):
+        return
+      let state = node.listState
+      if not state.multiSelectionEnabled or state.menuKeepsSelection:
+        return
+      let column = rt.frameLayout.tableColumnAt(state, x, y)
+      let chosen = if state.cellSelectEnabled and column >= 0:
+          state.cellSelected(node.listRowIndex,
+            state.tableColumns[column].column)
+        else:
+          state.isSelected(node.listRowIndex)
+      if not chosen:
+        state.clickListRow(node.listRowIndex, 0)
+        rt.frameLayout.clickTableCell(state, x, y, 0)
+        rt.requestFrame()
+      return
+    slot = int(node.parent)
 
 proc showMenuButton(rt: Runtime; identity: uint64;
                     build: proc(menu: Menu) {.closure.}) =
