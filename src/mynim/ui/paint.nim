@@ -83,10 +83,18 @@ proc opacity*(e: Element; value: float32): Element =
 
 proc blur*(e: Element; sigma: float32): Element =
   ## Blurs this element and its descendants as one rendered layer.
+  ## A custom effect on the same element takes precedence.
   result = e
   let n = e.node
   if n != nil:
     n.blur = nonnegative(sigma)
+
+proc effect*(e: Element; value: Effect): Element =
+  ## Draws this element and its descendants through a custom effect.
+  result = e
+  let n = e.node
+  if n != nil:
+    n.effect = value
 
 proc gradient*(e: Element; value: LinearGradient): Element =
   ## Fills the element with a two-color linear gradient.
@@ -686,6 +694,17 @@ proc effectColor*(painter: Painter; color: Color):
 method paintMaterial*(material: Material; painter: var Painter; box: Rect;
                       radii: array[4, float32]) {.base.} =
   ## Paints this material under the element's border and children.
+  discard
+
+method effectMargin*(effect: Effect): Point {.base.} =
+  ## Reports how far the effect reads beyond the element's box, in DIPs.
+  ## The captured pixels beyond this margin are transparent.
+  discard
+
+method paintEffect*(effect: Effect; painter: var Painter; box: Rect;
+                    content: Bitmap; inset: Point) {.base.} =
+  ## Paints the captured content over the element and its effect margin.
+  ## `box` is in DIPs; `inset` locates its corner in content pixels.
   discard
 
 proc effect*(painter: var Painter; effect: ref scene.Effect; rect: Rect;
@@ -1579,21 +1598,32 @@ type BlurLayerBounds = object
   originX, originY: float32
   fits, empty: bool
 
-proc blurLayerBounds(layout: LayoutResult; slot: int;
-                     scale: float32): BlurLayerBounds =
+proc subtreeEffect(node: ElementNode): bool =
+  node.effect != nil or node.blur > 0
+
+proc subtreeMargin(node: ElementNode): Point =
+  result = if node.effect != nil: node.effect.effectMargin()
+    else: Point(x: 3 * node.blur, y: 3 * node.blur)
+  result.x = nonnegative(result.x)
+  result.y = nonnegative(result.y)
+
+proc layerBounds(layout: LayoutResult; slot: int;
+                 scale: float32): BlurLayerBounds =
   let box = layout.rects[slot]
   if box.w <= 0 or box.h <= 0:
     result.fits = true
     result.empty = true
     return
-  let margin = 3.0 * layout.owner.nodes[slot].blur.float64
+  let margin = layout.owner.nodes[slot].subtreeMargin()
+  let marginX = margin.x.float64
+  let marginY = margin.y.float64
   let sx = scale.float64
-  let x0 = floor((box.x.float64 - layout.root.x.float64 - margin) * sx)
-  let y0 = floor((box.y.float64 - layout.root.y.float64 - margin) * sx)
+  let x0 = floor((box.x.float64 - layout.root.x.float64 - marginX) * sx)
+  let y0 = floor((box.y.float64 - layout.root.y.float64 - marginY) * sx)
   let x1 = ceil((box.x.float64 - layout.root.x.float64 + box.w.float64 +
-    margin) * sx)
+    marginX) * sx)
   let y1 = ceil((box.y.float64 - layout.root.y.float64 + box.h.float64 +
-    margin) * sx)
+    marginY) * sx)
   let w = x1 - x0
   let h = y1 - y0
   if x0.isNan or y0.isNan or x1.isNan or y1.isNan or
@@ -1625,8 +1655,8 @@ proc insideCapturedEffect(layout: LayoutResult; slot: int;
                           scale: float32): bool =
   var current = slot
   while current >= 0:
-    if layout.owner.nodes[current].blur > 0 and
-        layout.blurLayerBounds(current, scale).fits:
+    if layout.owner.nodes[current].subtreeEffect and
+        layout.layerBounds(current, scale).fits:
       return true
     current = int(layout.owner.nodes[current].parent)
 
@@ -1637,8 +1667,8 @@ proc effectLayerSide(size: int): int =
 proc collectPaintOrder(layout: LayoutResult; slot: int; scale: float32;
                        subtreeRoot: int; order: var seq[int]) =
   order.add(slot)
-  if slot != subtreeRoot and layout.owner.nodes[slot].blur > 0 and
-      layout.blurLayerBounds(slot, scale).fits:
+  if slot != subtreeRoot and layout.owner.nodes[slot].subtreeEffect and
+      layout.layerBounds(slot, scale).fits:
     return
   var child = int(layout.owner.nodes[slot].firstChild)
   while child >= 0:
@@ -1836,8 +1866,8 @@ proc paintSceneImpl(layout: LayoutResult; scale: float32; clear: Color;
             inc clipCount
           parent = int(layout.owner.nodes[parent].parent)
         let firstNodeOp = result.ops.len
-        if node.blur > 0 and slot != subtreeRoot:
-          let bounds = layout.blurLayerBounds(slot, scale)
+        if node.subtreeEffect and slot != subtreeRoot:
+          let bounds = layout.layerBounds(slot, scale)
           if bounds.fits:
             if not bounds.empty:
               var layer = layout.owner.effectLayers.getOrDefault(
@@ -1859,13 +1889,29 @@ proc paintSceneImpl(layout: LayoutResult; scale: float32; clear: Color;
                 scale)
               discard paintSceneImpl(layerLayout, scale, transparent,
                 gpuFastPaths, slot, layer, bounds.w, bounds.h)
-              result.ops.add(scene.Op(kind: scene.opImage,
-                rect: scene.Rect(x: bounds.x.float32, y: bounds.y.float32,
-                  w: bounds.w.float32, h: bounds.h.float32),
-                image: layer,
-                src: scene.Rect(w: bounds.w.float32,
-                  h: bounds.h.float32),
-                blur: node.blur.scaled(scale), opacity: opacity))
+              if node.effect != nil:
+                let content = Bitmap(image: layer, width: bounds.w,
+                  height: bounds.h)
+                var painter = Painter(frame: result, textSystem: system,
+                  theme: layout.owner.themeSnapshot,
+                  localeTag: layout.owner.localeSnapshot, root: layout.root,
+                  scale: scale, opacity: opacity,
+                  gpuFastPaths: gpuFastPaths)
+                let inset = Point(
+                  x: (layout.rects[slot].x - layout.root.x) * scale -
+                    bounds.x.float32,
+                  y: (layout.rects[slot].y - layout.root.y) * scale -
+                    bounds.y.float32)
+                node.effect.paintEffect(painter, layout.rects[slot], content,
+                  inset)
+              else:
+                result.ops.add(scene.Op(kind: scene.opImage,
+                  rect: scene.Rect(x: bounds.x.float32, y: bounds.y.float32,
+                    w: bounds.w.float32, h: bounds.h.float32),
+                  image: layer,
+                  src: scene.Rect(w: bounds.w.float32,
+                    h: bounds.h.float32),
+                  blur: node.blur.scaled(scale), opacity: opacity))
             result.applyLayoutTransform(firstNodeOp, layout, slot, scale)
             for _ in 0..<clipCount:
               result.ops.add(scene.Op(kind: scene.opPopClip))

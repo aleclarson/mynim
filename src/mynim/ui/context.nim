@@ -6,6 +6,9 @@ type
   Material* = ref object of RootObj
     ## A fill that paints itself using a Painter and the element's shape.
 
+  Effect* = ref object of RootObj
+    ## A custom painter that replaces an element with its captured subtree.
+
   ContextObj = object
     owner: ElementOwner
     serviceState: UiServiceState
@@ -420,6 +423,7 @@ type
   Bitmap* = ref object
     ## A stable scene image created once and reused across frame builds.
     image: scene.Image
+    width, height: int
     pixelated: bool
 
   Svg* = ref object
@@ -612,6 +616,7 @@ type
     gradient: LinearGradient
     shadows: seq[UiShadow]
     blur: float32
+    effect: Effect
     radius, border: array[4, float32]
     borderStyle: BorderStyle
 
@@ -710,8 +715,10 @@ proc bitmapSource(node: ElementNode): Rect =
   if node.bitmap == nil or node.bitmap.image == nil or
       node.bitmap.image.w <= 0 or node.bitmap.image.h <= 0:
     return
-  let width = float32(node.bitmap.image.w)
-  let height = float32(node.bitmap.image.h)
+  let width = float32(if node.bitmap.width > 0: node.bitmap.width
+    else: node.bitmap.image.w)
+  let height = float32(if node.bitmap.height > 0: node.bitmap.height
+    else: node.bitmap.image.h)
   let source = node.imageRegion
   if source.w <= 0 or source.h <= 0:
     return Rect(w: width, h: height)
@@ -1558,7 +1565,9 @@ proc update*(bitmap: Bitmap; source: sourceImage.Image) =
 proc size*(bitmap: Bitmap): tuple[width, height: int] =
   ## Reports a bitmap's intrinsic size in pixels.
   if bitmap != nil and bitmap.image != nil:
-    result = (bitmap.image.w, bitmap.image.h)
+    result = (width: (if bitmap.width > 0: bitmap.width
+      else: bitmap.image.w), height: (if bitmap.height > 0: bitmap.height
+      else: bitmap.image.h))
 
 proc pixelated*(bitmap: Bitmap): Bitmap =
   ## Uses nearest-neighbor sampling when the bitmap is enlarged.
@@ -2150,7 +2159,8 @@ proc build*(c: Context; view: proc(c: Context) {.closure.}) =
     var staleEffectLayers: seq[uint64]
     for identity in c.owner.effectLayers.keys:
       let slot = c.owner.idSlots.getOrDefault(identity, -1)
-      if slot < 0 or c.owner.nodes[slot].blur <= 0:
+      if slot < 0 or (c.owner.nodes[slot].blur <= 0 and
+          c.owner.nodes[slot].effect == nil):
         staleEffectLayers.add(identity)
     for identity in staleEffectLayers:
       c.owner.effectLayers.del(identity)
