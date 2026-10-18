@@ -186,10 +186,8 @@ proc fit*(state: Session; width, height: int) =
   release(state.guard)
   if nativeWindow == nil:
     return
-  let (minimumWidth, defaultHeight) = frontend.size(releaseView)
-  let fittedWidth = max(minimumWidth, min(width, 1000))
-  let fittedHeight = if releaseView: defaultHeight else: min(max(height, 80), 600)
+  let fitted = frontend.fitSize(releaseView, width, height)
   app.runOnMain(proc() =
     let native = nativeWindow.open(false)
-    native.setContentSize(fittedWidth, fittedHeight)
+    native.setContentSize(fitted.width, fitted.height)
   )

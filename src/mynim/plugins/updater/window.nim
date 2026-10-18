@@ -25,6 +25,7 @@ type
     onClose: proc() {.closure.}
     icon: ui.Bitmap
     notesState: notes.NotesState
+    fittedWidth, fittedHeight: int
     window: MainWindow
 
 proc newUpdaterWindow*(texts: frontend.Texts; initial: frontend.View;
@@ -75,6 +76,9 @@ proc setView*(state: UpdaterWindow; view: frontend.View) =
   acquire(state.guard)
   let releaseChanged = state.current.release != view.release
   state.current = view
+  if releaseChanged:
+    state.fittedWidth = 0
+    state.fittedHeight = 0
   release(state.guard)
   if state.window != nil:
     if releaseChanged:
@@ -162,6 +166,66 @@ proc buildBody(state: UpdaterWindow; c: ui.Context; theme: ui.Theme;
       discard c.checkbox(state.checked, state.texts.automaticDownloads)
     )
 
+proc textHeight(c: ui.Context; value: string; width, size: float32;
+                weight = 0): float32 =
+  if value.len > 0:
+    result = c.measureText(width, ui.Span(text: value, size: size,
+      weight: weight)).height
+
+proc measureReleaseSize*(state: UpdaterWindow; c: ui.Context;
+                         theme: ui.Theme; view: frontend.View):
+                         tuple[width, height: int] =
+  if state == nil or c == nil:
+    return frontend.size(true)
+  let iconWidth = if state.icon == nil: 0'f32 else: 62'f32
+  let textWidth = max(float32(frontend.releaseWidth) - 40 - iconWidth, 1'f32)
+  let small = theme.fontSize * (11'f32 / 13)
+  var columnHeight = c.textHeight(view.title, textWidth, theme.fontSize, 700) + 4
+  if view.message.len > 0:
+    columnHeight += c.textHeight(view.message, textWidth, theme.fontSize) + 6
+  if view.bar:
+    columnHeight += 6 + theme.space(1.5) + 4
+  if view.detail.len > 0:
+    columnHeight += c.textHeight(view.detail, textWidth, small) + 2
+  if view.notes.len > 0:
+    let labelHeight = c.textHeight(state.texts.releaseNotes, textWidth,
+      small, 700)
+    let noteTextWidth = max(textWidth - 26, 1'f32)
+    let noteHeight = max(160'f32,
+      state.notesState.measureHeight(c, noteTextWidth))
+    columnHeight += 6 + labelHeight + 4 + noteHeight + 18
+  if view.checkbox:
+    let checkboxTextWidth = max(textWidth - theme.space(6), 1'f32)
+    columnHeight += 10 + max(theme.space(4), c.textHeight(
+      state.texts.automaticDownloads, checkboxTextWidth, theme.fontSize))
+
+  let topHeight = max(columnHeight, if state.icon == nil: 0'f32 else: 44'f32)
+  let contentHeight = 38 + 12 + buttonHeight(theme) + topHeight
+  frontend.fitSize(true, frontend.releaseWidth,
+    int(ceil(contentHeight.float64)))
+
+proc fitReleaseContent(state: UpdaterWindow; c: ui.Context;
+                       theme: ui.Theme; view: frontend.View) =
+  if not view.release:
+    return
+  let fitted = state.measureReleaseSize(c, theme, view)
+  acquire(state.guard)
+  let native = state.window
+  release(state.guard)
+  if native == nil or native.isDestroyed():
+    return
+  acquire(state.guard)
+  if state.window != native or
+      (state.fittedWidth == fitted.width and
+       state.fittedHeight == fitted.height):
+    release(state.guard)
+    return
+  state.fittedWidth = fitted.width
+  state.fittedHeight = fitted.height
+  release(state.guard)
+  native.setContentSize(fitted.width, fitted.height)
+  native.center()
+
 proc build*(state: UpdaterWindow; c: ui.Context): ui.Element =
   ## Builds the current status or release view in a native UI frame.
   let view = state.currentView()
@@ -205,6 +269,7 @@ proc build*(state: UpdaterWindow; c: ui.Context): ui.Element =
       if button.default:
         state.respond(view, button)
   )
+  state.fitReleaseContent(c, theme, view)
 
 proc open*(state: UpdaterWindow; foreground: bool): MainWindow =
   ## Opens and shows the native update window.

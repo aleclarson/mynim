@@ -39,6 +39,13 @@ proc size*(release: bool): tuple[width, height: int] =
   else:
     (statusWidth, statusHeight)
 
+proc fitSize*(release: bool; width, height: int): tuple[width, height: int] =
+  ## Bounds a measured updater size while retaining each view's default size.
+  let (minimumWidth, defaultHeight) = size(release)
+  result.width = max(minimumWidth, min(width, 1000))
+  result.height = if release: min(max(height, defaultHeight), 600)
+    else: min(max(height, 80), 600)
+
 proc background*(): tuple[light, dark: string] =
   ## Returns the light and dark updater window backgrounds.
   when defined(macosx):

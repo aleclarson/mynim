@@ -240,3 +240,14 @@ proc render*(state: NotesState; context: ui.Context; theme: ui.Theme;
             break
     )
   )
+
+proc measureHeight*(state: NotesState; context: ui.Context;
+                    width: float32): float32 =
+  ## Measures wrapped, styled release notes in DIPs at the given width.
+  if state == nil or context == nil:
+    return
+  let lineHeight = context.measureText(width, ui.Span(text: " ")).height
+  for line in state.lineStyles:
+    let height = if line.len == 0: lineHeight
+      else: context.measureText(width, line).height
+    result += max(lineHeight, height)
