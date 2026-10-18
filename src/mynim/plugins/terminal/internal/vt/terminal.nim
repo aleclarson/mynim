@@ -17,6 +17,9 @@ type
     length: csize_t) {.cdecl.}
   TerminalGetProc = proc(terminal: pointer; data: int32;
     value: pointer): GhosttyResult {.cdecl.}
+  TerminalString {.bycopy.} = object
+    data: pointer
+    length: csize_t
 
   GhosttyTerminal* = ref object
     library: GhosttyVT
@@ -28,6 +31,13 @@ const
   dataRows = 2'i32
   dataCursorX = 3'i32
   dataCursorY = 4'i32
+  dataTitle = 12'i32
+  dataPwd = 13'i32
+
+static:
+  doAssert sizeof(TerminalString) == 2 * sizeof(pointer)
+  doAssert offsetOf(TerminalString, data) == 0
+  doAssert offsetOf(TerminalString, length) == sizeof(pointer)
 
 proc requiredSymbol(library: GhosttyVT; name: string): pointer =
   result = library.symbol(name)
@@ -74,6 +84,11 @@ proc rawHandle*(terminal: GhosttyTerminal): pointer =
 proc belongsToLibrary*(terminal: GhosttyTerminal; library: GhosttyVT): bool =
   ## Checks that another Ghostty object can safely use this terminal.
   not terminal.isNil and terminal.library == library
+
+proc ghosttyLibrary*(terminal: GhosttyTerminal): GhosttyVT =
+  ## Returns the library backing an open terminal.
+  discard requireHandle(terminal)
+  terminal.library
 
 proc close*(terminal: GhosttyTerminal) =
   ## Frees the Ghostty state; close it before unloading its library.
@@ -139,3 +154,28 @@ proc size*(terminal: GhosttyTerminal): tuple[cols, rows: int] =
 proc cursor*(terminal: GhosttyTerminal): tuple[x, y: int] =
   ## Returns the cursor column and row, both zero-based.
   (getUint16(terminal, dataCursorX), getUint16(terminal, dataCursorY))
+
+proc getString(terminal: GhosttyTerminal; key: int32): string =
+  let handle = requireHandle(terminal)
+  let getData = cast[TerminalGetProc](requiredSymbol(terminal.library,
+    "ghostty_terminal_get"))
+  var value: TerminalString
+  checkResult("terminal query", getData(handle, key, addr value))
+  if value.length > csize_t(high(int)):
+    raise newException(IOError,
+      "libghostty-vt returned an unrepresentable terminal string")
+  if value.length == 0:
+    return ""
+  if value.data.isNil:
+    raise newException(IOError,
+      "libghostty-vt returned a terminal string without data")
+  result = newString(int(value.length))
+  copyMem(addr result[0], value.data, int(value.length))
+
+proc title*(terminal: GhosttyTerminal): string =
+  ## Returns the current terminal title as the program supplied it.
+  getString(terminal, dataTitle)
+
+proc pwd*(terminal: GhosttyTerminal): string =
+  ## Returns the current working directory reported by the running program.
+  getString(terminal, dataPwd)
