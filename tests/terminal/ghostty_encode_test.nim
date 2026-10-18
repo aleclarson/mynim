@@ -1,6 +1,7 @@
 import std/unittest
 import mynim/plugins/terminal/internal/vt/encode
 import mynim/plugins/terminal/internal/vt/library
+import mynim/plugins/terminal/native_library
 
 suite "Ghostty paste helper edge cases":
   test "empty paste operations need no native call":
@@ -19,11 +20,10 @@ when defined(mynimGhosttyIntegration):
 
   suite "Ghostty native encoders":
     test "matches focus, paste, and safety behavior":
-      let path = getEnv("MYNIM_GHOSTTY_VT")
-      if path.len == 0:
+      if getEnv("MYNIM_GHOSTTY_VT").len == 0:
         raise newException(ValueError,
           "set MYNIM_GHOSTTY_VT to run this integration test")
-      let library = openGhosttyVT(path)
+      let library = loadGhosttyVT()
       defer: library.close()
 
       check library.encodeFocus(true).asString() == "\x1b[I"
