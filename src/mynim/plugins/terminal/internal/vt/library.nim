@@ -51,6 +51,26 @@ type
     ctx*: pointer
     reply*: GhosttyClipboardReadReplyFn
 
+  GhosttyClipboardReadReply* {.bycopy.} = object
+    size*: csize_t
+    result*: int32
+    contents*: ptr UncheckedArray[GhosttyClipboardContent]
+    contentsLen*: csize_t
+    available*: ptr UncheckedArray[GhosttyString]
+    availableLen*: csize_t
+    remember*: bool
+
+  GhosttyMimeReader* {.bycopy.} = object
+    read*, userdata*: pointer
+
+  GhosttyPaste* {.bycopy.} = object
+    size*: csize_t
+    location*, source*: int32
+    mimes*: ptr UncheckedArray[GhosttyString]
+    mimesLen*: csize_t
+    reader*: GhosttyMimeReader
+    allowUnsafe*: bool
+
   GhosttyTerminalDesktopNotification* {.bycopy.} = object
     size*: csize_t
     title*, body*: GhosttyString
@@ -98,6 +118,26 @@ static:
     7 * sizeof(pointer) + 1
   doAssert offsetOf(GhosttyClipboardRead, ctx) == 8 * sizeof(pointer)
   doAssert offsetOf(GhosttyClipboardRead, reply) == 9 * sizeof(pointer)
+  doAssert sizeof(GhosttyClipboardReadReply) == 7 * sizeof(pointer)
+  doAssert offsetOf(GhosttyClipboardReadReply, result) == sizeof(pointer)
+  doAssert offsetOf(GhosttyClipboardReadReply, contents) == 2 * sizeof(pointer)
+  doAssert offsetOf(GhosttyClipboardReadReply, contentsLen) ==
+    3 * sizeof(pointer)
+  doAssert offsetOf(GhosttyClipboardReadReply, available) ==
+    4 * sizeof(pointer)
+  doAssert offsetOf(GhosttyClipboardReadReply, availableLen) ==
+    5 * sizeof(pointer)
+  doAssert offsetOf(GhosttyClipboardReadReply, remember) ==
+    6 * sizeof(pointer)
+  doAssert sizeof(GhosttyMimeReader) == 2 * sizeof(pointer)
+  doAssert offsetOf(GhosttyMimeReader, userdata) == sizeof(pointer)
+  doAssert sizeof(GhosttyPaste) == 7 * sizeof(pointer)
+  doAssert offsetOf(GhosttyPaste, location) == sizeof(pointer)
+  doAssert offsetOf(GhosttyPaste, source) == sizeof(pointer) + 4
+  doAssert offsetOf(GhosttyPaste, mimes) == 2 * sizeof(pointer)
+  doAssert offsetOf(GhosttyPaste, mimesLen) == 3 * sizeof(pointer)
+  doAssert offsetOf(GhosttyPaste, reader) == 4 * sizeof(pointer)
+  doAssert offsetOf(GhosttyPaste, allowUnsafe) == 6 * sizeof(pointer)
   doAssert sizeof(GhosttyTerminalDesktopNotification) == 5 * sizeof(pointer)
   doAssert offsetOf(GhosttyTerminalDesktopNotification, title) == sizeof(pointer)
   doAssert offsetOf(GhosttyTerminalDesktopNotification, body) == 3 * sizeof(pointer)
@@ -233,6 +273,24 @@ proc parseManifest*(data: string): GhosttyManifest =
     ("can_remember", offsetOf(GhosttyClipboardRead, canRemember)),
     ("ctx", offsetOf(GhosttyClipboardRead, ctx)),
     ("reply", offsetOf(GhosttyClipboardRead, reply))])
+  requireLayout(types, "GhosttyClipboardReadReply",
+    sizeof(GhosttyClipboardReadReply), [
+      ("result", offsetOf(GhosttyClipboardReadReply, result)),
+      ("contents", offsetOf(GhosttyClipboardReadReply, contents)),
+      ("contents_len", offsetOf(GhosttyClipboardReadReply, contentsLen)),
+      ("available", offsetOf(GhosttyClipboardReadReply, available)),
+      ("available_len", offsetOf(GhosttyClipboardReadReply, availableLen)),
+      ("remember", offsetOf(GhosttyClipboardReadReply, remember))])
+  requireLayout(types, "GhosttyMimeReader", sizeof(GhosttyMimeReader), [
+    ("read", offsetOf(GhosttyMimeReader, read)),
+    ("userdata", offsetOf(GhosttyMimeReader, userdata))])
+  requireLayout(types, "GhosttyPaste", sizeof(GhosttyPaste), [
+    ("location", offsetOf(GhosttyPaste, location)),
+    ("source", offsetOf(GhosttyPaste, source)),
+    ("mimes", offsetOf(GhosttyPaste, mimes)),
+    ("mimes_len", offsetOf(GhosttyPaste, mimesLen)),
+    ("reader", offsetOf(GhosttyPaste, reader)),
+    ("allow_unsafe", offsetOf(GhosttyPaste, allowUnsafe))])
   requireLayout(types, "GhosttyTerminalDesktopNotification",
     sizeof(GhosttyTerminalDesktopNotification), [
       ("title", offsetOf(GhosttyTerminalDesktopNotification, title)),

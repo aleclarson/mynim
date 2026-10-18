@@ -1,6 +1,23 @@
-import std/[options, os, unittest]
+import std/[options, os, strutils, unittest]
 import mynim/plugins/terminal/internal/vt/[frame, library, render, selection,
     terminal]
+import mynim/plugins/terminal/internal/vt/effects
+
+var pasteEventOutput = ""
+
+proc capturePasteEvent(terminal, userdata: pointer;
+    data: ptr UncheckedArray[byte]; length: csize_t) {.cdecl.} =
+  discard terminal
+  discard userdata
+  pasteEventOutput = newString(int(length))
+  if length > 0:
+    copyMem(addr pasteEventOutput[0], data, int(length))
+
+proc ignoreClipboardRead(terminal, userdata: pointer;
+                         request: ptr GhosttyClipboardRead) {.cdecl.} =
+  discard terminal
+  discard userdata
+  discard request
 
 suite "Ghostty terminal state":
   test "validates the library and dimensions before construction":
@@ -16,6 +33,24 @@ suite "Ghostty terminal state":
       discard terminal.size()
     expect IOError:
       discard renderState.size()
+
+  test "emits a MIME paste event when the program enables mode 5522":
+    let path = getEnv("MYNIM_GHOSTTY_VT")
+    if path.len == 0:
+      skip()
+    let library = openGhosttyVT(path)
+    defer: library.close()
+    let terminal = newGhosttyTerminal(library, 80, 24)
+    defer: terminal.close()
+    terminal.setCallbacks(nil, TerminalCallbacks(
+      writePty: capturePasteEvent,
+      clipboardRead: ignoreClipboardRead))
+    pasteEventOutput.setLen(0)
+    check not terminal.pasteEvent(["text/plain", "image/png"])
+    terminal.setMode(modePasteEvents, true)
+    check terminal.pasteEvent(["text/plain", "image/png"])
+    check pasteEventOutput.startsWith("\e]5522;type=read:status=OK:")
+    check pasteEventOutput.contains("dGV4dC9wbGFpbiBpbWFnZS9wbmcK")
 
   test "moves the active viewport through scrollback":
     let path = getEnv("MYNIM_GHOSTTY_VT")

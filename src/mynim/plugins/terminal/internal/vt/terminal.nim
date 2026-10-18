@@ -16,6 +16,8 @@ type
     cellWidth, cellHeight: uint32): GhosttyResult {.cdecl.}
   TerminalWriteProc = proc(terminal: pointer; data: ptr UncheckedArray[byte];
     length: csize_t) {.cdecl.}
+  TerminalPasteProc = proc(terminal: pointer; paste: ptr GhosttyPaste;
+    written: ptr bool): GhosttyResult {.cdecl.}
   TerminalGetProc = proc(terminal: pointer; data: int32;
     value: pointer): GhosttyResult {.cdecl.}
   TerminalString {.bycopy.} = object
@@ -342,6 +344,41 @@ proc mode*(terminal: GhosttyTerminal; mode: TerminalMode): bool =
     "ghostty_terminal_get"))
   checkResult("terminal mode query", getData(handle, dataMode, addr config))
   config.value
+
+proc noMimeRead(userdata, mime, contents, length, err: pointer): pointer
+    {.cdecl, gcsafe.} =
+  discard userdata
+  discard mime
+  discard contents
+  discard length
+  discard err
+  nil
+
+proc pasteEvent*(terminal: GhosttyTerminal;
+                 mimes: openArray[string]): bool =
+  ## Tells a mode-5522 program the MIME types a paste offers. Its later
+  ## granted clipboard read is answered by the installed clipboard callback.
+  let handle = requireHandle(terminal)
+  let paste = cast[TerminalPasteProc](requiredSymbol(terminal.library,
+    "ghostty_terminal_paste"))
+  var names = newSeq[string](mimes.len)
+  var ghosttyMimes = newSeq[GhosttyString](mimes.len)
+  for index, mime in mimes:
+    names[index] = mime
+    if mime.len > 0:
+      ghosttyMimes[index] = GhosttyString(
+        data: cast[pointer](unsafeAddr names[index][0]),
+        len: csize_t(mime.len))
+  var request = GhosttyPaste(
+    size: csize_t(sizeof(GhosttyPaste)),
+    source: 0,
+    mimesLen: csize_t(ghosttyMimes.len))
+  if ghosttyMimes.len > 0:
+    request.mimes = cast[ptr UncheckedArray[GhosttyString]](
+      addr ghosttyMimes[0])
+    request.reader.read = cast[pointer](noMimeRead)
+  var written = false
+  paste(handle, addr request, addr written) == success and written
 
 proc mouseTracking*(terminal: GhosttyTerminal): bool =
   ## Reports whether the terminal has enabled mouse tracking.
