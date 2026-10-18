@@ -10,7 +10,12 @@ type
     changed: Cond
     incoming, sent: seq[byte]
     closed, readStarted: bool
+    blockResize, resizeStarted, allowResize: bool
     resizeCols, resizeRows: int
+    resizeCount: int
+  ResizeRequest = object
+    session: TerminalSession
+    returned: ptr Atomic[bool]
 
 proc newTestTerminalConn(): TestTerminalConn =
   new(result)
@@ -44,14 +49,20 @@ method write(conn: TestTerminalConn; buffer: openArray[byte]): int =
 
 method resize(conn: TestTerminalConn; cols, rows: int) =
   conn.guard.acquire()
+  conn.resizeStarted = true
+  conn.changed.broadcast()
+  while conn.blockResize and not conn.allowResize:
+    conn.changed.wait(conn.guard)
   conn.resizeCols = cols
   conn.resizeRows = rows
+  inc conn.resizeCount
   conn.changed.broadcast()
   conn.guard.release()
 
 method close(conn: TestTerminalConn) =
   conn.guard.acquire()
   conn.closed = true
+  conn.allowResize = true
   conn.changed.broadcast()
   conn.guard.release()
 
@@ -73,6 +84,11 @@ proc resizedTo(conn: TestTerminalConn): tuple[cols, rows: int] =
   result = (conn.resizeCols, conn.resizeRows)
   conn.guard.release()
 
+proc resizeCalls(conn: TestTerminalConn): int =
+  conn.guard.acquire()
+  result = conn.resizeCount
+  conn.guard.release()
+
 proc isClosed(conn: TestTerminalConn): bool =
   conn.guard.acquire()
   result = conn.closed
@@ -82,6 +98,30 @@ proc isReading(conn: TestTerminalConn): bool =
   conn.guard.acquire()
   result = conn.readStarted
   conn.guard.release()
+
+proc blockNextResize(conn: TestTerminalConn) =
+  conn.guard.acquire()
+  conn.blockResize = true
+  conn.resizeStarted = false
+  conn.allowResize = false
+  conn.guard.release()
+
+proc hasStartedResize(conn: TestTerminalConn): bool =
+  conn.guard.acquire()
+  result = conn.resizeStarted
+  conn.guard.release()
+
+proc releaseResize(conn: TestTerminalConn) =
+  conn.guard.acquire()
+  conn.allowResize = true
+  conn.blockResize = false
+  conn.changed.broadcast()
+  conn.guard.release()
+
+proc callResize(request: ResizeRequest) {.thread.} =
+  {.cast(gcsafe).}:
+    request.session.resize(100, 30)
+    request.returned[].store(true, moRelaxed)
 
 proc text(frame: TerminalFrame): string =
   for row in frame.viewport:
@@ -105,8 +145,33 @@ suite "Ghostty PTY terminal session":
       connection = conn, cols = 80, rows = 24)
     defer: session.close()
 
-    session.resize(100, 30)
-    check conn.resizedTo() == (cols: 100, rows: 30)
+    conn.blockNextResize()
+    var resizeReturned: Atomic[bool]
+    var resizeThread: Thread[ResizeRequest]
+    createThread(resizeThread, callResize,
+      ResizeRequest(session: session, returned: addr resizeReturned))
+    var resizeStarted = false
+    for _ in 0 ..< 200:
+      if conn.hasStartedResize():
+        resizeStarted = true
+        break
+      sleep(10)
+    session.resize(110, 32)
+    session.resize(120, 40)
+    let resizeWasAsync = resizeReturned.load(moRelaxed)
+    conn.releaseResize()
+    joinThread(resizeThread)
+    check resizeStarted
+    check resizeWasAsync
+    var resized = false
+    for _ in 0 ..< 200:
+      if conn.resizedTo() == (cols: 120, rows: 40):
+        resized = true
+        break
+      sleep(10)
+    check resized
+    check conn.resizedTo() == (cols: 120, rows: 40)
+    check conn.resizeCalls() == 2
     conn.feed("remote-ready")
     var ready = false
     for _ in 0 ..< 200:

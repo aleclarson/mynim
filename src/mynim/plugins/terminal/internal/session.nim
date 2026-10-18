@@ -80,6 +80,7 @@ type
     terminalGuard: Lock
     inputGuard: Lock
     connectionGuard: Lock
+    connectionResizeChanged: Cond
     inputChanged: Cond
     library: GhosttyVT
     terminal: GhosttyTerminal
@@ -91,6 +92,9 @@ type
     process: Pty
     connection: TerminalConn
     connectionClosed: bool
+    connectionResizeThread: Thread[TerminalSession]
+    connectionResizeStarted, connectionResizePending: bool
+    connectionResizeCols, connectionResizeRows, connectionResizeThreadId: int
     startupThread, readerThread, writerThread: Thread[TerminalSession]
     startupStarted, readerStarted, writerStarted: bool
     launchPending, launchRequested, processReady: bool
@@ -924,12 +928,36 @@ proc closeConnection(session: TerminalSession) =
     session.connectionGuard.release()
     return
   session.connectionClosed = true
+  session.connectionResizeChanged.broadcast()
   let connection = session.connection
   session.connectionGuard.release()
   try:
     connection.close()
   except CatchableError as error:
     session.recordInputError(error.msg)
+
+proc connectionResizer(session: TerminalSession) {.thread.} =
+  {.cast(gcsafe).}:
+    session.connectionGuard.acquire()
+    session.connectionResizeThreadId = getThreadId()
+    session.connectionGuard.release()
+    while true:
+      session.connectionGuard.acquire()
+      while not session.connectionClosed and
+          not session.connectionResizePending:
+        session.connectionResizeChanged.wait(session.connectionGuard)
+      if session.connectionClosed:
+        session.connectionGuard.release()
+        return
+      let connection = session.connection
+      let cols = session.connectionResizeCols
+      let rows = session.connectionResizeRows
+      session.connectionResizePending = false
+      session.connectionGuard.release()
+      try:
+        connection.resize(cols, rows)
+      except CatchableError as error:
+        session.recordInputError(error.msg)
 
 proc releaseGhostty(session: TerminalSession) =
   if session.callbacksInstalled and not session.terminal.isNil:
@@ -994,6 +1022,7 @@ proc newTerminalSession*(library: GhosttyVT; process: PtyOptions;
   initLock(result.terminalGuard)
   initLock(result.inputGuard)
   initLock(result.connectionGuard)
+  initCond(result.connectionResizeChanged)
   initCond(result.inputChanged)
   result.pasteOffers.open(1)
   result.pasteOffersOpen = true
@@ -1022,6 +1051,9 @@ proc newTerminalSession*(library: GhosttyVT; process: PtyOptions;
     result.launchPending = connection == nil
     result.terminal.setCallbacks(cast[pointer](result), sessionCallbacks())
     result.callbacksInstalled = true
+    if connection != nil:
+      createThread(result.connectionResizeThread, connectionResizer, result)
+      result.connectionResizeStarted = true
     createThread(result.writerThread, writer, result)
     result.writerStarted = true
     createThread(result.readerThread, reader, result)
@@ -1039,6 +1071,14 @@ proc newTerminalSession*(library: GhosttyVT; process: PtyOptions;
       joinThread(result.startupThread)
       result.startupStarted = false
     result.closeConnection()
+    if result.connectionResizeStarted:
+      result.connectionGuard.acquire()
+      let resizeThreadIsCurrent =
+        result.connectionResizeThreadId == getThreadId()
+      result.connectionGuard.release()
+      if not resizeThreadIsCurrent:
+        joinThread(result.connectionResizeThread)
+        result.connectionResizeStarted = false
     if result.process != nil:
       try:
         result.process.kill()
@@ -1453,10 +1493,12 @@ proc resize*(session: TerminalSession; cols, rows: int;
     session.terminalGuard.release()
   if connection != nil:
     session.connectionGuard.acquire()
-    let canResize = not session.connectionClosed
+    if not session.connectionClosed:
+      session.connectionResizeCols = cols
+      session.connectionResizeRows = rows
+      session.connectionResizePending = true
+      session.connectionResizeChanged.broadcast()
     session.connectionGuard.release()
-    if canResize:
-      connection.resize(cols, rows)
 
 proc size*(session: TerminalSession): tuple[cols, rows: int] =
   ## Returns the current terminal cell dimensions.
@@ -1632,6 +1674,14 @@ proc close*(session: TerminalSession) =
       session.recordInputError(error.msg)
     session.process.close()
   session.closeConnection()
+  if session.connectionResizeStarted:
+    session.connectionGuard.acquire()
+    let resizeThreadIsCurrent =
+      session.connectionResizeThreadId == getThreadId()
+    session.connectionGuard.release()
+    if not resizeThreadIsCurrent:
+      joinThread(session.connectionResizeThread)
+      session.connectionResizeStarted = false
   if session.readerStarted:
     joinThread(session.readerThread)
     session.readerStarted = false

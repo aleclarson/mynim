@@ -2,10 +2,12 @@
 
 type
   TerminalConn* = ref object of RootObj
-    ## Read, write, and close are called from terminal worker threads. A
-    ## connection must support concurrent reads and writes. `read` returns
-    ## zero only at end of stream; `close` must unblock a blocked read or
-    ## write. Override `resize` when the remote endpoint can be resized.
+    ## `read` and `write` run on separate terminal worker threads and can
+    ## overlap. `read` returns zero at end of stream; `write` returns the
+    ## number of bytes accepted. `close` can overlap either and must unblock
+    ## blocked I/O or resize. `resize` runs asynchronously on a coalescing
+    ## worker, so it cannot stall the UI. Override `resize` when the remote
+    ## endpoint can be resized.
 
 method read*(conn: TerminalConn; buffer: var openArray[byte]): int {.base.} =
   raise newException(IOError, "terminal connection does not implement read")
