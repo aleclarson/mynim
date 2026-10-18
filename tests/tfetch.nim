@@ -94,10 +94,10 @@ proc serveLoop() {.async.} =
         discard
     else:
       await request.respond(Http404, "missing")
-    if handled >= 15:
+    if handled >= 16:
       server.close()
   try:
-    while handled < 15:
+    while handled < 16:
       await server.acceptRequest(respond)
   except CatchableError:
     discard
@@ -237,6 +237,13 @@ block request_body_and_headers_are_sent:
   doAssert parts.len == 2
   doAssert parts[0].status == 201
   doAssert parts[1].chunk == "PATCH:payload:sent"
+
+block get_request_body_is_forwarded:
+  let (parts, err) = run(service.Request(url: origin & "/echo",
+    httpMethod: "GET", body: "payload", hasBody: true, redirect: "follow"))
+  doAssert err == nil
+  doAssert parts.len == 2
+  doAssert parts[1].chunk == "GET:payload:"
 
 block custom_transport_receives_extension_methods_and_streams_response:
   var received: TransportRequest

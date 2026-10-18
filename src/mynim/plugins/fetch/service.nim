@@ -260,9 +260,6 @@ proc fetchAsync(options: Options; request: Request; ctx: core.CancelCtx;
   if request.redirect notin ["follow", "manual", "error"]:
     raise newException(ValueError,
       "fetch: invalid redirect mode " & request.redirect.escape())
-  if request.hasBody and initialMethod.toUpperAscii() in ["GET", "HEAD"]:
-    raise newException(ValueError,
-      "fetch: a " & initialMethod.toUpperAscii() & " request cannot have a body")
   if options.allow != nil and not options.allow(request):
     var safeUrl = current
     safeUrl.password = ""
