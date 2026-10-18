@@ -28,6 +28,12 @@ type
   SendPart* = proc(part: Part): ref CatchableError {.closure.}
   AllowRequest* = proc(request: Request): bool {.closure.}
 
+  CookieJar* = object
+    ## Returns `name=value` pairs to send for a request URL.
+    cookies*: proc(url: Uri): seq[string] {.closure.}
+    ## Receives each raw Set-Cookie field from a response for this URL.
+    store*: proc(url: Uri; setCookieHeaders: seq[string]) {.closure.}
+
   Options* = object
     ## Creates a new client per fetch call. The plugin closes it afterward.
     ## Leave nil to use Nim's default client. A custom factory must set
@@ -36,6 +42,8 @@ type
     clientFactory*: proc(): AsyncHttpClient {.closure.}
     ## Optional HTTP proxy for the default client.
     proxy*: Proxy
+    ## Optional cookie policy. The jar decides matching, expiry, and storage.
+    cookieJar*: CookieJar
     ## Refuses a request before it leaves the app when it returns false.
     allow*: AllowRequest
     ## Maximum redirects followed in "follow" mode.
@@ -90,6 +98,27 @@ proc toHttpHeaders(headers: openArray[Header]): HttpHeaders =
     of "content-length": discard # The HTTP client calculates it from the body.
     else: result.add(header.name, header.value)
 
+proc copyHeaders(headers: HttpHeaders): HttpHeaders =
+  result = newHttpHeaders()
+  if headers != nil:
+    for name, value in headers.pairs:
+      result.add(name, value)
+
+proc addJarCookies(headers: HttpHeaders; jar: CookieJar; url: Uri) =
+  if jar.cookies == nil:
+    return
+  var value = ""
+  for existing in seq[string](headers.getOrDefault("cookie")):
+    if value.len > 0: value.add "; "
+    value.add existing
+  for cookie in jar.cookies(url):
+    if '\r' in cookie or '\n' in cookie:
+      raise newException(ValueError, "fetch: cookie jar returned an invalid cookie")
+    if value.len > 0: value.add "; "
+    value.add cookie
+  if value.len > 0:
+    headers["cookie"] = value
+
 proc responseHeaders(response: AsyncResponse): seq[Header] =
   for name, value in response.headers.pairs:
     if name.toLowerAscii() != "set-cookie":
@@ -101,6 +130,17 @@ proc statusText(response: AsyncResponse): string =
     result = response.status[code.len .. ^1].strip()
 
 proc isRedirect(status: int): bool = status in [301, 302, 303, 307, 308]
+
+proc isSameOrSubdomain(host, parent: string): bool =
+  let normalizedHost = host.toLowerAscii()
+  let normalizedParent = parent.toLowerAscii()
+  if normalizedHost == normalizedParent:
+    return true
+  if normalizedHost.len <= normalizedParent.len or
+      ':' in normalizedHost or '%' in normalizedHost:
+    return false
+  normalizedHost.endsWith(normalizedParent) and
+    normalizedHost[normalizedHost.len - normalizedParent.len - 1] == '.'
 
 proc httpMethod(value: string): HttpMethod =
   ## Maps the request methods supported by Nim's HTTP client.
@@ -175,6 +215,7 @@ proc sendBody(response: AsyncResponse; send: SendPart;
 proc fetchAsync(options: Options; request: Request; ctx: core.CancelCtx;
                  send: SendPart) {.async.} =
   var current = parseUri(request.url)
+  let initialHost = current.hostname
   if current.scheme notin ["http", "https"]:
     raise newException(ValueError,
       "fetch: unsupported URL scheme " & current.scheme.escape())
@@ -217,9 +258,17 @@ proc fetchAsync(options: Options; request: Request; ctx: core.CancelCtx;
     if ctx.done():
       raise (if ctx.err() != nil: ctx.err() else:
         newException(ValueError, "fetch: request canceled"))
+    var requestHeaders = copyHeaders(headers)
+    addJarCookies(requestHeaders, options.cookieJar, current)
     response = await waitCancelable(
-      client.request(current, httpMethod(httpVerb), body, headers), client, ctx)
+      client.request(current, httpMethod(httpVerb), body, requestHeaders), client, ctx)
     let status = int(response.code)
+    if options.cookieJar.store != nil:
+      var setCookieHeaders: seq[string]
+      for value in seq[string](response.headers.getOrDefault("set-cookie")):
+        setCookieHeaders.add value
+      if setCookieHeaders.len > 0:
+        options.cookieJar.store(current, setCookieHeaders)
     if not isRedirect(status):
       break
     if request.redirect == "manual":
@@ -237,8 +286,9 @@ proc fetchAsync(options: Options; request: Request; ctx: core.CancelCtx;
     let next = redirectUrl(current, location)
     let hostChanged =
       next.hostname.toLowerAscii() != current.hostname.toLowerAscii()
-    if hostChanged:
-      headers.del("authorization")
+    if not isSameOrSubdomain(next.hostname, initialHost):
+      for sensitive in ["authorization", "www-authenticate", "cookie", "cookie2"]:
+        headers.del(sensitive)
     if hostChanged or next.port != current.port:
       headers.del("host")
     if status in [301, 302, 303] and httpVerb.toUpperAscii() notin ["GET", "HEAD"]:

@@ -1,4 +1,4 @@
-import std/[asyncdispatch, asynchttpserver, asyncnet, httpclient, httpcore, strutils]
+import std/[asyncdispatch, asynchttpserver, asyncnet, httpclient, httpcore, strutils, uri]
 import mynim as core
 import mynim/internal/ctx
 import mynim/plugins/fetch as fetchPlugin
@@ -39,6 +39,27 @@ proc serveLoop() {.async.} =
       await request.respond(Http200,
         request.url.scheme & "://" & request.url.hostname & request.url.path,
         newHttpHeaders([("Content-Type", "text/plain")]))
+    of "/jar-redirect":
+      await request.respond(Http302, "",
+        newHttpHeaders([("Location", "/jar"),
+          ("Set-Cookie", "redirect=yes; Path=/")]))
+    of "/jar-external-redirect":
+      await request.respond(Http302, "",
+        newHttpHeaders([("Location", "http://other.invalid/jar-external-final"),
+          ("Set-Cookie", "redirect=yes; Path=/")]))
+    of "/jar-external-final":
+      let cookieHeader: string = request.headers.getOrDefault("Cookie")
+      let authorization: string = request.headers.getOrDefault("Authorization")
+      await request.respond(Http200, cookieHeader & "|" & authorization,
+        newHttpHeaders([("Set-Cookie", "final=yes; Path=/")]))
+    of "/jar":
+      var cookieHeader = ""
+      for value in seq[string](request.headers.getOrDefault("Cookie")):
+        if cookieHeader.len > 0: cookieHeader.add "; "
+        cookieHeader.add value
+      await request.respond(Http200, cookieHeader,
+        newHttpHeaders([("Set-Cookie", "server=session; Path=/"),
+          ("Set-Cookie", "theme=dark; HttpOnly")]))
     of "/slow":
       await request.client.send(
         "HTTP/1.1 200 OK\r\nContent-Length: 10\r\nConnection: close\r\n\r\n")
@@ -49,10 +70,10 @@ proc serveLoop() {.async.} =
         discard
     else:
       await request.respond(Http404, "missing")
-    if handled >= 7:
+    if handled >= 11:
       server.close()
   try:
-    while handled < 7:
+    while handled < 11:
       await server.acceptRequest(respond)
   except CatchableError:
     discard
@@ -145,6 +166,66 @@ block configured_proxy_receives_absolute_http_target:
   doAssert parts[0].status == 200
   doAssert parts[1].chunk == "http://example.invalid/proxy",
     "proxy target was " & repr(parts[1].chunk)
+
+block cookie_jar_sends_and_stores_response_cookies:
+  var askedUrls: seq[Uri]
+  var storedUrls: seq[Uri]
+  var storedCookies: seq[seq[string]]
+  var receivedRedirectCookie = false
+  let jar = CookieJar(
+    cookies: proc(url: Uri): seq[string] =
+      askedUrls.add url
+      if url.path == "/jar-redirect":
+        @["jar=initial"]
+      elif receivedRedirectCookie:
+        @["jar=updated"]
+      else:
+        @[],
+    store: proc(url: Uri; setCookieHeaders: seq[string]) =
+      storedUrls.add url
+      storedCookies.add setCookieHeaders
+      if url.path == "/jar-redirect":
+        receivedRedirectCookie = true
+  )
+  let withJar = Options(cookieJar: jar)
+  let (parts, err) = run(service.Request(url: origin & "/jar-redirect", httpMethod: "GET",
+    headers: @[Header(name: "Cookie", value: "explicit=yes")], redirect: "follow"),
+    withJar)
+  doAssert err == nil
+  doAssert parts.len == 2
+  doAssert parts[0].status == 200
+  doAssert parts[0].redirected
+  doAssert parts[1].chunk == "explicit=yes; jar=updated"
+  doAssert askedUrls.len == 2
+  doAssert askedUrls[0].path == "/jar-redirect"
+  doAssert askedUrls[1].path == "/jar"
+  doAssert storedUrls.len == 2
+  doAssert storedUrls[0].path == "/jar-redirect"
+  doAssert storedUrls[1].path == "/jar"
+  doAssert storedCookies == @[
+    @["redirect=yes; Path=/"],
+    @["server=session; Path=/", "theme=dark; HttpOnly"]]
+
+block cross_domain_redirect_recalculates_jar_and_drops_explicit_credentials:
+  var askedHosts: seq[string]
+  let jar = CookieJar(
+    cookies: proc(url: Uri): seq[string] =
+      askedHosts.add url.hostname
+      if url.hostname == "example.invalid": @["jar=origin"]
+      else: @["jar=destination"],
+    store: proc(url: Uri; setCookieHeaders: seq[string]) = discard
+  )
+  let options = Options(proxy: newProxy(origin), cookieJar: jar)
+  let (parts, err) = run(service.Request(
+    url: "http://example.invalid/jar-external-redirect", httpMethod: "GET",
+    headers: @[Header(name: "Cookie", value: "private=secret"),
+      Header(name: "Authorization", value: "Bearer secret")],
+    redirect: "follow"), options)
+  doAssert err == nil
+  doAssert parts.len == 2
+  doAssert parts[0].redirected
+  doAssert parts[1].chunk == "jar=destination|"
+  doAssert askedHosts == @["example.invalid", "other.invalid"]
 
 block allow_callback_can_refuse_without_sending:
   let denied = Options(allow: proc(request: service.Request): bool = false)
