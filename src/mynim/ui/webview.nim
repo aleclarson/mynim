@@ -70,7 +70,8 @@ proc webViewPlacement(layout: LayoutResult; conn: surface.Conn;
     return
   let node = owner.nodes[slot]
   if node.webView == nil or layout.backfaceBlocked[slot] or
-      owner.effectivelyToolbarCollapsed(slot):
+      owner.effectivelyToolbarCollapsed(slot) or
+      layout.insideCapturedEffect(slot, scale):
     return
   let native = node.webView.surfaceWebView(conn)
   if native == nil:

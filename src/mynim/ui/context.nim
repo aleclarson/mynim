@@ -301,6 +301,7 @@ type
     pendingTextSubmitCallbacks: Table[uint64, seq[proc() {.closure.}]]
     textInputClients: Table[uint64, platform.TextInputClient]
     animations: Table[uint64, Table[string, ScalarAnimation]]
+    effectLayers: Table[uint64, scene.Image]
     transitionReentries: Table[uint64, TransitionReentry]
     transitionMatches: Table[MatchKey, TransitionMatchRecord]
     draggableStates: Table[uint64, DraggableState]
@@ -610,6 +611,7 @@ type
     hasGradient: bool
     gradient: LinearGradient
     shadows: seq[UiShadow]
+    blur: float32
     radius, border: array[4, float32]
     borderStyle: BorderStyle
 
@@ -769,6 +771,7 @@ proc newContext*(): Context =
     initTable[uint64, platform.TextInputClient]()
   result.owner.animations =
     initTable[uint64, Table[string, ScalarAnimation]]()
+  result.owner.effectLayers = initTable[uint64, scene.Image]()
   result.owner.transitionReentries =
     initTable[uint64, TransitionReentry]()
   result.owner.transitionMatches =
@@ -1278,6 +1281,7 @@ proc retire(owner: ElementOwner) =
   owner.pendingTextSubmitCallbacks.clear()
   owner.textInputClients.clear()
   owner.animations.clear()
+  owner.effectLayers.clear()
   owner.transitionMatches.clear()
   owner.draggableStates.clear()
   owner.draggableGesture = DraggableGesture()
@@ -2001,6 +2005,7 @@ proc build*(c: Context; view: proc(c: Context) {.closure.}) =
       initTable[uint64, platform.TextInputClient]()
     c.owner.animations =
       initTable[uint64, Table[string, ScalarAnimation]]()
+    c.owner.effectLayers = initTable[uint64, scene.Image]()
     c.owner.transitionReentries =
       initTable[uint64, TransitionReentry]()
     c.owner.transitionMatches =
@@ -2142,6 +2147,13 @@ proc build*(c: Context; view: proc(c: Context) {.closure.}) =
         staleAnimations.add(identity)
     for identity in staleAnimations:
       c.owner.animations.del(identity)
+    var staleEffectLayers: seq[uint64]
+    for identity in c.owner.effectLayers.keys:
+      let slot = c.owner.idSlots.getOrDefault(identity, -1)
+      if slot < 0 or c.owner.nodes[slot].blur <= 0:
+        staleEffectLayers.add(identity)
+    for identity in staleEffectLayers:
+      c.owner.effectLayers.del(identity)
     var staleDraggables: seq[uint64]
     for identity in c.owner.draggableStates.keys:
       if not c.owner.idSlots.hasKey(identity) and

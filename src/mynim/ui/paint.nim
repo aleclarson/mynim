@@ -81,6 +81,13 @@ proc opacity*(e: Element; value: float32): Element =
     n.opacity = if value.finite: min(max(value, 0'f32), 1'f32) else: 0
     n.opacitySet = true
 
+proc blur*(e: Element; sigma: float32): Element =
+  ## Blurs this element and its descendants as one rendered layer.
+  result = e
+  let n = e.node
+  if n != nil:
+    n.blur = nonnegative(sigma)
+
 proc gradient*(e: Element; value: LinearGradient): Element =
   ## Fills the element with a two-color linear gradient.
   result = e
@@ -1417,6 +1424,11 @@ proc clipOp(layout: LayoutResult; slot: int; scale: float32): scene.Op =
     radii: radii.scaledEdges(scale), continuous: continuousCorners)
   result.transform = layout.pixelTransform(slot, scale)
 
+proc opacityForPaint(nodes: seq[ElementNode]; slot, boundary: int): float32
+proc addAncestorClips(sceneFrame: scene.Scene; layout: LayoutResult;
+                      slot: int; scale: float32; boundary: int;
+                      includeSelf = false): int
+
 proc opacityOf(nodes: seq[ElementNode]; slot: int): float32 =
   result = 1
   var current = slot
@@ -1438,17 +1450,12 @@ proc opacityOf(nodes: seq[ElementNode]; slot: int): float32 =
     current = int(node.parent)
 
 proc paintScrollbar(sceneFrame: scene.Scene; layout: LayoutResult;
-                    slot: int; rect: Rect; scale, opacity: float32) =
+                    slot: int; rect: Rect; scale, opacity: float32;
+                    boundary = -1) =
   if rect.w <= 0 or rect.h <= 0:
     return
   let color = layout.owner.nodes[slot].scrollbarColor
-  var clips = 0
-  var parent = int(layout.owner.nodes[slot].parent)
-  while parent >= 0:
-    if layout.owner.nodes[parent].clipsChildren:
-      sceneFrame.ops.add(layout.clipOp(parent, scale))
-      inc clips
-    parent = int(layout.owner.nodes[parent].parent)
+  let clips = sceneFrame.addAncestorClips(layout, slot, scale, boundary)
   let radius = min(rect.w, rect.h) / 2 * scale
   sceneFrame.ops.add(scene.Op(kind: scene.opFill,
     rect: rect.sceneRect(layout.root, scale),
@@ -1461,7 +1468,8 @@ proc paintScrollbar(sceneFrame: scene.Scene; layout: LayoutResult;
     sceneFrame.ops.add(scene.Op(kind: scene.opPopClip))
 
 proc paintListReorderIndicator(sceneFrame: scene.Scene; layout: LayoutResult;
-                               slot: int; scale: float32) =
+                               slot: int; scale: float32;
+                               boundary = -1) =
   let node = layout.owner.nodes[slot]
   let state = node.listState
   if state == nil or not state.reorderDragging or
@@ -1477,16 +1485,11 @@ proc paintListReorderIndicator(sceneFrame: scene.Scene; layout: LayoutResult;
   let lineW = max(right - left - 8, 0'f32)
   let dotX = if rtl: right - 8 else: left
   let y = state.reorderIndicatorY
-  let opacity = opacityOf(layout.owner.nodes, slot)
+  let opacity = opacityForPaint(layout.owner.nodes, slot, boundary)
   if opacity == 0:
     return
-  var clips = 0
-  var parent = slot
-  while parent >= 0:
-    if layout.owner.nodes[parent].clipsChildren:
-      sceneFrame.ops.add(layout.clipOp(parent, scale))
-      inc clips
-    parent = int(layout.owner.nodes[parent].parent)
+  let clips = sceneFrame.addAncestorClips(layout, slot, scale, boundary,
+    includeSelf = true)
   for item in [
       Rect(x: lineX, y: y - 1, w: lineW, h: 2),
       Rect(x: dotX, y: y - 4, w: 8, h: 8)]:
@@ -1505,7 +1508,7 @@ proc paintListReorderIndicator(sceneFrame: scene.Scene; layout: LayoutResult;
 
 proc paintFocusRingRect(sceneFrame: scene.Scene; layout: LayoutResult;
                         slot: int; boundsDip: Rect; scale: float32;
-                        inset: bool) =
+                        inset: bool; boundary = -1) =
   let node = layout.owner.nodes[slot]
   let color = node.focusRingColor
   if color.a == 0:
@@ -1527,16 +1530,10 @@ proc paintFocusRingRect(sceneFrame: scene.Scene; layout: LayoutResult;
     radius += expand
     if not radius.finite:
       raise newException(ValueError, "ui: focus ring radius exceeds the float range")
-  let opacity = opacityOf(layout.owner.nodes, slot)
+  let opacity = opacityForPaint(layout.owner.nodes, slot, boundary)
   if opacity == 0:
     return
-  var clips = 0
-  var parent = int(node.parent)
-  while parent >= 0:
-    if layout.owner.nodes[parent].clipsChildren:
-      sceneFrame.ops.add(layout.clipOp(parent, scale))
-      inc clips
-    parent = int(layout.owner.nodes[parent].parent)
+  let clips = sceneFrame.addAncestorClips(layout, slot, scale, boundary)
   var op = scene.Op(kind: scene.opFill, rect: rect,
     color: sceneColor(transparent), paint: scene.paintSolid,
     radii: radii, border: [width, width, width, width],
@@ -1548,14 +1545,16 @@ proc paintFocusRingRect(sceneFrame: scene.Scene; layout: LayoutResult;
     sceneFrame.ops.add(scene.Op(kind: scene.opPopClip))
 
 proc paintFocusRing(sceneFrame: scene.Scene; layout: LayoutResult;
-                    slot: int; scale: float32; inset = false) =
+                    slot: int; scale: float32; inset = false;
+                    boundary = -1) =
   let node = layout.owner.nodes[slot]
   if node.textInline:
     for rect in node.textInlineRects:
-      sceneFrame.paintFocusRingRect(layout, slot, rect, scale, inset)
+      sceneFrame.paintFocusRingRect(layout, slot, rect, scale, inset,
+        boundary)
   else:
     sceneFrame.paintFocusRingRect(layout, slot, layout.rects[slot], scale,
-      inset)
+      inset, boundary)
 
 proc collectPaintOrder(nodes: seq[ElementNode]; slot: int;
                        order: var seq[int]) =
@@ -1571,8 +1570,180 @@ proc collectPaintOrder(nodes: seq[ElementNode]; slot: int;
       collectPaintOrder(nodes, child, order)
     child = int(nodes[child].nextSibling)
 
+const
+  maxEffectLayer = 8192
+  effectLayerStep = 64
+
+type BlurLayerBounds = object
+  x, y, w, h: int
+  originX, originY: float32
+  fits, empty: bool
+
+proc blurLayerBounds(layout: LayoutResult; slot: int;
+                     scale: float32): BlurLayerBounds =
+  let box = layout.rects[slot]
+  if box.w <= 0 or box.h <= 0:
+    result.fits = true
+    result.empty = true
+    return
+  let margin = 3.0 * layout.owner.nodes[slot].blur.float64
+  let sx = scale.float64
+  let x0 = floor((box.x.float64 - layout.root.x.float64 - margin) * sx)
+  let y0 = floor((box.y.float64 - layout.root.y.float64 - margin) * sx)
+  let x1 = ceil((box.x.float64 - layout.root.x.float64 + box.w.float64 +
+    margin) * sx)
+  let y1 = ceil((box.y.float64 - layout.root.y.float64 + box.h.float64 +
+    margin) * sx)
+  let w = x1 - x0
+  let h = y1 - y0
+  if x0.isNan or y0.isNan or x1.isNan or y1.isNan or
+      classify(x0) in {fcInf, fcNegInf} or
+      classify(y0) in {fcInf, fcNegInf} or
+      classify(x1) in {fcInf, fcNegInf} or
+      classify(y1) in {fcInf, fcNegInf} or
+      abs(x0) > high(int).float64 or abs(y0) > high(int).float64 or
+      abs(x1) > high(int).float64 or abs(y1) > high(int).float64 or
+      w > maxEffectLayer.float64 or h > maxEffectLayer.float64 or
+      w < 0 or h < 0:
+    return
+  result.x = int(x0)
+  result.y = int(y0)
+  result.w = int(w)
+  result.h = int(h)
+  result.fits = true
+  result.empty = result.w == 0 or result.h == 0
+  let originX = layout.root.x.float64 + x0 / sx
+  let originY = layout.root.y.float64 + y0 / sx
+  if abs(originX) > high(float32).float64 or
+      abs(originY) > high(float32).float64:
+    result.fits = false
+    return
+  result.originX = float32(originX)
+  result.originY = float32(originY)
+
+proc insideCapturedEffect(layout: LayoutResult; slot: int;
+                          scale: float32): bool =
+  var current = slot
+  while current >= 0:
+    if layout.owner.nodes[current].blur > 0 and
+        layout.blurLayerBounds(current, scale).fits:
+      return true
+    current = int(layout.owner.nodes[current].parent)
+
+proc effectLayerSide(size: int): int =
+  min((size + effectLayerStep - 1) div effectLayerStep * effectLayerStep,
+    maxEffectLayer)
+
+proc collectPaintOrder(layout: LayoutResult; slot: int; scale: float32;
+                       subtreeRoot: int; order: var seq[int]) =
+  order.add(slot)
+  if slot != subtreeRoot and layout.owner.nodes[slot].blur > 0 and
+      layout.blurLayerBounds(slot, scale).fits:
+    return
+  var child = int(layout.owner.nodes[slot].firstChild)
+  while child >= 0:
+    if not layout.owner.nodes[child].absolute:
+      collectPaintOrder(layout, child, scale, subtreeRoot, order)
+    child = int(layout.owner.nodes[child].nextSibling)
+  child = int(layout.owner.nodes[slot].firstChild)
+  while child >= 0:
+    if layout.owner.nodes[child].absolute:
+      collectPaintOrder(layout, child, scale, subtreeRoot, order)
+    child = int(layout.owner.nodes[child].nextSibling)
+
+proc opacityForPaint(nodes: seq[ElementNode]; slot, boundary: int): float32 =
+  result = 1
+  var disabledSeen = false
+  if boundary >= 0:
+    var ancestor = boundary
+    while ancestor >= 0:
+      if nodes[ancestor].disabled:
+        disabledSeen = true
+      ancestor = int(nodes[ancestor].parent)
+  var current = slot
+  while current >= 0 and current != boundary:
+    let node = nodes[current]
+    if node.toolbarCollapsed:
+      return 0
+    if node.opacitySet:
+      result *= node.opacity
+    result *= 1'f32 - node.poseFade
+    if node.disabled and not disabledSeen:
+      result *= 0.5'f32
+      disabledSeen = true
+    if result == 0:
+      return
+    current = int(node.parent)
+
+proc addAncestorClips(sceneFrame: scene.Scene; layout: LayoutResult;
+                      slot: int; scale: float32; boundary: int;
+                      includeSelf: bool): int =
+  if boundary >= 0 and slot == boundary and not includeSelf:
+    return
+  var current = if includeSelf: slot else:
+      int(layout.owner.nodes[slot].parent)
+  while current >= 0:
+    if layout.owner.nodes[current].clipsChildren:
+      sceneFrame.ops.add(layout.clipOp(current, scale))
+      inc result
+    if current == boundary:
+      break
+    current = int(layout.owner.nodes[current].parent)
+
+proc shiftEffectSubtree(adjusted: var LayoutResult; source: LayoutResult;
+                        current: int; dx, dy: float32;
+                        invertible: bool; pre, post: scene.Affine) =
+  adjusted.rects[current].x += dx
+  adjusted.rects[current].y += dy
+  if invertible and adjusted.worldTransforms[current].`set`:
+    var transform = scene.mul(pre,
+      scene.mul(adjusted.worldTransforms[current], post))
+    if abs(transform.a - 1) < 1e-4 and abs(transform.b) < 1e-4 and
+        abs(transform.c) < 1e-4 and abs(transform.d - 1) < 1e-4 and
+        abs(transform.x) < 1e-4 and abs(transform.y) < 1e-4 and
+        abs(transform.g) < 1e-4 and abs(transform.h) < 1e-4:
+      transform = scene.Affine()
+    adjusted.worldTransforms[current] = transform
+  var child = int(source.owner.nodes[current].firstChild)
+  while child >= 0:
+    adjusted.shiftEffectSubtree(source, child, dx, dy, invertible, pre,
+      post)
+    child = int(source.owner.nodes[child].nextSibling)
+
+proc effectLayerLayout(layout: LayoutResult; slot: int;
+                       bounds: BlurLayerBounds; scale: float32): LayoutResult =
+  var adjusted = layout
+  adjusted.root = Rect(w: bounds.w.float32 / scale,
+    h: bounds.h.float32 / scale)
+  adjusted.rects = newSeq[Rect](layout.rects.len)
+  for i, rect in layout.rects:
+    adjusted.rects[i] = rect
+  adjusted.worldTransforms = newSeq[scene.Affine](layout.worldTransforms.len)
+  for i, transform in layout.worldTransforms:
+    adjusted.worldTransforms[i] = transform
+  let dx = -bounds.originX
+  let dy = -bounds.originY
+  let (inverse, invertible) = layout.worldTransforms[slot].inverse()
+  var pre, post: scene.Affine
+  if invertible:
+    pre = scene.mul(scene.translation(dx, dy), inverse)
+    post = scene.translation(-dx, -dy)
+  adjusted.shiftEffectSubtree(layout, slot, dx, dy, invertible, pre, post)
+  result = adjusted
+
+proc paintSceneImpl(layout: LayoutResult; scale: float32; clear: Color;
+                    gpuFastPaths: bool; subtreeRoot = -1;
+                    captureCanvas: scene.Image = nil;
+                    captureWidth = 0; captureHeight = 0): scene.Scene
+
 proc paintScene*(layout: LayoutResult; scale = 1'f32;
                  clear = transparent; gpuFastPaths = false): scene.Scene =
+  paintSceneImpl(layout, scale, clear, gpuFastPaths)
+
+proc paintSceneImpl(layout: LayoutResult; scale: float32; clear: Color;
+                    gpuFastPaths: bool; subtreeRoot: int;
+                    captureCanvas: scene.Image;
+                    captureWidth, captureHeight: int): scene.Scene =
   ## Converts a current layout into a device-pixel scene for Mygo's renderers.
   ## Element bounds are translated to the layout root's origin before snapping.
   ## Set `gpuFastPaths` only when submitting to an initialized GPU renderer.
@@ -1584,32 +1755,53 @@ proc paintScene*(layout: LayoutResult; scale = 1'f32;
   if not scale.finite or scale <= 0:
     raise newException(ValueError, "ui: scene scale must be finite and positive")
 
-  layout.owner.paintSlots.setLen(0)
+  var paintSlots: seq[int]
   if layout.owner.nodes.len > 0:
-    collectPaintOrder(layout.owner.nodes, 0, layout.owner.paintSlots)
+    let rootSlot = if subtreeRoot >= 0: subtreeRoot else: 0
+    collectPaintOrder(layout, rootSlot, scale, subtreeRoot, paintSlots)
+  if captureCanvas == nil:
+    layout.owner.paintSlots = paintSlots
 
-  let width = layout.root.w.pixelDimension(scale)
-  let height = layout.root.h.pixelDimension(scale)
+  let width = if captureCanvas == nil:
+      layout.root.w.pixelDimension(scale)
+    else:
+      captureCanvas.w
+  let height = if captureCanvas == nil:
+      layout.root.h.pixelDimension(scale)
+    else:
+      captureCanvas.h
   let maxPixels = high(int) div 4
   if height > 0 and width > maxPixels div height:
     raise newException(ValueError, "ui: scene pixel storage exceeds the platform limit")
 
   let system = textStack.shared()
-  system.beginFrame()
+  let ownsTextFrame = captureCanvas == nil
+  if ownsTextFrame:
+    system.beginFrame()
   try:
-    for attempt in 0..2:
-      result = scene.Scene(width: 0, height: 0, scale: scale)
+    let attempts = if ownsTextFrame: 3 else: 1
+    for attempt in 0..<attempts:
+      result = if captureCanvas == nil: scene.Scene(width: 0, height: 0,
+          scale: scale) else: captureCanvas.scene
+      if result == nil:
+        captureCanvas.scene = scene.Scene(width: 0, height: 0,
+          scale: scale)
+        result = captureCanvas.scene
       result.reset(width, height, sceneColor(clear.srgb))
       result.scale = scale
       result.text = system.textParams()
       result.maskAtlas = system.maskAtlas
       result.colorAtlas = system.colorAtlas
+      if captureCanvas != nil:
+        result.ops.add(scene.Op(kind: scene.opPushClip,
+          rect: scene.Rect(w: captureWidth.float32,
+            h: captureHeight.float32)))
 
-      for slot in layout.owner.paintSlots:
+      for slot in paintSlots:
         if layout.backfaceBlocked[slot]:
           continue
         let node = layout.owner.nodes[slot]
-        let opacity = opacityOf(layout.owner.nodes, slot)
+        let opacity = opacityForPaint(layout.owner.nodes, slot, subtreeRoot)
         if opacity == 0:
           continue
         let fill = if node.hasGradient: node.gradient.fromColor else: node.background
@@ -1623,18 +1815,20 @@ proc paintScene*(layout: LayoutResult; scale = 1'f32;
             fill.a > 0
         let borderVisible = not node.textInline and
           node.borderColor.a > 0 and scene.hasBorder(node.border)
-        if not fillVisible and not borderVisible and node.shadows.len == 0 and
-            node.material == nil and not node.hasText and node.bitmap == nil and
-            node.vector == nil and node.drawFn == nil and node.webView == nil:
-          continue
-
         let rect = layout.rects[slot].sceneRect(layout.root, scale)
         if rect.empty:
           continue
         var clipCount = 0
-        var isTooltip = node.tooltipOverlay
-        var parent = int(node.parent)
+        var isTooltip = node.tooltipOverlay or
+          (subtreeRoot >= 0 and layout.owner.nodes[subtreeRoot].tooltipOverlay)
+        var parent = if slot == subtreeRoot: -1 else: int(node.parent)
         while parent >= 0:
+          if subtreeRoot >= 0 and parent == subtreeRoot:
+            if slot != subtreeRoot and
+                layout.owner.nodes[parent].clipsChildren and not isTooltip:
+              result.ops.add(layout.clipOp(parent, scale))
+              inc clipCount
+            break
           if layout.owner.nodes[parent].tooltipOverlay:
             isTooltip = true
           if layout.owner.nodes[parent].clipsChildren and not isTooltip:
@@ -1642,6 +1836,46 @@ proc paintScene*(layout: LayoutResult; scale = 1'f32;
             inc clipCount
           parent = int(layout.owner.nodes[parent].parent)
         let firstNodeOp = result.ops.len
+        if node.blur > 0 and slot != subtreeRoot:
+          let bounds = layout.blurLayerBounds(slot, scale)
+          if bounds.fits:
+            if not bounds.empty:
+              var layer = layout.owner.effectLayers.getOrDefault(
+                node.identity)
+              let layerWidth = effectLayerSide(bounds.w)
+              let layerHeight = effectLayerSide(bounds.h)
+              if layer == nil:
+                layer = scene.newCanvas(layerWidth, layerHeight)
+                layout.owner.effectLayers[node.identity] = layer
+              elif layer.w < bounds.w or layer.h < bounds.h or
+                  layer.w - bounds.w >= 2 * effectLayerStep or
+                  layer.h - bounds.h >= 2 * effectLayerStep:
+                layer.w = layerWidth
+                layer.h = layerHeight
+                layer.scene.width = layerWidth
+                layer.scene.height = layerHeight
+                layer.changed()
+              let layerLayout = layout.effectLayerLayout(slot, bounds,
+                scale)
+              discard paintSceneImpl(layerLayout, scale, transparent,
+                gpuFastPaths, slot, layer, bounds.w, bounds.h)
+              result.ops.add(scene.Op(kind: scene.opImage,
+                rect: scene.Rect(x: bounds.x.float32, y: bounds.y.float32,
+                  w: bounds.w.float32, h: bounds.h.float32),
+                image: layer,
+                src: scene.Rect(w: bounds.w.float32,
+                  h: bounds.h.float32),
+                blur: node.blur.scaled(scale), opacity: opacity))
+            result.applyLayoutTransform(firstNodeOp, layout, slot, scale)
+            for _ in 0..<clipCount:
+              result.ops.add(scene.Op(kind: scene.opPopClip))
+            continue
+        if not fillVisible and not borderVisible and node.shadows.len == 0 and
+            node.material == nil and not node.hasText and node.bitmap == nil and
+            node.vector == nil and node.drawFn == nil and node.webView == nil:
+          for _ in 0..<clipCount:
+            result.ops.add(scene.Op(kind: scene.opPopClip))
+          continue
         for shadow in node.shadows:
           if not node.textInline and not shadow.inset:
             result.paintShadow(node, layout.rects[slot], layout.root,
@@ -1719,7 +1953,7 @@ proc paintScene*(layout: LayoutResult; scale = 1'f32;
         for _ in 0..<clipCount:
           result.ops.add(scene.Op(kind: scene.opPopClip))
 
-      for slot in layout.owner.paintSlots:
+      for slot in paintSlots:
         if layout.backfaceBlocked[slot]:
           continue
         let node = layout.owner.nodes[slot]
@@ -1731,11 +1965,11 @@ proc paintScene*(layout: LayoutResult; scale = 1'f32;
         let firstCaretOp = result.ops.len
         result.ops.add(layout.clipOp(slot, scale))
         result.paintTextCaret(node, layout.rects[slot], layout.root,
-                              scale, opacityOf(layout.owner.nodes, slot))
+          scale, opacityForPaint(layout.owner.nodes, slot, subtreeRoot))
         result.ops.add(scene.Op(kind: scene.opPopClip))
         result.applyLayoutTransform(firstCaretOp, layout, slot, scale)
 
-      for slot in layout.owner.paintSlots:
+      for slot in paintSlots:
         if layout.backfaceBlocked[slot]:
           continue
         let node = layout.owner.nodes[slot]
@@ -1745,32 +1979,37 @@ proc paintScene*(layout: LayoutResult; scale = 1'f32;
               slot notin layout.owner.hoveredSlots):
           continue
         let bars = layout.scrollbars(slot)
-        let opacity = opacityOf(layout.owner.nodes, slot)
+        let opacity = opacityForPaint(layout.owner.nodes, slot, subtreeRoot)
         let firstScrollbarOp = result.ops.len
         if bars.vertical:
           paintScrollbar(result, layout, slot, bars.verticalThumb, scale,
-            opacity)
+            opacity, subtreeRoot)
         if bars.horizontal:
           paintScrollbar(result, layout, slot, bars.horizontalThumb, scale,
-            opacity)
+            opacity, subtreeRoot)
         result.applyLayoutTransform(firstScrollbarOp, layout, slot, scale)
 
-      for slot in layout.owner.paintSlots:
+      for slot in paintSlots:
         if layout.backfaceBlocked[slot]:
           continue
         let node = layout.owner.nodes[slot]
         let firstDecorationOp = result.ops.len
         if node.listState != nil and node.listRowIndex == -1:
-          result.paintListReorderIndicator(layout, slot, scale)
+          result.paintListReorderIndicator(layout, slot, scale, subtreeRoot)
         if node.listRowFocusVisible:
-          result.paintFocusRing(layout, slot, scale, inset = true)
+          result.paintFocusRing(layout, slot, scale, inset = true,
+            boundary = subtreeRoot)
         elif node.focusVisible and node.focusable and
             not node.focusRingDisabled:
-          result.paintFocusRing(layout, slot, scale)
+          result.paintFocusRing(layout, slot, scale, boundary = subtreeRoot)
         result.applyLayoutTransform(firstDecorationOp, layout, slot, scale)
 
-      if not system.full() or attempt == 2:
+      if captureCanvas != nil:
+        result.ops.add(scene.Op(kind: scene.opPopClip))
+        captureCanvas.changed()
+      if not system.full() or not ownsTextFrame or attempt == attempts - 1:
         break
       system.makeRoom()
   finally:
-    system.endFrame()
+    if ownsTextFrame:
+      system.endFrame()
