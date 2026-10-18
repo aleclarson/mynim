@@ -70,6 +70,7 @@ type
 
 const
   success: GhosttyResult = 0
+  outOfSpace: GhosttyResult = -3
   noValue: GhosttyResult = -4
   gesturePress = 0'i32
   gestureRelease = 1'i32
@@ -215,6 +216,38 @@ proc cellAt*(terminal: GhosttyTerminal; column, row: int):
     return some(reference)
   if status != noValue:
     checkResult("cell reference query", status)
+
+proc hyperlinkUri*(terminal: GhosttyTerminal;
+                   reference: GhosttyGridRef): string =
+  ## Returns the OSC 8 URI attached to a terminal cell, if it has one.
+  let query = cast[proc(reference: ptr GhosttyGridRef;
+      buffer: ptr UncheckedArray[byte]; bufferLength: csize_t;
+      outputLength: ptr csize_t): GhosttyResult {.cdecl.}](
+    requiredSymbol(terminal.ghosttyLibrary(),
+      "ghostty_grid_ref_hyperlink_uri"))
+  var buffer: array[512, byte]
+  var length: csize_t
+  var status = query(unsafeAddr reference,
+    cast[ptr UncheckedArray[byte]](addr buffer[0]), csize_t(buffer.len),
+    addr length)
+  if status == outOfSpace and length > 0:
+    if length > csize_t(high(int)):
+      return ""
+    var larger = newSeq[byte](int(length))
+    status = query(unsafeAddr reference,
+      cast[ptr UncheckedArray[byte]](addr larger[0]), csize_t(larger.len),
+      addr length)
+    if status != success or length > csize_t(larger.len):
+      return ""
+    result = newString(int(length))
+    if length > 0:
+      copyMem(addr result[0], addr larger[0], int(length))
+    return
+  if status != success or length > csize_t(buffer.len):
+    return ""
+  result = newString(int(length))
+  if length > 0:
+    copyMem(addr result[0], addr buffer[0], int(length))
 
 proc press*(gesture: GhosttySelectionGesture; terminal: GhosttyTerminal;
             reference: GhosttyGridRef; x, y: float64;

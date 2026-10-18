@@ -22,6 +22,7 @@ suite "native Terminal API":
   test "builds a GPU scene and sizes the PTY from the native view":
     if getEnv("MYNIM_GHOSTTY_VT").len == 0:
       skip()
+    let oscUrl = "https://osc.example/" & repeat("x", 600)
     var options = defaultTerminalOptions()
     options.command = @[
       when defined(windows): "cmd.exe"
@@ -29,8 +30,21 @@ suite "native Terminal API":
       when defined(windows): "/c"
       else: "-c",
       when defined(windows): "ping -n 10 127.0.0.1 >nul"
-      else: "sleep 10"]
+      else:
+        "printf '\\033]8;;" & oscUrl &
+        "\\aosc-link\\033]8;;\\a\\r\\n" &
+        "https://text.example/path.\\r\\n" &
+        "./src/main.nim:12:3\\r\\n'; sleep 10"]
     options.font.fontFeatures = "liga=0,calt=0"
+    var openedPaths: seq[string]
+    var seenLinks: seq[string]
+    options.openLink = proc(link: string): bool =
+      seenLinks.add(link)
+      if link.startsWith("./"):
+        openedPaths.add(link)
+        true
+      else:
+        false
     let terminal = newTerminal(options)
     defer: terminal.close()
     let tester = ui.newTester(proc(c: ui.Context) =
@@ -40,6 +54,27 @@ suite "native Terminal API":
     let (cols, rows) = terminal.size()
     check cols > 0 and rows > 0
     check (cols, rows) != (80, 24)
+    when not defined(windows):
+      const commandMods = when defined(macosx): ui.modSuper else: ui.modCtrl
+      tester.move(20, 12)
+      tester.holdModifiers(commandMods)
+      check tester.cursor() == ui.cursorPointer
+      tester.holdModifiers(0)
+      check tester.cursor() == ui.cursorText
+
+      tester.clickAt(20, 12)
+      check tester.openedUrls().len == 0
+      check seenLinks.len == 0
+      tester.clickAtWith(commandMods, 20, 12)
+      check tester.openedUrls() == @[oscUrl]
+      tester.clickAtWith(commandMods, 20, 30)
+      check tester.openedUrls() == @[
+        oscUrl, "https://text.example/path"]
+      tester.clickAtWith(commandMods, 20, 48)
+      check openedPaths == @["./src/main.nim:12:3"]
+      check seenLinks == @[
+        oscUrl, "https://text.example/path",
+        "./src/main.nim:12:3"]
 
   test "encodes typed text and pastes clipboard through the native view":
     if getEnv("MYNIM_GHOSTTY_VT").len == 0:

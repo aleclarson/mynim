@@ -1,6 +1,6 @@
 ## A PTY process connected to a serialized Ghostty terminal and render state.
 
-import std/[locks, options]
+import std/[locks, options, unicode]
 import ./pty
 import ./vt/[effects, encode, frame, input, library, render, selection, terminal]
 
@@ -745,6 +745,48 @@ proc snapshot*(session: TerminalSession): TerminalFrame =
       result = session.heldFrame.get()
     else:
       result = session.renderState.snapshot(session.terminal)
+  finally:
+    session.terminalGuard.release()
+
+proc hyperlinkAt*(session: TerminalSession; column, row: int): string =
+  ## Returns the OSC 8 URI attached to a visible terminal cell.
+  if session.isNil:
+    raise newException(ValueError, "terminal session is nil")
+  session.lockTerminal()
+  try:
+    let reference = session.terminal.cellAt(column, row)
+    if reference.isSome:
+      result = session.terminal.hyperlinkUri(reference.get())
+  finally:
+    session.terminalGuard.release()
+
+proc rowText*(session: TerminalSession; row: int):
+    tuple[text: string, columns: seq[int]] =
+  ## Returns visible row text with a cell column for each Unicode codepoint.
+  if session.isNil:
+    raise newException(ValueError, "terminal session is nil")
+  if row < 0:
+    return
+  session.lockTerminal()
+  try:
+    let frame = if session.renderHeld and session.heldFrame.isSome:
+        session.heldFrame.get()
+      else:
+        session.renderState.snapshot(session.terminal)
+    for visibleRow in frame.viewport:
+      if visibleRow.viewportY != row:
+        continue
+      for column, frameCell in visibleRow.cells:
+        if frameCell.cell.wide in {cellSpacerTail, cellSpacerHead}:
+          continue
+        if frameCell.codepoints.len == 0:
+          result.text.add(' ')
+          result.columns.add(column)
+          continue
+        for value in frameCell.codepoints:
+          result.text.add(toUTF8(Rune(value)))
+          result.columns.add(column)
+      return
   finally:
     session.terminalGuard.release()
 

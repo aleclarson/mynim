@@ -2,7 +2,7 @@
 
 import std/[math, monotimes, options, os, strutils, tables, times, unicode]
 import mynim/ui as ui
-import mynim/plugins/terminal/internal/[pty, session, view_paint]
+import mynim/plugins/terminal/internal/[links, pty, session, view_paint]
 import mynim/plugins/terminal/internal/vt/[input as vtInput, library,
     terminal as vtTerminal]
 import mynim/plugins/terminal/native_library
@@ -45,10 +45,12 @@ type
     onExit*: proc(exitCode: int) {.closure.}
     onBell*: proc() {.closure.}
     onKey*: proc(mods: ui.Modifiers; key: ui.Key): bool {.closure.}
+    ## Handles a modifier-clicked terminal link and reports whether it opened.
+    openLink*: proc(link: string): bool {.closure.}
 
   TerminalViewState = ref object
     hasGrid, hasFocus, focused, cursorBlinking, pointerPressed: bool
-    selecting, ticking, scrollbarDragging: bool
+    selecting, ticking, scrollbarDragging, hoverLink, linkPress: bool
     hasPendingKey: bool
     grid: TerminalGrid
     bounds: ui.Rect
@@ -362,6 +364,54 @@ proc selectionGeometry(terminal: Terminal; paddingLeft, paddingTop: int):
     paddingLeft: paddingLeft,
     screenHeight: paddingTop + grid.rows * max(grid.cellHeightPixels, 1))
 
+proc linkAt(terminal: Terminal; column, row: int): links.TerminalLink =
+  let hyperlink = terminal.session.hyperlinkAt(column, row)
+  if hyperlink.len > 0:
+    return links.TerminalLink(target: hyperlink)
+  let (text, columns) = terminal.session.rowText(row)
+  links.linkAt(text, columns, column,
+    includePaths = terminal.options.openLink != nil)
+
+proc linkUnder(terminal: Terminal; mods: ui.Modifiers; x, y: float32):
+    links.TerminalLink =
+  const commandMods = when defined(macosx): ui.modSuper else: ui.modCtrl
+  if (mods and commandMods) == 0 or terminal.state.selecting or
+      terminal.state.pointerPressed or terminal.state.linkPress or
+      not terminal.state.hasGrid:
+    return
+  let pointer = terminal.selectionCell(x, y)
+  terminal.linkAt(pointer.column, pointer.row)
+
+proc updateLinkHover(terminal: Terminal; services: ui.Services;
+                     mods: ui.Modifiers; x, y: float32): links.TerminalLink =
+  result = terminal.linkUnder(mods, x, y)
+  let hover = result.target.len > 0
+  if terminal.state.hoverLink != hover:
+    terminal.state.hoverLink = hover
+    services.invalidate()
+
+proc handleTerminalLink(terminal: Terminal; services: ui.Services;
+                        event: ui.InputEvent): bool =
+  terminal.state.pointerX = event.x
+  terminal.state.pointerY = event.y
+  if terminal.state.linkPress:
+    if event.kind == ui.InputKind.InputPointerUp:
+      terminal.state.linkPress = false
+    return true
+
+  let link = terminal.updateLinkHover(services, event.mods, event.x, event.y)
+  if event.kind != ui.InputKind.InputPointerDown or event.button != 0 or
+      link.target.len == 0:
+    return false
+
+  terminal.state.linkPress = true
+  let handled = terminal.options.openLink != nil and
+    terminal.options.openLink(link.target)
+  if not handled and not link.isPath and
+      links.safeTerminalUrl(link.target):
+    services.openUrl(link.target)
+  true
+
 proc copySelection(terminal: Terminal; services: ui.Services;
                    clear: bool): bool =
   let selected = terminal.session.selectedText()
@@ -575,6 +625,10 @@ proc handleInput(terminal: Terminal; services: ui.Services;
     return false
   of ui.InputKind.InputPointerDown, ui.InputKind.InputPointerUp,
       ui.InputKind.InputPointerMove:
+    terminal.state.pointerX = event.x
+    terminal.state.pointerY = event.y
+    if terminal.handleTerminalLink(services, event):
+      return true
     let tracking = terminal.session.mouseTracking() and
       (event.mods and ui.modShift) == 0
     if not terminal.state.hasGrid:
@@ -778,7 +832,11 @@ proc view*(context: ui.Context; terminal: Terminal): ui.Element =
       terminal.session.clearScrollback()
       services.invalidate()
   )
-  discard result.cursor(ui.cursorText)
+  let hoverLink = terminal.linkUnder(context.modifiers(),
+    terminal.state.pointerX, terminal.state.pointerY)
+  terminal.state.hoverLink = hoverLink.target.len > 0
+  discard result.cursor(if terminal.state.hoverLink:
+      ui.cursorPointer else: ui.cursorText)
   let draw = proc(painter: var ui.Painter; bounds: ui.Rect) =
     terminal.state.bounds = bounds
     let theme = terminal.applyTheme(darkAppearance)

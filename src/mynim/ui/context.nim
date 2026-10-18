@@ -22,6 +22,7 @@ type
     segmentedToggles, toolbarButtons: bool
     formDepth: int
     pendingKey: string
+    inputModifiers: platform.Modifiers
     rightToLeft: bool
     localeTag: string
     region: surface.Region
@@ -789,6 +790,16 @@ proc services*(c: Context): Services =
   ## when its content closes.
   if c != nil:
     result.state = c.serviceState
+
+proc modifiers*(c: Context): platform.Modifiers =
+  ## Returns the modifier keys currently held on the window.
+  if c != nil:
+    result = c.inputModifiers
+
+proc setModifiers*(c: Context; value: platform.Modifiers) =
+  ## Updates the modifiers available to the next view build.
+  if c != nil:
+    c.inputModifiers = value
 
 proc serviceAccess(s: Services): ServicesAccess =
   let state = s.state

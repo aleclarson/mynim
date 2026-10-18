@@ -2922,6 +2922,13 @@ proc inputKeyUp(rt: Runtime; ev: platform.SurfaceEvent): platform.Key =
 proc event(rt: Runtime; ev: platform.SurfaceEvent): bool =
   if rt.closed:
     return false
+  case ev.kind
+  of platform.pointerMove, platform.pointerDown, platform.pointerUp,
+      platform.pointerScroll, platform.keyPressed, platform.keyReleased,
+      platform.modifiersChanged:
+    rt.context.setModifiers(ev.mods)
+  else:
+    discard
   if ev.kind != platform.surfaceFrame:
     rt.poseOnlyFrame = false
   case ev.kind
@@ -3840,6 +3847,7 @@ proc event(rt: Runtime; ev: platform.SurfaceEvent): bool =
     rt.requestFrame()
     true
   of platform.surfaceBlur:
+    rt.context.setModifiers(0)
     let previousPressed = rt.pressedSlots
     let previousFocusVisible = rt.keyboardFocusVisible
     let hadTextInput = rt.hasTextInputState and rt.lastTextInput.active
@@ -3890,6 +3898,10 @@ proc event(rt: Runtime; ev: platform.SurfaceEvent): bool =
     rt.refreshPointer()
     if rt.hoverSlots != previousHover or rt.pressedSlots != previousPressed:
       rt.requestFrame()
+    false
+  of platform.modifiersChanged:
+    rt.refreshPointer()
+    rt.requestFrame()
     false
   of platform.accessibilityOn:
     rt.accessibilityOn = true
