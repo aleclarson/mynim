@@ -1,5 +1,6 @@
 import std/[atomics, options, os, strutils, unittest]
 import mynim/plugins/terminal
+import mynim/transfer as transfer
 import mynim/ui as ui
 
 suite "native Terminal API":
@@ -319,6 +320,63 @@ suite "native Terminal API":
       tester.setClipboard("pasted")
       tester.rightClickAt(30, 20)
       check tester.chooseMenuItem("Paste") == nil
+      check terminal.waitForExit() == 0
+
+  test "offers all clipboard formats to the paste callback":
+    if getEnv("MYNIM_GHOSTTY_VT").len == 0:
+      skip()
+    when defined(windows):
+      skip()
+    else:
+      var offeredFormats: seq[transfer.Format]
+      var offeredText = ""
+      var options = defaultTerminalOptions()
+      options.command = @[
+        "/bin/bash", "-c",
+        "read -t 1 -n 6 -r value && exit 12; exit 0"]
+      options.onPaste = proc(data: transfer.Data): bool =
+        offeredFormats = data.formats()
+        let read = data.read(transfer.Text)
+        if read.err == nil:
+          offeredText = transfer.bytesToString(read.data)
+        true
+      let terminal = newTerminal(options)
+      defer: terminal.close()
+      let tester = ui.newTester(proc(c: ui.Context) =
+        discard view(c, terminal).size(800, 500)
+      , 800, 500)
+      defer: tester.close()
+      tester.setFocused(true)
+      tester.clickAt(20, 20)
+      tester.setClipboardData(transfer.newData(transfer.newItem(
+        transfer.bytes(transfer.Text, "pasted"),
+        transfer.bytes(transfer.HTML, "<b>pasted</b>"))))
+      tester.command("paste")
+      check offeredFormats == @[transfer.Text, transfer.HTML]
+      check offeredText == "pasted"
+      check terminal.waitForExit() == 0
+
+  test "falls back to text paste when the paste callback declines":
+    if getEnv("MYNIM_GHOSTTY_VT").len == 0:
+      skip()
+    when defined(windows):
+      skip()
+    else:
+      var options = defaultTerminalOptions()
+      options.command = @[
+        "/bin/bash", "-c",
+        "read -t 3 -n 6 -r value || exit 98; test \"$value\" = pasted"]
+      options.onPaste = proc(data: transfer.Data): bool = false
+      let terminal = newTerminal(options)
+      defer: terminal.close()
+      let tester = ui.newTester(proc(c: ui.Context) =
+        discard view(c, terminal).size(800, 500)
+      , 800, 500)
+      defer: tester.close()
+      tester.setFocused(true)
+      tester.clickAt(20, 20)
+      tester.setClipboardData(transfer.textData("pasted"))
+      tester.command("paste")
       check terminal.waitForExit() == 0
 
   test "pastes clipboard on configured right-click":

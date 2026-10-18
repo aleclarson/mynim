@@ -79,6 +79,9 @@ type
     noClipboardWrite*: bool
     ## Controls terminal programs' clipboard reads; denied by default.
     clipboardRead*: TerminalClipboardAccess
+    ## On the UI thread, receives every clipboard representation before paste;
+    ## return true to handle it instead of sending clipboard text to the program.
+    onPaste*: proc(data: transfer.Data): bool {.closure.}
     theme*, darkTheme*: TerminalTheme
     onTitle*: proc(title: string) {.closure.}
     onExit*: proc(exitCode: int) {.closure.}
@@ -495,11 +498,22 @@ proc selectAll(terminal: Terminal; services: ui.Services) =
   services.invalidate()
 
 proc pasteClipboard(terminal: Terminal; services: ui.Services) =
+  if services.clipboardFormats().len == 0:
+    return
+  var data: transfer.Data
+  if terminal.options.onPaste != nil:
+    data = services.readClipboardData()
+    if terminal.options.onPaste(data):
+      return
+  else:
+    data = services.readClipboardData(transfer.Text)
+  let read = data.read(transfer.Text)
+  let text = if read.err == nil: transfer.bytesToString(read.data) else: ""
   terminal.state.preedit.setLen(0)
   terminal.state.hasPendingKey = false
   terminal.session.scrollToBottom()
   terminal.session.clearSelection()
-  terminal.session.paste(services.readClipboard())
+  terminal.session.paste(text)
 
 proc tickSelection(terminal: Terminal) =
   if not terminal.state.selecting or not terminal.state.ticking or
