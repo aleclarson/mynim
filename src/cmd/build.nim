@@ -3,6 +3,7 @@
 import std/[algorithm, json, os, osproc, streams, strutils, tempfiles]
 import ./resources as projectResources
 import ./generate
+import ./native_plugins as nativePlugins
 import ./publish as releasePublisher
 import ./update_artifacts as updateArtifacts
 when hostOS == "macosx":
@@ -75,6 +76,7 @@ proc compileApp(projectDir, source, output, cache: string; debug,
   var args = @["c", "--nimcache:" & cache]
   if not debug:
     args.add "-d:release"
+  args.add "-d:mynimCollectNativePlugins"
   if embedFrontend:
     args.add "-d:mynimGeneratedFrontend"
   addStringDefine(args, "packageName", name)
@@ -458,6 +460,8 @@ proc runBuild*(args: seq[string]): int =
         return 1
       projectResources.copyResources(projectDir, resourcesDir, targetOs,
         targetArch, config)
+      discard nativePlugins.stageNativePlugins(compiled.log, resourcesDir,
+        targetOs, targetArch)
       writeInfoPlist(contents / "Info.plist", name, identifier, version,
         executable)
       macCodeSign.signBundle(bundle, signingIdentity, entitlements,
@@ -480,6 +484,8 @@ proc runBuild*(args: seq[string]): int =
         return 1
       projectResources.copyResources(projectDir, stage, targetOs, targetArch,
         config)
+      discard nativePlugins.stageNativePlugins(compiled.log, stage, targetOs,
+        targetArch)
       when hostOS == "windows":
         windowsSign.signWindowsBuild(projectDir, stage, executable, config)
         windowsPayload = windowsInstaller.stageFiles(stage)

@@ -2,6 +2,7 @@
 
 import std/[json, os, osproc, streams, strformat, strutils, tempfiles]
 import mynim as core
+import mynim/internal/native_asset_cache as nativeAssetCache
 import mynim/internal/sha256
 import mynim/plugins/terminal/internal/vt/library as vtLibrary
 
@@ -13,6 +14,10 @@ type NativeLibraryFile* = object
 const
   nativeLibrariesJson = staticRead("native-libraries.json")
   maxNativeLibraryBytes = 256'i64 * 1024 * 1024
+
+when defined(mynimCollectNativePlugins):
+  static:
+    echo "MYNIM_NATIVE_PLUGIN_MODULE=" & currentSourcePath()
 
 proc requiredString(node: JsonNode; key, context: string): string =
   if node.kind != JObject or not node.hasKey(key) or
@@ -67,7 +72,8 @@ proc hostNativeLibrary*(): NativeLibraryFile =
   nativeLibraryFor(osName, arch)
 
 proc cacheFile(asset: NativeLibraryFile): string =
-  core.app.path(core.pathCache) / "natives" / asset.sha256 / asset.name
+  nativeAssetCache.nativeAssetCachePath(
+    nativeAssetCache.nativeAssetCacheRoot(), asset.sha256, asset.name)
 
 proc sha256File(path: string): string =
   var file: File

@@ -11,6 +11,7 @@ import ./build as nativeBuild
 when hostOS == "macosx":
   import ./codesign as macCodeSign
 import ./generate
+import ./native_plugins as nativePlugins
 import ./resources as projectResources
 import ../mynim/i18n as localeI18n
 
@@ -238,6 +239,7 @@ proc buildDevApp(projectDir, source, devRoot, name, identifier, version: string;
     var args = @[
       "c", "--nimcache:" & (result.stage / "nimcache"),
       "--out:" & executable]
+    args.add "-d:mynimCollectNativePlugins"
     when hostOS == "windows":
       args.add "--app:gui"
     args.add source
@@ -254,6 +256,8 @@ proc buildDevApp(projectDir, source, devRoot, name, identifier, version: string;
     let (osName, arch, _) = nativeBuild.hostTarget()
     projectResources.copyResources(projectDir, resourceDir, osName, arch,
       config)
+    discard nativePlugins.stageNativePlugins(compiled.output, resourceDir,
+      osName, arch)
     when hostOS == "macosx":
       nativeBuild.writeInfoPlist(resourceDir.parentDir() / "Info.plist",
         name & " Dev", identifier & ".dev", version, executable.lastPathPart())
