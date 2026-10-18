@@ -1,8 +1,9 @@
 # @mygo-plugins/websocket
 
 A browser-compatible `WebSocket` whose connections are opened by the Mynim
-app. The app can add handshake headers, and connections are not subject to the
-webview's Content Security Policy or cookies.
+app. The app can add handshake headers and configure an optional app-managed
+`Options.cookieJar`; the plugin does not use the webview's cookie store or
+Content Security Policy.
 
 Register the Nim plugin before running the app:
 
@@ -31,6 +32,11 @@ defaults to a 64 MiB incoming-message limit and a five-second close handshake
 timeout. For `wss:` connections it verifies the certificate chain and the URL
 hostname before sending handshake headers. A custom Nim `tlsContext` must keep
 peer certificate verification enabled.
+
+A cookie jar returns `name=value` cookies for the handshake URL and receives
+all response `Set-Cookie` fields, including fields from a rejected handshake.
+Its URL uses `http:` for `ws:` and `https:` for `wss:`; the app owns cookie
+matching, expiry, and storage.
 
 The native plugin uses `http_proxy`/`HTTP_PROXY` for `ws:` and
 `https_proxy`/`HTTPS_PROXY` for `wss:`, subject to `no_proxy`/`NO_PROXY` and

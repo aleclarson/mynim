@@ -19,15 +19,19 @@ type
     url*: string
     headers*: seq[Header]
 
-  AllowHandshake* = proc(request: HandshakeRequest): bool {.closure.}
+  AllowHandshake* = proc(request: HandshakeRequest): bool {.closure.} ## Approves a handshake before network I/O.
 
-  Options* = object
-    allow*: AllowHandshake
-    maxMessageSize*: int64
-    closeTimeoutMs*: int
-    tlsContext*: SslContext
-    ## Overrides HTTP_PROXY/HTTPS_PROXY and NO_PROXY when set.
-    proxy*: Proxy
+  CookieJar* = object ## Supplies request cookies and receives response cookies.
+    cookies*: proc(url: Uri): seq[string] {.closure.} ## Returns `name=value` cookies for an HTTP(S) URL.
+    store*: proc(url: Uri; setCookieHeaders: seq[string]) {.closure.} ## Receives raw response Set-Cookie fields.
+
+  Options* = object ## Configures WebSocket handshakes and connections.
+    allow*: AllowHandshake ## Optional app policy for the outgoing handshake.
+    cookieJar*: CookieJar ## Optional app-managed cookie callbacks.
+    maxMessageSize*: int64 ## Maximum incoming message size; defaults to 64 MiB.
+    closeTimeoutMs*: int ## Close handshake timeout in milliseconds; defaults to 5 seconds.
+    tlsContext*: SslContext ## Optional verified TLS context for secure connections.
+    proxy*: Proxy ## Overrides HTTP_PROXY/HTTPS_PROXY and NO_PROXY when set.
 
   ProtocolFailure* = object of CatchableError
     closeCode*: int
@@ -415,6 +419,24 @@ proc readHandshake(socket: AsyncSocket; ctx: CancelCtx;
     if response.find("\r\n\r\n") >= 0: return response
   raise newException(ValueError, "websocket: handshake headers are too large")
 
+proc responseCookies(response: string): seq[string] =
+  let headerEnd = response.find("\r\n\r\n")
+  if headerEnd < 0: return
+  let lines = response[0..<headerEnd].split("\r\n")
+  if lines.len == 0: return
+  let status = strutils.splitWhitespace(lines[0])
+  if status.len < 2 or not status[0].startsWith("HTTP/") or
+      status[1].len != 3:
+    return
+  for digit in status[1]:
+    if digit notin {'0'..'9'}: return
+  for i in 1..<lines.len:
+    let colon = lines[i].find(':')
+    if colon <= 0 or not validHeaderName(lines[i][0..<colon]):
+      return @[]
+    if lines[i][0..<colon].toLowerAscii() == "set-cookie":
+      result.add lines[i][colon + 1..^1].strip()
+
 proc parseHandshake(response: string; key: string;
     protocols: openArray[string]): tuple[headerEnd: int, protocol: string] =
   let headerEnd = response.find("\r\n\r\n")
@@ -476,6 +498,15 @@ proc dialAsync*(options: Options; request: HandshakeRequest;
     raise newException(ValueError,
       "the app does not allow connections to " & request.url)
 
+  var cookieUrl = parts.url
+  cookieUrl.scheme = if parts.secure: "https" else: "http"
+  var jarCookies: seq[string]
+  if options.cookieJar.cookies != nil:
+    for cookie in options.cookieJar.cookies(cookieUrl):
+      if '\r' in cookie or '\n' in cookie or '\0' in cookie:
+        raise newException(ValueError, "websocket: cookie jar returned an invalid cookie")
+      if cookie.len > 0: jarCookies.add cookie
+
   var socket: AsyncSocket
   var firstRead: Future[string]
   try:
@@ -522,6 +553,8 @@ proc dialAsync*(options: Options; request: HandshakeRequest;
       requestTarget = $absoluteUrl
     var wire = "GET " & requestTarget & " HTTP/1.1\r\nHost: " & hostHeader & "\r\n"
     wire.add headers.wire
+    for cookie in jarCookies:
+      wire.add "Cookie: " & cookie & "\r\n"
     if proxy != nil and not parts.secure and proxyScheme in ["http", "https"] and
         proxy.url.username.len > 0:
       var hasProxyAuthorization = false
@@ -535,6 +568,9 @@ proc dialAsync*(options: Options; request: HandshakeRequest;
     wire.add "\r\n"
     await socketSend(socket, wire, ctx)
     let response = await readHandshake(socket, ctx, firstRead)
+    let setCookieHeaders = responseCookies(response)
+    if options.cookieJar.store != nil and setCookieHeaders.len > 0:
+      options.cookieJar.store(cookieUrl, setCookieHeaders)
     let parsed = parseHandshake(response, key, protocols)
     result = WebSocketConn(socket: socket, ctx: ctx,
       maxMessageSize: max(1'i64, options.maxMessageSize),

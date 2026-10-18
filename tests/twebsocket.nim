@@ -1,5 +1,5 @@
 import std/[asyncdispatch, asyncnet, base64, envvars, httpclient, nativesockets,
-            net, os, sequtils, strutils, unittest]
+            net, os, sequtils, strutils, uri, unittest]
 
 import mynim/internal/ctx
 import mynim/plugins/websocket/connection as ws
@@ -53,6 +53,38 @@ proc serverScenario(server: AsyncSocket): Future[void] {.async.} =
   for i in 0..<length:
     pong[i] = char(payload[i].byte xor mask[i mod 4].byte)
   check pong == "ping"
+  client.close()
+
+proc cookieJarScenario(server: AsyncSocket): Future[void] {.async.} =
+  let accepted = await server.acceptAddr()
+  let client = accepted.client
+  var request = ""
+  while not request.endsWith("\r\n\r\n"):
+    request.add await client.recv(1)
+  check "cookie: explicit=yes" in request.toLowerAscii()
+  check "cookie: jar=from-app" in request.toLowerAscii()
+  var key = ""
+  for line in request.split("\r\n"):
+    if line.toLowerAscii().startsWith("sec-websocket-key:"):
+      key = line.split(':', maxsplit = 1)[1].strip()
+  await client.send("HTTP/1.1 101 Switching Protocols\r\n" &
+    "Upgrade: websocket\r\nConnection: Upgrade\r\n" &
+    "Sec-WebSocket-Accept: " & ws.acceptKey(key) & "\r\n" &
+    "Set-Cookie: session=abc; Path=/; HttpOnly\r\n" &
+    "Set-Cookie: theme=dark; SameSite=Lax\r\n\r\n" &
+    "\x81\x01c")
+  discard await client.recv(1)
+  client.close()
+
+proc cookieRejectedScenario(server: AsyncSocket): Future[void] {.async.} =
+  let accepted = await server.acceptAddr()
+  let client = accepted.client
+  var request = ""
+  while not request.endsWith("\r\n\r\n"):
+    request.add await client.recv(1)
+  await client.send("HTTP/1.1 403 Forbidden\r\n" &
+    "Set-Cookie: rejected=stored; Path=/\r\n" &
+    "Content-Length: 0\r\nConnection: close\r\n\r\n")
   client.close()
 
 proc httpProxyScenario(server: AsyncSocket): Future[void] {.async.} =
@@ -130,13 +162,15 @@ proc tlsProxyScenario(server: AsyncSocket; port: Port): Future[string] {.async.}
     context.wrapConnectedSocket(client, handshakeAsServer)
     result = await client.recv(4096)
     if result.len > 0:
+      check "cookie: secure=wss" in result.toLowerAscii()
       var key = ""
       for line in result.split("\r\n"):
         if line.toLowerAscii().startsWith("sec-websocket-key:"):
           key = line.split(':', maxsplit = 1)[1].strip()
       await client.send("HTTP/1.1 101 Switching Protocols\r\n" &
         "Upgrade: websocket\r\nConnection: Upgrade\r\n" &
-        "Sec-WebSocket-Accept: " & ws.acceptKey(key) & "\r\n\r\n" &
+        "Sec-WebSocket-Accept: " & ws.acceptKey(key) & "\r\n" &
+        "Set-Cookie: secure=stored; Path=/; Secure\r\n\r\n" &
         "\x81\x02ok")
   except CatchableError:
     result = ""
@@ -192,6 +226,74 @@ proc transportScenario(): Future[void] {.async.} =
   connection.terminate()
   server.close()
 
+proc cookieJarTransportScenario(): Future[void] {.async.} =
+  let server = newAsyncSocket(domain = AF_INET, buffered = false)
+  server.setSockOpt(OptReuseAddr, true)
+  server.bindAddr(Port(0), "127.0.0.1")
+  server.listen()
+  let address = server.getLocalAddr()
+  let serving = cookieJarScenario(server)
+  var askedUrls: seq[Uri]
+  var storedUrls: seq[Uri]
+  var storedCookies: seq[seq[string]]
+  var options = ws.defaultOptions()
+  options.cookieJar = ws.CookieJar(
+    cookies: proc(url: Uri): seq[string] =
+      askedUrls.add url
+      @[
+        "jar=from-app",
+      ],
+    store: proc(url: Uri; setCookieHeaders: seq[string]) =
+      storedUrls.add url
+      storedCookies.add setCookieHeaders
+  )
+  options.allow = proc(request: ws.HandshakeRequest): bool =
+    for header in request.headers:
+      check "jar=from-app" notin header.value
+    true
+  let request = ws.HandshakeRequest(
+    url: "ws://127.0.0.1:" & $address[1] & "/cookie",
+    headers: @[ws.Header(name: "Cookie", value: "explicit=yes")])
+  let connection = await ws.dialAsync(options, request, @[], newCtx())
+  check (await connection.readMessage()).payload == @[byte('c')]
+  connection.terminate()
+  await serving
+  check askedUrls.len == 1
+  check askedUrls[0].scheme == "http"
+  check askedUrls[0].path == "/cookie"
+  check storedUrls == askedUrls
+  check storedCookies == @[@[
+    "session=abc; Path=/; HttpOnly",
+    "theme=dark; SameSite=Lax",
+  ]]
+  server.close()
+
+proc rejectedCookieJarTransportScenario(): Future[void] {.async.} =
+  let server = newAsyncSocket(domain = AF_INET, buffered = false)
+  server.setSockOpt(OptReuseAddr, true)
+  server.bindAddr(Port(0), "127.0.0.1")
+  server.listen()
+  let address = server.getLocalAddr()
+  let serving = cookieRejectedScenario(server)
+  var storedCookies: seq[string]
+  var options = ws.defaultOptions()
+  options.cookieJar = ws.CookieJar(
+    cookies: proc(url: Uri): seq[string] = @[],
+    store: proc(url: Uri; setCookieHeaders: seq[string]) =
+      storedCookies = setCookieHeaders
+  )
+  var connection: ws.WebSocketConn
+  try:
+    connection = await ws.dialAsync(options,
+      ws.HandshakeRequest(url: "ws://127.0.0.1:" & $address[1] & "/rejected"),
+      @[], newCtx())
+  except CatchableError:
+    discard
+  check connection == nil
+  await serving
+  check storedCookies == @["rejected=stored; Path=/"]
+  server.close()
+
 proc httpProxyTransportScenario(): Future[void] {.async.} =
   let server = newAsyncSocket(domain = AF_INET, buffered = false)
   server.setSockOpt(OptReuseAddr, true)
@@ -245,6 +347,15 @@ proc wssHttpProxyTransportScenario(): Future[void] {.async.} =
   var options = ws.defaultOptions()
   options.proxy = newProxy("http://user:pass@127.0.0.1:" & $address[1])
   options.tlsContext = newContext(caFile = tlsFixtures / "localhost.crt")
+  var askedUrl: Uri
+  var storedCookies: seq[string]
+  options.cookieJar = ws.CookieJar(
+    cookies: proc(url: Uri): seq[string] =
+      askedUrl = url
+      @["secure=wss"],
+    store: proc(url: Uri; setCookieHeaders: seq[string]) =
+      storedCookies = setCookieHeaders
+  )
   let request = ws.HandshakeRequest(
     url: "wss://localhost:" & $address[1] & "/live",
     headers: @[ws.Header(name: "Authorization", value: "Bearer proxy-test")])
@@ -253,6 +364,9 @@ proc wssHttpProxyTransportScenario(): Future[void] {.async.} =
   connection.terminate()
   let received = await serving
   check "authorization: bearer proxy-test" in received.toLowerAscii()
+  check askedUrl.scheme == "https"
+  check askedUrl.path == "/live"
+  check storedCookies == @["secure=stored; Path=/; Secure"]
   server.close()
 
 proc tlsTransportScenario(host: string; expectedSuccess: bool):
@@ -297,6 +411,10 @@ suite "WebSocket transport":
 
   test "opens a local connection, checks headers, and answers a ping":
     waitFor transportScenario()
+
+  test "uses app-managed cookie jars for handshake requests and responses":
+    waitFor cookieJarTransportScenario()
+    waitFor rejectedCookieJarTransportScenario()
 
   test "uses authenticated HTTP and SOCKS proxies for ws and wss":
     waitFor httpProxyTransportScenario()
