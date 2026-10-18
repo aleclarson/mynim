@@ -48,11 +48,12 @@ type
 
   TerminalViewState = ref object
     hasGrid, hasFocus, focused, cursorBlinking, pointerPressed: bool
-    selecting, ticking: bool
+    selecting, ticking, scrollbarDragging: bool
     hasPendingKey: bool
     grid: TerminalGrid
+    bounds: ui.Rect
     scale, scrollRemainder: float32
-    pointerX, pointerY: float32
+    pointerX, pointerY, scrollbarWidth, scrollbarGrabOffset: float32
     blinkStart: MonoTime
     preedit: string
     preeditCaret: int
@@ -572,6 +573,18 @@ proc handleInput(terminal: Terminal; services: ui.Services;
       (event.mods and ui.modShift) == 0
     if not terminal.state.hasGrid:
       return false
+    if terminal.state.scrollbarDragging:
+      if event.kind == ui.InputKind.InputPointerUp:
+        terminal.state.scrollbarDragging = false
+        return true
+      let viewport = terminal.session.scrollbar()
+      let geometry = view_paint.scrollbarGeometry(terminal.state.bounds,
+        viewport, terminal.state.scrollbarWidth,
+        terminal.options.font.paddingX, terminal.options.font.paddingY)
+      terminal.session.scrollToOffset(geometry.scrollbarOffsetAt(event.y,
+        terminal.state.scrollbarGrabOffset))
+      services.invalidate()
+      return true
     if (tracking and not terminal.state.selecting) or
         terminal.state.pointerPressed:
       let button = event.button.pointerButton()
@@ -600,6 +613,28 @@ proc handleInput(terminal: Terminal; services: ui.Services;
       if event.kind == ui.InputKind.InputPointerMove:
         return sent
       return true
+
+    if event.kind == ui.InputKind.InputPointerDown and event.button == 0:
+      let viewport = terminal.session.scrollbar()
+      let geometry = view_paint.scrollbarGeometry(terminal.state.bounds,
+        viewport, terminal.state.scrollbarWidth,
+        terminal.options.font.paddingX, terminal.options.font.paddingY)
+      let hitSlop = 3'f32
+      let inTrack = geometry.track.w > 0 and
+        event.x >= geometry.track.x - hitSlop and
+        event.x <= geometry.track.x + geometry.track.w + hitSlop and
+        event.y >= geometry.track.y and
+        event.y <= geometry.track.y + geometry.track.h
+      if inTrack:
+        let inThumb = event.y >= geometry.thumb.y and
+          event.y <= geometry.thumb.y + geometry.thumb.h
+        terminal.state.scrollbarGrabOffset = if inThumb:
+            event.y - geometry.thumb.y else: geometry.thumb.h / 2
+        terminal.state.scrollbarDragging = true
+        terminal.session.scrollToOffset(geometry.scrollbarOffsetAt(event.y,
+          terminal.state.scrollbarGrabOffset))
+        services.invalidate()
+        return true
 
     if event.kind == ui.InputKind.InputPointerDown and event.button != 0:
       return false
@@ -688,7 +723,9 @@ proc view*(context: ui.Context; terminal: Terminal): ui.Element =
   if terminal == nil or terminal.closed:
     raise newException(ValueError, "cannot build a view for a closed terminal")
   let services = context.services()
-  let darkAppearance = context.theme().dark
+  let uiTheme = context.theme()
+  let darkAppearance = uiTheme.dark
+  terminal.state.scrollbarWidth = uiTheme.scrollbarWidth
   terminal.session.setWake(proc() = services.invalidate())
   terminal.dispatchEvents()
   result = ui.box(context).direction(ui.Direction.LeftToRight).focusable()
@@ -722,6 +759,7 @@ proc view*(context: ui.Context; terminal: Terminal): ui.Element =
     terminal.handleInput(services, event))
   discard result.cursor(ui.cursorText)
   let draw = proc(painter: var ui.Painter; bounds: ui.Rect) =
+    terminal.state.bounds = bounds
     let theme = terminal.applyTheme(darkAppearance)
     var themeChanged = false
     if theme != terminal.state.appliedTheme:
@@ -755,4 +793,7 @@ proc view*(context: ui.Context; terminal: Terminal): ui.Element =
         frame.cursor.blinking
     paintOptions.cursorBlinkOn = cursorBlinkOn
     painter.paintFrame(bounds, frame, paintOptions)
+    painter.paintScrollbar(bounds, terminal.session.scrollbar(),
+      uiTheme.scrollbar, uiTheme.scrollbarWidth,
+      terminal.options.font.paddingX, terminal.options.font.paddingY)
   discard ui.draw(result, draw)

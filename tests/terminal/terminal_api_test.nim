@@ -1,4 +1,4 @@
-import std/[options, os, unittest]
+import std/[options, os, strutils, unittest]
 import mynim/plugins/terminal
 import mynim/ui as ui
 
@@ -91,3 +91,29 @@ suite "native Terminal API":
       tester.move(50, 12)
       tester.release(50, 12)
       check tester.clipboard() == "hello"
+
+  test "drags the terminal scrollbar to older output":
+    if getEnv("MYNIM_GHOSTTY_VT").len == 0:
+      skip()
+    when defined(windows):
+      skip()
+    else:
+      let terminal = newTerminal(TerminalOptions(command: @[
+        "/bin/sh", "-c",
+        "i=0; while [ $i -lt 100 ]; do printf 'line %03d\\r\\n' \"$i\"; i=$((i+1)); done"]))
+      defer: terminal.close()
+      check terminal.waitForExit() == 0
+      let tester = ui.newTester(proc(c: ui.Context) =
+        discard view(c, terminal).size(800, 500)
+      , 800, 500)
+      defer: tester.close()
+      tester.setFocused(true)
+      tester.press(792, 5)
+      tester.release(792, 5)
+      tester.press(10, 12)
+      tester.move(60, 12)
+      tester.release(60, 12)
+      tester.command("copy")
+      let topLine = tester.clipboard()
+      check topLine.startsWith("line ")
+      check parseInt(topLine[5 .. ^1]) < 10

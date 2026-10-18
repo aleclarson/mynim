@@ -2,7 +2,7 @@
 
 import std/[math, options, strutils, unicode]
 import mynim/ui as ui
-import ./vt/[frame, render]
+import ./vt/[frame, render, terminal]
 
 type
   TerminalPaintOptions* = object
@@ -24,6 +24,10 @@ type
     cellWidth*, cellHeight*: float32
     cellWidthPixels*, cellHeightPixels*: int
     textOffsetY*: float32
+
+  TerminalScrollbarGeometry* = object
+    track*, thumb*: ui.Rect
+    maxOffset*: uint64
 
   PaintedCell = object
     foreground, background, underlineColor: ui.Color
@@ -134,6 +138,59 @@ proc grid*(painter: var ui.Painter; bounds: ui.Rect;
   let height = max(0, int(round(max(bounds.h, 0'f32) * scale)) - 2 * paddingY)
   result.cols = max(1, width div result.cellWidthPixels)
   result.rows = max(1, height div result.cellHeightPixels)
+
+proc scrollbarGeometry*(bounds: ui.Rect; scrollbar: TerminalScrollbar;
+    width, paddingX, paddingY: float32; minimumThumb = 18'f32):
+    TerminalScrollbarGeometry =
+  ## Computes a terminal scrollbar thumb from Ghostty's viewport counts.
+  if scrollbar.total <= scrollbar.len or scrollbar.len == 0:
+    return
+  let requestedWidth = if width.finite and width > 0: width else: 6'f32
+  let horizontalPadding = if paddingX.finite: max(paddingX, 0'f32) else: 0'f32
+  let verticalPadding = if paddingY.finite: max(paddingY, 0'f32) else: 0'f32
+  let barWidth = min(requestedWidth, max(bounds.w, 0'f32))
+  let trackHeight = max(bounds.h - 2 * verticalPadding, 0'f32)
+  if barWidth <= 0 or trackHeight <= 0:
+    return
+  result.maxOffset = scrollbar.total - scrollbar.len
+  result.track = ui.Rect(x: bounds.x + bounds.w - horizontalPadding -
+      barWidth, y: bounds.y + verticalPadding, w: barWidth, h: trackHeight)
+  let proportional = trackHeight *
+    (float64(scrollbar.len) / float64(scrollbar.total)).float32
+  let thumbMinimum = if minimumThumb.finite:
+      max(minimumThumb, 0'f32) else: 18'f32
+  let thumbHeight = min(trackHeight, max(thumbMinimum, proportional))
+  let travel = max(trackHeight - thumbHeight, 0'f32)
+  let offset = min(scrollbar.offset, result.maxOffset)
+  let fromTop =
+    (float64(offset) / float64(result.maxOffset)).float32
+  result.thumb = ui.Rect(x: result.track.x,
+    y: result.track.y + travel * fromTop,
+    w: barWidth, h: thumbHeight)
+
+proc scrollbarOffsetAt*(geometry: TerminalScrollbarGeometry; y,
+                        grabOffset: float32): uint64 =
+  ## Maps a pointer position on the track to Ghostty's scrollback offset.
+  if geometry.maxOffset == 0:
+    return 0
+  let travel = max(geometry.track.h - geometry.thumb.h, 0'f32)
+  if travel == 0:
+    return 0
+  let grab = min(max(grabOffset, 0'f32), geometry.thumb.h)
+  let thumbTop = min(max(y - grab, geometry.track.y),
+    geometry.track.y + travel)
+  let fractionFromTop = (thumbTop - geometry.track.y) / travel
+  let offset = float64(geometry.maxOffset) * float64(fractionFromTop)
+  uint64(max(0'f64, min(offset, float64(geometry.maxOffset))).round())
+
+proc paintScrollbar*(painter: var ui.Painter; bounds: ui.Rect;
+    scrollbar: TerminalScrollbar; color: ui.Color; width, paddingX,
+    paddingY: float32) =
+  ## Paints the scrollback thumb over the right edge of the terminal view.
+  let geometry = scrollbarGeometry(bounds, scrollbar, width, paddingX,
+    paddingY)
+  if geometry.thumb.w > 0 and geometry.thumb.h > 0:
+    painter.fill(geometry.thumb, color, geometry.thumb.w / 2)
 
 proc cellText(cell: TerminalFrameCell; style: PaintedCell): string =
   if cell.cell.wide in {cellSpacerTail, cellSpacerHead}:

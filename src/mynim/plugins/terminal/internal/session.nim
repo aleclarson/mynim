@@ -474,6 +474,35 @@ proc scrollBy*(session: TerminalSession; rows: int) =
   finally:
     session.terminalGuard.release()
 
+proc scrollbar*(session: TerminalSession): TerminalScrollbar =
+  ## Returns the scrollback viewport's total, offset, and visible row count.
+  if session.isNil:
+    raise newException(ValueError, "terminal session is nil")
+  session.lockTerminal()
+  try:
+    result = session.terminal.scrollbar()
+  finally:
+    session.terminalGuard.release()
+
+proc scrollToOffset*(session: TerminalSession; offset: uint64) =
+  ## Moves to a Ghostty scrollbar offset, clamping to the retained history.
+  if session.isNil:
+    raise newException(ValueError, "terminal session is nil")
+  session.lockTerminal()
+  try:
+    let current = session.terminal.scrollbar()
+    let maximum = if current.total > current.len:
+        current.total - current.len else: 0'u64
+    let target = min(offset, maximum)
+    if target > current.offset:
+      let amount = min(target - current.offset, uint64(high(int64)))
+      session.terminal.scrollBy(int(amount))
+    elif target < current.offset:
+      let amount = min(current.offset - target, uint64(high(int64)))
+      session.terminal.scrollBy(-int(amount))
+  finally:
+    session.terminalGuard.release()
+
 proc scrollToBottom*(session: TerminalSession) =
   if session.isNil:
     raise newException(ValueError, "terminal session is nil")
