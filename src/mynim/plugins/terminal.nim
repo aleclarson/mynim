@@ -40,10 +40,14 @@ type
     scrollbackMaxBytes*: int
     copyOnSelect*: TerminalCopyOnSelect
     noBlink*, optionAsAlt*: bool
+    ## Prevents terminal programs from writing to the system clipboard.
+    noClipboardWrite*: bool
     theme*, darkTheme*: TerminalTheme
     onTitle*: proc(title: string) {.closure.}
     onExit*: proc(exitCode: int) {.closure.}
     onBell*: proc() {.closure.}
+    ## Receives OSC desktop notifications on the terminal worker thread.
+    onNotify*: proc(title, body: string) {.closure.}
     onKey*: proc(mods: ui.Modifiers; key: ui.Key): bool {.closure.}
     ## Handles a modifier-clicked terminal link and reports whether it opened.
     openLink*: proc(link: string): bool {.closure.}
@@ -194,7 +198,9 @@ proc newTerminal*(options = defaultTerminalOptions()): Terminal =
   try:
     result.session = newTerminalSession(result.library,
       processOptions(options), cursorBlink = not options.noBlink,
-      scrollbackMaxBytes = max(options.scrollbackMaxBytes, 0))
+      scrollbackMaxBytes = max(options.scrollbackMaxBytes, 0),
+      noClipboardWrite = options.noClipboardWrite,
+      onNotify = options.onNotify)
   except CatchableError:
     result.library.close()
     result.library = nil
@@ -463,7 +469,7 @@ proc applyTheme(terminal: Terminal; dark: bool): TerminalTheme =
     return terminal.options.theme
   if dark: defaultDarkTerminalTheme else: defaultLightTerminalTheme
 
-proc dispatchEvents(terminal: Terminal) =
+proc dispatchEvents(terminal: Terminal; services: ui.Services) =
   for event in terminal.session.takeEvents():
     case event.kind
     of terminalTitleChanged:
@@ -475,7 +481,10 @@ proc dispatchEvents(terminal: Terminal) =
     of terminalProcessExited:
       if terminal.options.onExit != nil:
         terminal.options.onExit(event.exitCode)
-    of terminalPwdChanged, terminalRenderHoldChanged, terminalReset:
+    of terminalClipboardWrite:
+      services.writeClipboard(event.clipboardText)
+    of terminalPwdChanged, terminalRenderHoldChanged, terminalReset,
+        terminalNotification:
       discard
 
 proc reportKey(terminal: Terminal; event: ui.InputEvent): bool =
@@ -787,7 +796,7 @@ proc view*(context: ui.Context; terminal: Terminal): ui.Element =
   let darkAppearance = uiTheme.dark
   terminal.state.scrollbarWidth = uiTheme.scrollbarWidth
   terminal.session.setWake(proc() = services.invalidate())
-  terminal.dispatchEvents()
+  terminal.dispatchEvents(services)
   result = ui.box(context).direction(ui.Direction.LeftToRight).focusable()
     .focusRing(false).clip().label("Terminal")
   let focused = result.focused()

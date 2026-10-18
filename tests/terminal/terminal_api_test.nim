@@ -1,4 +1,4 @@
-import std/[options, os, strutils, unittest]
+import std/[atomics, options, os, strutils, unittest]
 import mynim/plugins/terminal
 import mynim/ui as ui
 
@@ -18,6 +18,59 @@ suite "native Terminal API":
     check terminal.waitForExit() == 11
     check terminal.processExitCode().get() == 11
     check terminal.failure().len == 0
+
+  test "routes OSC notifications and clipboard writes":
+    if getEnv("MYNIM_GHOSTTY_VT").len == 0:
+      skip()
+    when defined(windows):
+      skip()
+    else:
+      var notificationTitleMatches, notificationBodyMatches: Atomic[bool]
+      var options = defaultTerminalOptions()
+      options.command = @[
+        "/bin/sh", "-c",
+        "printf '\\033]52;c;aGVsbG8=\\a\\033]9;Mynim notice\\a'; sleep 10"]
+      options.onNotify = proc(title, body: string) =
+        notificationTitleMatches.store(title == "", moRelaxed)
+        notificationBodyMatches.store(body == "Mynim notice", moRelaxed)
+      let terminal = newTerminal(options)
+      defer: terminal.close()
+
+      for _ in 0 ..< 200:
+        if notificationBodyMatches.load(moRelaxed):
+          break
+        sleep(10)
+      check notificationTitleMatches.load(moRelaxed)
+      check notificationBodyMatches.load(moRelaxed)
+
+      let tester = ui.newTester(proc(c: ui.Context) =
+        discard view(c, terminal).size(800, 500)
+      , 800, 500)
+      defer: tester.close()
+
+      for _ in 0 ..< 200:
+        sleep(10)
+        tester.frame()
+        if tester.clipboard() == "hello" and
+            notificationBodyMatches.load(moRelaxed):
+          break
+      check tester.clipboard() == "hello"
+
+      var deniedOptions = defaultTerminalOptions()
+      deniedOptions.command = @[
+        "/bin/sh", "-c",
+        "printf '\\033]52;c;bm8=\\a'; sleep 1"]
+      deniedOptions.noClipboardWrite = true
+      let deniedTerminal = newTerminal(deniedOptions)
+      defer: deniedTerminal.close()
+      let deniedTester = ui.newTester(proc(c: ui.Context) =
+        discard view(c, deniedTerminal).size(800, 500)
+      , 800, 500)
+      defer: deniedTester.close()
+      deniedTester.setClipboard("preserved")
+      check deniedTerminal.waitForExit() == 0
+      deniedTester.frame()
+      check deniedTester.clipboard() == "preserved"
 
   test "builds a GPU scene and sizes the PTY from the native view":
     if getEnv("MYNIM_GHOSTTY_VT").len == 0:

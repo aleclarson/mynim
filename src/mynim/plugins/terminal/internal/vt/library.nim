@@ -13,6 +13,35 @@ type
     contentTag*, styleId*, wide*, hyperlink*: GhosttyCellField
     codepoint*, paletteIndex*, red*, green*, blue*: GhosttyCellField
 
+  GhosttyString* {.bycopy.} = object
+    data*: pointer
+    len*: csize_t
+
+  GhosttyClipboardContent* {.bycopy.} = object
+    mime*, data*: GhosttyString
+
+  GhosttyClipboardWriteReply* {.bycopy.} = object
+    size*: csize_t
+    result*: int32
+    remember*: bool
+
+  GhosttyClipboardWriteReplyFn* = proc(write: ptr GhosttyClipboardWrite;
+    reply: ptr GhosttyClipboardWriteReply) {.cdecl.}
+
+  GhosttyClipboardWrite* {.bycopy.} = object
+    size*: csize_t
+    location*: int32
+    contents*: ptr UncheckedArray[GhosttyClipboardContent]
+    contentsLen*: csize_t
+    name*: GhosttyString
+    granted*, canRemember*: bool
+    ctx*: pointer
+    reply*: GhosttyClipboardWriteReplyFn
+
+  GhosttyTerminalDesktopNotification* {.bycopy.} = object
+    size*: csize_t
+    title*, body*: GhosttyString
+
   GhosttyManifest* = object
     pointerSize*: int
     cell*: GhosttyCellLayout
@@ -24,11 +53,31 @@ type
 
   TypeJsonProc = proc(): cstring {.cdecl.}
 
-  GhosttyString = object
-    data: pointer
-    len: csize_t
-
 const TypeJsonSymbol = "ghostty_type_json"
+
+static:
+  doAssert sizeof(GhosttyString) == 2 * sizeof(pointer)
+  doAssert offsetOf(GhosttyString, data) == 0
+  doAssert offsetOf(GhosttyString, len) == sizeof(pointer)
+  doAssert sizeof(GhosttyClipboardContent) == 4 * sizeof(pointer)
+  doAssert offsetOf(GhosttyClipboardContent, data) == 2 * sizeof(pointer)
+  when sizeof(pointer) == 8:
+    doAssert sizeof(GhosttyClipboardWriteReply) == 2 * sizeof(pointer)
+  else:
+    doAssert sizeof(GhosttyClipboardWriteReply) == 3 * sizeof(pointer)
+  doAssert offsetOf(GhosttyClipboardWriteReply, result) == sizeof(pointer)
+  doAssert sizeof(GhosttyClipboardWrite) == 9 * sizeof(pointer)
+  doAssert offsetOf(GhosttyClipboardWrite, contents) == 2 * sizeof(pointer)
+  doAssert offsetOf(GhosttyClipboardWrite, contentsLen) == 3 * sizeof(pointer)
+  doAssert offsetOf(GhosttyClipboardWrite, name) == 4 * sizeof(pointer)
+  doAssert offsetOf(GhosttyClipboardWrite, granted) == 6 * sizeof(pointer)
+  doAssert offsetOf(GhosttyClipboardWrite, canRemember) ==
+    6 * sizeof(pointer) + 1
+  doAssert offsetOf(GhosttyClipboardWrite, ctx) == 7 * sizeof(pointer)
+  doAssert offsetOf(GhosttyClipboardWrite, reply) == 8 * sizeof(pointer)
+  doAssert sizeof(GhosttyTerminalDesktopNotification) == 5 * sizeof(pointer)
+  doAssert offsetOf(GhosttyTerminalDesktopNotification, title) == sizeof(pointer)
+  doAssert offsetOf(GhosttyTerminalDesktopNotification, body) == 3 * sizeof(pointer)
 
 proc intField(node: JsonNode; key, context: string): int =
   if node.kind != JObject or not node.hasKey(key) or
@@ -133,6 +182,28 @@ proc parseManifest*(data: string): GhosttyManifest =
   requireLayout(types, "GhosttyString", sizeof(GhosttyString), [
     ("ptr", offsetOf(GhosttyString, data)),
     ("len", offsetOf(GhosttyString, len))])
+  requireLayout(types, "GhosttyClipboardContent",
+    sizeof(GhosttyClipboardContent), [
+      ("mime", offsetOf(GhosttyClipboardContent, mime)),
+      ("data", offsetOf(GhosttyClipboardContent, data))])
+  requireLayout(types, "GhosttyClipboardWrite",
+    sizeof(GhosttyClipboardWrite), [
+      ("location", offsetOf(GhosttyClipboardWrite, location)),
+      ("contents", offsetOf(GhosttyClipboardWrite, contents)),
+      ("contents_len", offsetOf(GhosttyClipboardWrite, contentsLen)),
+      ("name", offsetOf(GhosttyClipboardWrite, name)),
+      ("granted", offsetOf(GhosttyClipboardWrite, granted)),
+      ("can_remember", offsetOf(GhosttyClipboardWrite, canRemember)),
+      ("ctx", offsetOf(GhosttyClipboardWrite, ctx)),
+      ("reply", offsetOf(GhosttyClipboardWrite, reply))])
+  requireLayout(types, "GhosttyClipboardWriteReply",
+    sizeof(GhosttyClipboardWriteReply), [
+      ("result", offsetOf(GhosttyClipboardWriteReply, result)),
+      ("remember", offsetOf(GhosttyClipboardWriteReply, remember))])
+  requireLayout(types, "GhosttyTerminalDesktopNotification",
+    sizeof(GhosttyTerminalDesktopNotification), [
+      ("title", offsetOf(GhosttyTerminalDesktopNotification, title)),
+      ("body", offsetOf(GhosttyTerminalDesktopNotification, body))])
 
   requireLayout(types, "GhosttyColorRgb", 3, [
     ("r", 0), ("g", 1), ("b", 2)])

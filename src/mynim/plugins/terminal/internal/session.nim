@@ -1,6 +1,6 @@
 ## A PTY process connected to a serialized Ghostty terminal and render state.
 
-import std/[locks, options, unicode]
+import std/[locks, options, strutils, unicode]
 import ./pty
 import ./vt/[effects, encode, frame, input, library, render, selection, terminal]
 
@@ -11,15 +11,18 @@ type
     terminalPwdChanged,
     terminalRenderHoldChanged,
     terminalReset,
+    terminalNotification,
+    terminalClipboardWrite,
     terminalProcessExited
 
   TerminalEvent* = object
     kind*: TerminalEventKind
-    title*, pwd*: string
+    title*, pwd*, body*, clipboardText*: string
     held*: bool
     exitCode*: int
 
   TerminalWake* = proc() {.closure.}
+  TerminalNotify = proc(title, body: string) {.closure.}
 
   TerminalSessionData = object
     terminalGuard: Lock
@@ -42,6 +45,8 @@ type
     processExitCode: Option[int]
     events: seq[TerminalEvent]
     wake: TerminalWake
+    onNotify: TerminalNotify
+    noClipboardWrite: bool
     renderHeld: bool
     heldFrame: Option[TerminalFrame]
     cols, rows, cellWidth, cellHeight: int
@@ -52,6 +57,10 @@ const
   inputQueueLimit = 16 * 1024 * 1024
   defaultScrollbackBytes = 10 * 1024 * 1024
   readBufferSize = 8192
+  clipboardLocationStandard = 0'i32
+  clipboardWriteSuccess = 0'i32
+  clipboardWriteDenied = 1'i32
+  clipboardWriteUnsupported = 2'i32
 
 proc `=destroy`(session: var TerminalSessionData) =
   deinitCond(session.inputChanged)
@@ -177,6 +186,95 @@ proc onReset(rawTerminal, userdata: pointer) {.cdecl.} =
     except CatchableError as error:
       session.recordInputError(error.msg)
 
+proc copyGhosttyString(value: GhosttyString; valid: var bool): string =
+  if uint64(value.len) > uint64(high(int)) or
+      (value.len > 0 and value.data.isNil):
+    valid = false
+    return
+  if value.len == 0:
+    return
+  result = newString(int(value.len))
+  copyMem(addr result[0], value.data, result.len)
+
+proc clipboardText(request: GhosttyClipboardWrite):
+    tuple[text: string, supported: bool] =
+  if request.contentsLen == 0:
+    return (text: "", supported: true)
+  if uint64(request.contentsLen) > uint64(high(int)) or
+      request.contents.isNil:
+    return
+
+  var fallback = ""
+  var hasFallback = false
+  var valid = true
+  for item in request.contents.toOpenArray(0, int(request.contentsLen) - 1):
+    let mime = copyGhosttyString(item.mime, valid)
+    if not valid:
+      return
+    if mime == "text/plain" or mime.startsWith("text/plain;"):
+      result.text = copyGhosttyString(item.data, valid)
+      result.supported = valid
+      return
+    if not hasFallback and mime.startsWith("text/"):
+      fallback = copyGhosttyString(item.data, valid)
+      if not valid:
+        return
+      hasFallback = true
+  if hasFallback:
+    result.text = fallback
+    result.supported = true
+
+proc onClipboardWrite(rawTerminal, userdata: pointer;
+                      request: ptr GhosttyClipboardWrite) {.cdecl.} =
+  discard rawTerminal
+  if request.isNil or request.size <
+      csize_t(offsetOf(GhosttyClipboardWrite, reply) +
+        sizeof(GhosttyClipboardWriteReplyFn)):
+    return
+  let replyFn = request.reply
+  if replyFn.isNil:
+    return
+
+  var reply = GhosttyClipboardWriteReply(
+    size: csize_t(sizeof(GhosttyClipboardWriteReply)),
+    result: clipboardWriteDenied)
+  let session = cast[TerminalSession](userdata)
+  try:
+    if not session.isNil and request.size >=
+        csize_t(sizeof(GhosttyClipboardWrite)) and
+        request.location == clipboardLocationStandard and
+        not session.noClipboardWrite:
+      let content = clipboardText(request[])
+      if content.supported:
+        session.addEvent(TerminalEvent(kind: terminalClipboardWrite,
+          clipboardText: content.text))
+        reply.result = clipboardWriteSuccess
+      else:
+        reply.result = clipboardWriteUnsupported
+  except CatchableError as error:
+    if not session.isNil:
+      session.recordInputError(error.msg)
+  replyFn(request, addr reply)
+
+proc onDesktopNotification(rawTerminal, userdata: pointer;
+    notification: ptr GhosttyTerminalDesktopNotification) {.cdecl.} =
+  discard rawTerminal
+  let session = cast[TerminalSession](userdata)
+  if session.isNil or notification.isNil or notification.size <
+      csize_t(sizeof(GhosttyTerminalDesktopNotification)):
+    return
+  try:
+    var valid = true
+    let title = copyGhosttyString(notification.title, valid)
+    if not valid:
+      return
+    let body = copyGhosttyString(notification.body, valid)
+    if valid and session.onNotify != nil:
+      session.addEvent(TerminalEvent(kind: terminalNotification,
+        title: title, body: body))
+  except CatchableError as error:
+    session.recordInputError(error.msg)
+
 proc sessionCallbacks(): TerminalCallbacks =
   TerminalCallbacks(
     writePty: onWritePty,
@@ -184,7 +282,28 @@ proc sessionCallbacks(): TerminalCallbacks =
     titleChanged: onTitleChanged,
     pwdChanged: onPwdChanged,
     renderHold: onRenderHold,
-    reset: onReset)
+    reset: onReset,
+    clipboardWrite: onClipboardWrite,
+    desktopNotification: onDesktopNotification)
+
+proc dispatchNotifications(session: TerminalSession) =
+  if session.onNotify == nil:
+    return
+  var notifications: seq[TerminalEvent]
+  session.terminalGuard.acquire()
+  var remaining: seq[TerminalEvent]
+  for event in session.events:
+    if event.kind == terminalNotification:
+      notifications.add(event)
+    else:
+      remaining.add(event)
+  session.events = move(remaining)
+  session.terminalGuard.release()
+  for event in notifications:
+    try:
+      session.onNotify(event.title, event.body)
+    except CatchableError as error:
+      session.recordInputError(error.msg)
 
 proc reader(session: TerminalSession) {.thread.} =
   {.cast(gcsafe).}:
@@ -206,6 +325,7 @@ proc reader(session: TerminalSession) {.thread.} =
         session.recordInputError(error.msg)
         break
       session.terminalGuard.release()
+      session.dispatchNotifications()
       session.signalWake()
 
     var exitCode = 0
@@ -309,7 +429,9 @@ proc newTerminalSession*(library: GhosttyVT; process: PtyOptions;
     cols = 80; rows = 24; cellWidth = 1; cellHeight = 1;
     cursorBlink = true;
     terminfoName = "xterm-256color";
-    scrollbackMaxBytes = defaultScrollbackBytes): TerminalSession =
+    scrollbackMaxBytes = defaultScrollbackBytes;
+    noClipboardWrite = false;
+    onNotify: TerminalNotify = nil): TerminalSession =
   ## Starts a PTY-backed Ghostty terminal and its input/output workers.
   if library.isNil:
     raise newException(ValueError, "terminal session Ghostty library is nil")
@@ -329,6 +451,8 @@ proc newTerminalSession*(library: GhosttyVT; process: PtyOptions;
   result.rows = rows
   result.cellWidth = cellWidth
   result.cellHeight = cellHeight
+  result.noClipboardWrite = noClipboardWrite
+  result.onNotify = onNotify
 
   try:
     result.terminal = newGhosttyTerminal(library, cols, rows)
