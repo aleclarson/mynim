@@ -4564,6 +4564,20 @@ proc doubleClicked*(e: Element): bool =
   let n = e.node
   n != nil and n.doubleClicked
 
+proc rowDoubleClicked*(e: Element): bool =
+  ## Reports a double click on the hovered element's List or Table row.
+  let node = e.node
+  if node == nil or not node.hovered:
+    return false
+  let owner = e.owner
+  var rowSlot = int(e.slot)
+  while rowSlot > 0:
+    let row = owner.nodes[rowSlot]
+    if row.listState != nil and row.listRowIndex >= 0:
+      return row.doubleClicked
+    rowSlot = int(row.parent)
+  false
+
 proc focusable*(e: Element): Element =
   ## Includes this element in sequential keyboard and accessibility focus.
   result = e

@@ -2932,6 +2932,20 @@ proc inputKeyUp(rt: Runtime; ev: platform.SurfaceEvent): platform.Key =
     result = ev.physicalKey
   rt.byPosition.excl(ev.physicalKey)
 
+proc markDoubleClicked(rt: Runtime; slot: int) =
+  let owner = rt.frameLayout.owner
+  if owner == nil or slot <= 0 or slot >= owner.nodes.len:
+    return
+  rt.doubleClickedSlots.add(slot)
+  var rowSlot = slot
+  while rowSlot > 0:
+    let node = owner.nodes[rowSlot]
+    if node.listState != nil and node.listRowIndex >= 0:
+      if rowSlot != slot:
+        rt.doubleClickedSlots.add(rowSlot)
+      return
+    rowSlot = int(node.parent)
+
 proc event(rt: Runtime; ev: platform.SurfaceEvent): bool =
   if rt.closed:
     return false
@@ -3524,7 +3538,7 @@ proc event(rt: Runtime; ev: platform.SurfaceEvent): bool =
       if clicked:
         rt.clickedSlots.add(clickedSlot)
         if ev.clicks >= 2:
-          rt.doubleClickedSlots.add(clickedSlot)
+          rt.markDoubleClicked(clickedSlot)
       rt.pressTarget = Element()
       rt.pressMods = 0
       rt.pressHoverSlots.setLen(0)
@@ -3695,7 +3709,7 @@ proc event(rt: Runtime; ev: platform.SurfaceEvent): bool =
     if clicked:
       rt.clickedSlots.add(clickedSlot)
       if ev.clicks >= 2:
-        rt.doubleClickedSlots.add(clickedSlot)
+        rt.markDoubleClicked(clickedSlot)
       if clickedSlot > 0 and clickedSlot < rt.frameLayout.owner.nodes.len:
         var rowSlot = clickedSlot
         while rowSlot > 0 and rowSlot < rt.frameLayout.owner.nodes.len:
