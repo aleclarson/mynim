@@ -13,6 +13,17 @@ import mynim/plugins/fetch
 use(Plugin)
 ```
 
+To route requests through an HTTP proxy, pass one to the default plugin client:
+
+```nim
+import std/httpclient
+import mynim/plugins/fetch/service
+
+let plugin = newFetchPlugin(Options(proxy: newProxy("http://127.0.0.1:8080")))
+```
+
+When `clientFactory` is set, configure the proxy on the client it returns.
+
 Then use the frontend package:
 
 ```ts

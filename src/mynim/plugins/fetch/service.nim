@@ -31,8 +31,11 @@ type
   Options* = object
     ## Creates a new client per fetch call. The plugin closes it afterward.
     ## Leave nil to use Nim's default client. A custom factory must set
-    ## maxRedirects=0.
+    ## maxRedirects=0. When set, `proxy` is used only by the default client;
+    ## a custom factory configures its own proxy.
     clientFactory*: proc(): AsyncHttpClient {.closure.}
+    ## Optional HTTP proxy for the default client.
+    proxy*: Proxy
     ## Refuses a request before it leaves the app when it returns false.
     allow*: AllowRequest
     ## Maximum redirects followed in "follow" mode.
@@ -194,7 +197,7 @@ proc fetchAsync(options: Options; request: Request; ctx: core.CancelCtx;
       newException(ValueError, "fetch: request canceled"))
 
   let client = if options.clientFactory == nil:
-      newAsyncHttpClient(maxRedirects = 0)
+      newAsyncHttpClient(maxRedirects = 0, proxy = options.proxy)
     else:
       options.clientFactory()
   if client == nil:
