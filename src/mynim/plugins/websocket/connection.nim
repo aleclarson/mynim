@@ -10,6 +10,19 @@ when defined(ssl):
   import std/openssl
   proc sslCtxGetVerifyMode(context: SslCtx): cint {.
     cdecl, dynlib: DLLSSLName, importc: "SSL_CTX_get_verify_mode".}
+  type
+    GateTicket = object
+      previous, turn: Future[void]
+    AsyncGate = object
+      mutex: Lock
+      tail: Future[void]
+    NestedTls = ref object
+      socket: AsyncSocket
+      ssl: SslPtr
+      inputBio, outputBio: BIO
+      sslMutex: Lock
+      readGate, writeGate: AsyncGate
+      closed: bool
 
 type
   Header* = object
@@ -135,7 +148,7 @@ proc defaultOptions*(): Options =
     result.tlsContext = newContext()
 
 when defined(ssl):
-  proc verifyTlsPeer(socket: AsyncSocket; context: SslContext; host: string) =
+  proc verifyTlsPeer(ssl: SslPtr; context: SslContext; host: string) =
     ## asyncnet performs the TLS handshake but does not verify the peer name.
     ## Require chain verification and check the leaf certificate before any
     ## WebSocket handshake headers (which may contain credentials) are sent.
@@ -143,7 +156,6 @@ when defined(ssl):
     if (verifyMode and SSL_VERIFY_PEER) == 0:
       raise newException(IOError,
         "websocket: TLS context must verify peer certificates")
-    let ssl = socket.sslHandle()
     if SSL_get_verify_result(ssl) != X509_V_OK:
       raise newException(IOError, "websocket: TLS certificate chain verification failed")
     let sslLib = loadLibPattern(DLLSSLName)
@@ -210,7 +222,7 @@ when defined(ssl):
         # Give the SSL read operation at least one event-loop turn to start
         # before treating SSL's initial state as a completed handshake.
         if started:
-          verifyTlsPeer(socket, context, host)
+          verifyTlsPeer(socket.sslHandle(), context, host)
           return pendingRead
         started = true
 
@@ -397,7 +409,7 @@ proc readHandshake(socket: AsyncSocket; ctx: CancelCtx;
 
 proc connectHttpProxy(socket: AsyncSocket; parts: tuple[host, hostHeader, resource: string,
                            port: Port, secure: bool, url: Uri]; proxy: Proxy;
-                       ctx: CancelCtx) {.async.} =
+                       ctx: CancelCtx; firstRead: Future[string] = nil) {.async.} =
   let targetHost = if ':' in parts.host: "[" & parts.host & "]" else: parts.host
   let authority = targetHost & ":" & $int(parts.port)
   var wire = "CONNECT " & authority & " HTTP/1.1\r\nHost: " & authority & "\r\n"
@@ -406,7 +418,7 @@ proc connectHttpProxy(socket: AsyncSocket; parts: tuple[host, hostHeader, resour
       encode(proxy.url.username & ":" & proxy.url.password) & "\r\n"
   wire.add "\r\n"
   await socketSend(socket, wire, ctx)
-  let response = await readHandshake(socket, ctx, nil)
+  let response = await readHandshake(socket, ctx, firstRead)
   let lineEnd = response.find("\r\n")
   if lineEnd < 0:
     raise newException(IOError, "websocket: malformed proxy CONNECT response")
@@ -435,6 +447,30 @@ proc readHandshake(socket: AsyncSocket; ctx: CancelCtx;
     while not pendingRead.finished:
       if ctx.done():
         socket.close()
+        raise newException(ValueError, "websocket: handshake canceled")
+      await sleepAsync(readPollMs)
+    let part = pendingRead.read()
+    pendingRead = nil
+    if part.len == 0:
+      raise newException(IOError, "websocket: server closed during handshake")
+    response.add part
+    if response.find("\r\n\r\n") >= 0: return response
+  raise newException(ValueError, "websocket: handshake headers are too large")
+
+proc readHandshake(stream: DuplexStream; ctx: CancelCtx;
+                    firstRead: Future[string]): Future[string] {.async.} =
+  var response = ""
+  var pendingRead = firstRead
+  while response.len < maxHandshakeBytes:
+    if pendingRead == nil:
+      if stream == nil or stream.receive == nil:
+        raise newException(IOError, "websocket: transport stream is not readable")
+      pendingRead = stream.receive(4096, ctx)
+    if pendingRead == nil:
+      raise newException(IOError, "websocket: transport returned no read future")
+    while not pendingRead.finished:
+      if ctx.done():
+        if stream != nil and stream.close != nil: stream.close()
         raise newException(ValueError, "websocket: handshake canceled")
       await sleepAsync(readPollMs)
     let part = pendingRead.read()
@@ -508,6 +544,227 @@ proc newDuplexStream*(receive: StreamReceive; send: StreamSend;
   ## Creates a byte stream for a caller-supplied WebSocket transport.
   DuplexStream(receive: receive, send: send, close: close)
 
+when defined(ssl):
+  proc init(gate: var AsyncGate) = gate.mutex.initLock()
+
+  proc reserve(gate: var AsyncGate): GateTicket =
+    acquire(gate.mutex)
+    result.previous = gate.tail
+    result.turn = newFuture[void]("websocket nested TLS I/O")
+    gate.tail = result.turn
+    release(gate.mutex)
+
+  proc complete(ticket: GateTicket) =
+    if ticket.turn != nil and not ticket.turn.finished:
+      ticket.turn.complete()
+
+  proc sendEncrypted(state: NestedTls; data: string; ticket: GateTicket;
+                     ctx: CancelCtx): Future[void] {.async.} =
+    try:
+      if ticket.previous != nil:
+        while not ticket.previous.finished:
+          if ctx.done():
+            state.socket.close()
+            raise newException(ValueError, "websocket: TLS connection canceled")
+          await sleepAsync(readPollMs)
+        ticket.previous.read()
+      await socketSend(state.socket, data, ctx)
+    finally:
+      ticket.complete()
+
+  proc receiveOuter(state: NestedTls; ctx: CancelCtx): Future[string] {.async.} =
+    let ticket = state.readGate.reserve()
+    try:
+      if ticket.previous != nil:
+        while not ticket.previous.finished:
+          if ctx.done():
+            state.socket.close()
+            raise newException(ValueError, "websocket: TLS connection canceled")
+          await sleepAsync(readPollMs)
+        ticket.previous.read()
+      let pending = state.socket.recv(16 * 1024)
+      while not pending.finished:
+        if ctx.done():
+          state.socket.close()
+          raise newException(ValueError, "websocket: TLS connection canceled")
+        await sleepAsync(readPollMs)
+      return pending.read()
+    finally:
+      ticket.complete()
+
+  proc feedEncryptedLocked(state: NestedTls; data: string) =
+    var offset = 0
+    while offset < data.len:
+      let written = bioWrite(state.inputBio,
+        cast[cstring](unsafeAddr data[offset]), (data.len - offset).cint)
+      if written <= 0:
+        raise newException(IOError, "websocket: failed to feed nested TLS input")
+      offset += written
+
+  proc drainEncryptedLocked(state: NestedTls): string =
+    while true:
+      let pending = bioCtrlPending(state.outputBio).int
+      if pending <= 0: return
+      let oldLen = result.len
+      result.setLen(oldLen + pending)
+      let written = bioRead(state.outputBio,
+        cast[cstring](addr result[oldLen]), pending.cint)
+      if written <= 0:
+        raise newException(IOError, "websocket: failed to drain nested TLS output")
+      result.setLen(oldLen + written)
+
+  proc closeNestedTls(state: NestedTls) =
+    if state == nil: return
+    acquire(state.sslMutex)
+    if state.closed:
+      release(state.sslMutex)
+      return
+    state.closed = true
+    let ssl = state.ssl
+    state.ssl = nil
+    release(state.sslMutex)
+    if ssl != nil: SSL_free(ssl)
+    if state.socket != nil:
+      try: state.socket.close()
+      except CatchableError: discard
+
+  proc nestedTlsReceive(state: NestedTls; maxBytes: int; ctx: CancelCtx):
+      Future[string] {.async.} =
+    if maxBytes <= 0: return ""
+    while true:
+      var buffer = newString(maxBytes)
+      acquire(state.sslMutex)
+      if state.closed or state.ssl == nil:
+        release(state.sslMutex)
+        raise newException(IOError, "websocket: TLS stream is closed")
+      let count = sslRead(state.ssl, cast[cstring](addr buffer[0]), maxBytes.cint)
+      let errorCode = if count > 0: 0.cint else: SSL_get_error(state.ssl, count)
+      let encrypted = state.drainEncryptedLocked()
+      let ticket = if encrypted.len > 0: state.writeGate.reserve()
+                   else: GateTicket()
+      release(state.sslMutex)
+      if encrypted.len > 0:
+        await state.sendEncrypted(encrypted, ticket, ctx)
+      if count > 0:
+        buffer.setLen(count)
+        return buffer
+      case errorCode
+      of SSL_ERROR_WANT_READ:
+        let received = await state.receiveOuter(ctx)
+        if received.len == 0: return ""
+        acquire(state.sslMutex)
+        if state.closed:
+          release(state.sslMutex)
+          raise newException(IOError, "websocket: TLS stream is closed")
+        state.feedEncryptedLocked(received)
+        release(state.sslMutex)
+      of SSL_ERROR_WANT_WRITE:
+        discard
+      of SSL_ERROR_ZERO_RETURN:
+        return ""
+      else:
+        raise newException(IOError,
+          "websocket: nested TLS read failed with OpenSSL code " & $errorCode)
+
+  proc nestedTlsSend(state: NestedTls; data: string; ctx: CancelCtx):
+      Future[void] {.async.} =
+    var offset = 0
+    while offset < data.len:
+      acquire(state.sslMutex)
+      if state.closed or state.ssl == nil:
+        release(state.sslMutex)
+        raise newException(IOError, "websocket: TLS stream is closed")
+      let count = sslWrite(state.ssl, cast[cstring](unsafeAddr data[offset]),
+        (data.len - offset).cint)
+      let errorCode = if count > 0: 0.cint else: SSL_get_error(state.ssl, count)
+      let encrypted = state.drainEncryptedLocked()
+      let ticket = if encrypted.len > 0: state.writeGate.reserve()
+                   else: GateTicket()
+      release(state.sslMutex)
+      if encrypted.len > 0:
+        await state.sendEncrypted(encrypted, ticket, ctx)
+      if count > 0:
+        offset += count
+      else:
+        case errorCode
+        of SSL_ERROR_WANT_READ:
+          let received = await state.receiveOuter(ctx)
+          if received.len == 0:
+            raise newException(IOError, "websocket: proxy closed the TLS tunnel")
+          acquire(state.sslMutex)
+          if state.closed:
+            release(state.sslMutex)
+            raise newException(IOError, "websocket: TLS stream is closed")
+          state.feedEncryptedLocked(received)
+          release(state.sslMutex)
+        of SSL_ERROR_WANT_WRITE:
+          discard
+        else:
+          raise newException(IOError,
+            "websocket: nested TLS write failed with OpenSSL code " & $errorCode)
+
+  proc nestedTlsStream(socket: AsyncSocket; context: SslContext; host: string;
+                       ctx: CancelCtx): Future[DuplexStream] {.async.} =
+    if (sslCtxGetVerifyMode(context.context) and SSL_VERIFY_PEER) == 0:
+      raise newException(IOError,
+        "websocket: TLS context must verify peer certificates")
+    let state = NestedTls(socket: socket)
+    state.sslMutex.initLock()
+    state.readGate.init()
+    state.writeGate.init()
+    state.ssl = SSL_new(context.context)
+    if state.ssl == nil:
+      raise newException(IOError, "websocket: could not create nested TLS session")
+    state.inputBio = bioNew(bioSMem())
+    state.outputBio = bioNew(bioSMem())
+    if state.inputBio == nil or state.outputBio == nil:
+      if state.inputBio != nil: bioFreeAll(state.inputBio)
+      if state.outputBio != nil: bioFreeAll(state.outputBio)
+      SSL_free(state.ssl)
+      state.ssl = nil
+      raise newException(IOError, "websocket: could not create nested TLS buffers")
+    sslSetBio(state.ssl, state.inputBio, state.outputBio)
+    sslSetConnectState(state.ssl)
+    if not isIpAddress(host) and
+        SSL_set_tlsext_host_name(state.ssl, host.cstring) != 1:
+      state.closeNestedTls()
+      raise newException(IOError, "websocket: could not set target TLS server name")
+    try:
+      while true:
+        acquire(state.sslMutex)
+        let status = sslDoHandshake(state.ssl)
+        let errorCode = if status == 1: 0.cint else: SSL_get_error(state.ssl, status)
+        let encrypted = state.drainEncryptedLocked()
+        let ticket = if encrypted.len > 0: state.writeGate.reserve()
+                     else: GateTicket()
+        release(state.sslMutex)
+        if encrypted.len > 0:
+          await state.sendEncrypted(encrypted, ticket, ctx)
+        if status == 1: break
+        case errorCode
+        of SSL_ERROR_WANT_READ:
+          let received = await state.receiveOuter(ctx)
+          if received.len == 0:
+            raise newException(IOError, "websocket: proxy closed the TLS tunnel")
+          acquire(state.sslMutex)
+          state.feedEncryptedLocked(received)
+          release(state.sslMutex)
+        of SSL_ERROR_WANT_WRITE:
+          discard
+        else:
+          raise newException(IOError,
+            "websocket: nested TLS handshake failed with OpenSSL code " & $errorCode)
+      verifyTlsPeer(state.ssl, context, host)
+      result = newDuplexStream(
+        proc(maxBytes: int; streamCtx: CancelCtx): Future[string] =
+          state.nestedTlsReceive(maxBytes, streamCtx),
+        proc(data: string; streamCtx: CancelCtx): Future[void] =
+          state.nestedTlsSend(data, streamCtx),
+        proc() = state.closeNestedTls())
+    except:
+      state.closeNestedTls()
+      raise
+
 proc socketStream(socket: AsyncSocket): DuplexStream =
   newDuplexStream(
     proc(maxBytes: int; ctx: CancelCtx): Future[string] = socket.recv(maxBytes),
@@ -572,9 +829,6 @@ proc dialAsync*(options: Options; request: HandshakeRequest;
     proxyScheme = if proxy == nil: "" else: proxy.url.scheme.toLowerAscii()
     if proxy != nil and proxy.url.hostname.len == 0:
       raise newException(ValueError, "websocket: proxy URL must include a hostname")
-    if parts.secure and proxyScheme == "https":
-      raise newException(ValueError,
-        "websocket: secure WebSocket over an HTTPS proxy is unsupported")
     if proxyScheme notin ["", "http", "https", "socks5", "socks5h"]:
       raise newException(ValueError,
         "websocket: unsupported proxy scheme " & proxyScheme.escape())
@@ -635,35 +889,41 @@ proc dialAsync*(options: Options; request: HandshakeRequest;
       let dialHost = if proxy == nil: parts.host else: proxy.url.hostname
       let dialPort = if proxy == nil: parts.port else: proxy.proxyPort()
       socket = await dialSocket(dialHost, dialPort, ctx)
+      var proxyTlsContext: SslContext
       if proxyScheme in ["socks5", "socks5h"]:
         await socks5Connect(socket, proxy, parts.host, parts.port, ctx)
       elif proxyScheme == "http" and parts.secure:
         await connectHttpProxy(socket, parts, proxy, ctx)
       elif proxyScheme == "https":
         when defined(ssl):
-          var tlsContext = options.tlsContext
-          if tlsContext == nil: tlsContext = newContext()
-          tlsContext.wrapConnectedSocket(socket, handshakeAsClient,
+          proxyTlsContext = options.tlsContext
+          if proxyTlsContext == nil: proxyTlsContext = newContext()
+          proxyTlsContext.wrapConnectedSocket(socket, handshakeAsClient,
             proxy.url.hostname)
           if not isIpAddress(proxy.url.hostname) and
               SSL_set_tlsext_host_name(socket.sslHandle(),
                 proxy.url.hostname.cstring) != 1:
             raise newException(IOError,
               "websocket: could not set proxy TLS server name")
-          firstRead = await beginTlsHandshake(socket, tlsContext,
+          firstRead = await beginTlsHandshake(socket, proxyTlsContext,
             proxy.url.hostname, ctx)
         else:
           raise newException(ValueError,
             "websocket: this build does not include TLS support")
       if parts.secure:
         when defined(ssl):
-          var tlsContext = options.tlsContext
-          if tlsContext == nil: tlsContext = newContext()
-          tlsContext.wrapConnectedSocket(socket, handshakeAsClient, parts.host)
-          if not isIpAddress(parts.host) and
-              SSL_set_tlsext_host_name(socket.sslHandle(), parts.host.cstring) != 1:
-            raise newException(IOError, "websocket: could not set TLS server name")
-          firstRead = await beginTlsHandshake(socket, tlsContext, parts.host, ctx)
+          if proxyScheme == "https":
+            await connectHttpProxy(socket, parts, proxy, ctx, firstRead)
+            firstRead = nil
+            stream = await nestedTlsStream(socket, proxyTlsContext, parts.host, ctx)
+          else:
+            var tlsContext = options.tlsContext
+            if tlsContext == nil: tlsContext = newContext()
+            tlsContext.wrapConnectedSocket(socket, handshakeAsClient, parts.host)
+            if not isIpAddress(parts.host) and
+                SSL_set_tlsext_host_name(socket.sslHandle(), parts.host.cstring) != 1:
+              raise newException(IOError, "websocket: could not set TLS server name")
+            firstRead = await beginTlsHandshake(socket, tlsContext, parts.host, ctx)
         else:
           raise newException(ValueError,
             "websocket: this build does not include TLS support")
@@ -688,13 +948,13 @@ proc dialAsync*(options: Options; request: HandshakeRequest;
           wire.add "Proxy-Authorization: Basic " &
             encode(proxy.url.username & ":" & proxy.url.password) & "\r\n"
       wire.add "\r\n"
-      await socketSend(socket, wire, ctx)
-      let response = await readHandshake(socket, ctx, firstRead)
+      if stream == nil: stream = socketStream(socket)
+      await sendStream(stream, wire, ctx)
+      let response = await readHandshake(stream, ctx, firstRead)
       let setCookieHeaders = responseCookies(response)
       if options.cookieJar.store != nil and setCookieHeaders.len > 0:
         options.cookieJar.store(cookieUrl, setCookieHeaders)
       let parsed = parseHandshake(response, key, protocols)
-      stream = socketStream(socket)
       result = WebSocketConn(stream: stream, ctx: ctx,
         maxMessageSize: max(1'i64, options.maxMessageSize),
         closeTimeoutMs: max(1, options.closeTimeoutMs),

@@ -225,6 +225,49 @@ proc tlsServerScenario(server: AsyncSocket): Future[string] {.async.} =
     result = ""
   client.close()
 
+proc relayBytes(source, destination: AsyncSocket): Future[void] {.async.} =
+  try:
+    while true:
+      let data = await source.recv(16 * 1024)
+      if data.len == 0: return
+      await destination.send(data)
+  except CatchableError:
+    discard
+
+proc httpsTlsProxyTunnelScenario(server: AsyncSocket; targetPort: Port):
+    Future[string] {.async.} =
+  let accepted = await server.acceptAddr()
+  let client = accepted.client
+  let proxyContext = newContext(certFile = tlsFixtures / "localhost.crt",
+    keyFile = tlsFixtures / "localhost.key", verifyMode = CVerifyNone)
+  var target: AsyncSocket
+  try:
+    proxyContext.wrapConnectedSocket(client, handshakeAsServer)
+    var connectRequest = ""
+    while not connectRequest.endsWith("\r\n\r\n"):
+      connectRequest.add await client.recv(1)
+    check ("CONNECT localhost:" & $int(targetPort) & " HTTP/1.1") in connectRequest
+    check ("proxy-authorization: basic " & encode("user:pass")).toLowerAscii() in
+      connectRequest.toLowerAscii()
+    await client.send("HTTP/1.1 200 Connection established\r\n\r\n")
+
+    target = newAsyncSocket(domain = AF_INET, buffered = false)
+    await target.connect("127.0.0.1", targetPort)
+    let toTarget = relayBytes(client, target)
+    let toClient = relayBytes(target, client)
+    try: await toTarget
+    except CatchableError: discard
+    client.close()
+    target.close()
+    try: await toClient
+    except CatchableError: discard
+    result = connectRequest
+  except CatchableError as error:
+    check error.msg.len == 0
+  finally:
+    if target != nil: target.close()
+    client.close()
+
 proc transportScenario(): Future[void] {.async.} =
   let server = newAsyncSocket(domain = AF_INET, buffered = false)
   server.setSockOpt(OptReuseAddr, true)
@@ -521,6 +564,38 @@ proc wssHttpProxyTransportScenario(): Future[void] {.async.} =
   check storedCookies == @["secure=stored; Path=/; Secure"]
   server.close()
 
+proc wssHttpsProxyTransportScenario(): Future[void] {.async.} =
+  let targetServer = newAsyncSocket(domain = AF_INET, buffered = false)
+  targetServer.setSockOpt(OptReuseAddr, true)
+  targetServer.bindAddr(Port(0), "127.0.0.1")
+  targetServer.listen()
+  let targetPort = targetServer.getLocalAddr()[1]
+  let targetServing = tlsServerScenario(targetServer)
+
+  let proxyServer = newAsyncSocket(domain = AF_INET, buffered = false)
+  proxyServer.setSockOpt(OptReuseAddr, true)
+  proxyServer.bindAddr(Port(0), "127.0.0.1")
+  proxyServer.listen()
+  let proxyAddress = proxyServer.getLocalAddr()
+  let proxyServing = httpsTlsProxyTunnelScenario(proxyServer, targetPort)
+
+  var options = ws.defaultOptions()
+  options.proxy = newProxy("https://user:pass@localhost:" & $proxyAddress[1])
+  options.tlsContext = newContext(caFile = tlsFixtures / "localhost.crt")
+  let request = ws.HandshakeRequest(
+    url: "wss://localhost:" & $targetPort & "/live",
+    headers: @[ws.Header(name: "Authorization", value: "Bearer nested-tls")])
+  let connection = await ws.dialAsync(options, request, @[], newCtx())
+  check (await connection.readMessage()).payload == @[byte('o'), byte('k')]
+  connection.terminate()
+  let connectRequest = await proxyServing
+  let targetRequest = await targetServing
+  check "proxy-authorization: basic" in connectRequest.toLowerAscii()
+  check "authorization: bearer nested-tls" in targetRequest.toLowerAscii()
+  check "proxy-authorization:" notin targetRequest.toLowerAscii()
+  proxyServer.close()
+  targetServer.close()
+
 proc tlsTransportScenario(host: string; expectedSuccess: bool):
     Future[void] {.async.} =
   let server = newAsyncSocket(domain = AF_INET, buffered = false)
@@ -577,6 +652,7 @@ suite "WebSocket transport":
     waitFor socks5ProxyTransportScenario()
     waitFor httpsProxyTransportScenario()
     waitFor wssHttpProxyTransportScenario()
+    waitFor wssHttpsProxyTransportScenario()
 
   test "validates TLS chains and hostnames before sending headers":
     waitFor tlsTransportScenario("localhost", expectedSuccess = true)
