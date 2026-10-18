@@ -3,6 +3,7 @@ import std/[asyncdispatch, asynchttpserver, asyncnet, asyncstreams, envvars,
 import mynim as core
 import mynim/internal/ctx
 import mynim/plugins/fetch as fetchPlugin
+import mynim/plugins/fetch/idna_ascii as idnaAscii
 import mynim/plugins/fetch/env_proxy
 import mynim/plugins/fetch/service
 
@@ -165,6 +166,30 @@ block environment_proxy_selection_honors_scheme_and_no_proxy:
   doAssertRaises ValueError:
     discard proxyForUrl(parseUri("http://outside.example/"),
       EnvironmentProxy(httpProxy: "proxy.example", cgi: true))
+
+block environment_proxy_matches_unicode_domains:
+  doAssert idnaAscii.toAsciiHost("bücher.example") ==
+    "xn--bcher-kva.example"
+  doAssert idnaAscii.toAsciiHost("mañana.example") ==
+    "xn--maana-pta.example"
+  doAssert idnaAscii.toAsciiHost("مثال.example") ==
+    "xn--mgbh0fb.example"
+  let exactRule = EnvironmentProxy(httpProxy: "proxy.example:8080",
+    noProxy: "bücher.example")
+  doAssert proxyForUrl(parseUri("http://xn--bcher-kva.example/"),
+    exactRule) == nil
+  doAssert proxyForUrl(parseUri("http://shop.xn--bcher-kva.example/"),
+    exactRule) == nil
+  doAssert proxyForUrl(parseUri("http://BÜCHER.example/"),
+    EnvironmentProxy(httpProxy: "proxy.example:8080",
+      noProxy: "xn--bcher-kva.example")) == nil
+
+  let subdomainsOnly = EnvironmentProxy(httpProxy: "proxy.example:8080",
+    noProxy: ".bücher.example")
+  doAssert proxyForUrl(parseUri("http://xn--bcher-kva.example/"),
+    subdomainsOnly) != nil
+  doAssert proxyForUrl(parseUri("http://shop.xn--bcher-kva.example/"),
+    subdomainsOnly) == nil
 
 block environment_proxy_is_used_and_loopback_is_bypassed:
   let saved = saveEnvironment(["http_proxy", "HTTP_PROXY", "https_proxy",

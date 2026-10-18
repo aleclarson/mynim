@@ -1,6 +1,7 @@
 ## Go-compatible environment selection for the Fetch plugin's default client.
 
 import std/[envvars, httpclient, net, strutils, uri]
+import mynim/plugins/fetch/idna_ascii as idnaAscii
 
 type EnvironmentProxy* = object
   httpProxy*, httpsProxy*, noProxy*: string
@@ -114,14 +115,15 @@ proc domainMatch(host, rule: string): bool =
   if suffix.startsWith("*."):
     suffix = suffix[1 .. ^1]
   let matchExact = not suffix.startsWith(".")
-  if matchExact:
-    suffix = "." & suffix
+  if suffix.startsWith("."):
+    suffix = suffix[1 .. ^1]
+  suffix = "." & idnaAscii.toAsciiHost(suffix).toLowerAscii()
   if host.endsWith(suffix):
     return true
   matchExact and host == suffix[1 .. ^1]
 
 proc excludedByNoProxy(url: Uri; noProxy: string): bool =
-  let host = url.hostname.toLowerAscii()
+  let host = idnaAscii.toAsciiHost(url.hostname).toLowerAscii()
   let port = url.urlPort()
   for rawRule in noProxy.split(','):
     let rule = rawRule.strip().toLowerAscii()
