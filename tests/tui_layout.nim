@@ -58,6 +58,51 @@ block grow_and_shrink:
   doAssert minContent.bounds(fixed).w == 50
   doAssert minContent.bounds(last).x == 50
 
+block boxes_are_not_smaller_than_padding:
+  let c = newContext()
+  var column, columnChild, row, rowChild: Element
+  c.build(proc(ctx: Context) =
+    column = ctx.column().size(100, 40)
+    discard column.children(proc() =
+      columnChild = ctx.box().width(8).padding(0, 3, 0, 11)
+    )
+    row = ctx.row().size(100, 20)
+    discard row.children(proc() =
+      rowChild = ctx.box().width(8).padding(0, 3, 0, 11)
+    )
+  )
+  let layout = c.layout(100, 100)
+  doAssert layout.bounds(columnChild).w == 14
+  doAssert layout.bounds(rowChild).w == 14
+
+block flex_shrink_uses_inner_base_size:
+  let c = newContext()
+  var row, first, padded: Element
+  c.build(proc(ctx: Context) =
+    row = ctx.row().size(300, 40).alignItems(Align.Start)
+    discard row.children(proc() =
+      first = ctx.box().basis(200)
+      padded = ctx.box().basis(200).padding(0, 0, 0, 100)
+    )
+  )
+  let layout = c.layout(300, 40)
+  doAssert abs(layout.bounds(first).w - 133.333'f32) < 0.01'f32
+  doAssert abs(layout.bounds(padded).w - 166.667'f32) < 0.01'f32
+
+block flex_base_is_not_smaller_than_padding:
+  let c = newContext()
+  var column, padded, other: Element
+  c.build(proc(ctx: Context) =
+    column = ctx.column().size(100, 500)
+    discard column.children(proc() =
+      padded = ctx.box().height(9).padding(14, 0, 0, 0).grow()
+      other = ctx.box().grow(2)
+    )
+  )
+  let layout = c.layout(100, 500)
+  doAssert abs(layout.bounds(padded).h - 176'f32) < 0.01'f32
+  doAssert abs(layout.bounds(other).h - 324'f32) < 0.01'f32
+
 block grow_in_content_sized_column:
   let c = newContext()
   var parent, growing, content, after: Element

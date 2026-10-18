@@ -83,10 +83,10 @@ proc clampSize(value: float32; minimum, maximum: UiLength;
   result = max(result, 0'f32)
 
 proc clampWidth(node: ElementNode; width, base: float32): float32 =
-  clampSize(width, node.minW, node.maxW, base)
+  max(clampSize(width, node.minW, node.maxW, base), node.contentInsetX)
 
 proc clampHeight(node: ElementNode; height, base: float32): float32 =
-  clampSize(height, node.minH, node.maxH, base)
+  max(clampSize(height, node.minH, node.maxH, base), node.contentInsetY)
 
 proc crossSize(node: ElementNode; natural: NaturalSize; row: bool;
                base, mainExtent, available, margins: float32;
@@ -796,8 +796,6 @@ proc crossSize(node: ElementNode; natural: NaturalSize; row: bool;
                base, mainExtent, available, margins: float32;
                align: Align): float32 =
   let dimension = if row: node.height else: node.width
-  let minimum = if row: node.minH else: node.minW
-  let maximum = if row: node.maxH else: node.maxW
   let intrinsic = if row: natural.h else: natural.w
   let resolved = dimension.resolve(base)
   var value = if resolved.ok: resolved.value else: intrinsic
@@ -813,7 +811,10 @@ proc crossSize(node: ElementNode; natural: NaturalSize; row: bool;
              else: mainContent * node.aspectRatio) + crossInset
   elif not resolved.ok and align == Align.Stretch and not autoMargin:
     value = max(available - margins, 0'f32)
-  clampSize(value, minimum, maximum, base)
+  if row:
+    node.clampHeight(value, base)
+  else:
+    node.clampWidth(value, base)
 
 proc placeAbsoluteChild(nodes: seq[ElementNode]; natural: seq[NaturalSize];
                         rects: var seq[Rect]; sizes, bases, minimum, maximum,
@@ -893,7 +894,10 @@ proc placeNode(nodes: seq[ElementNode]; natural: seq[NaturalSize];
       let mainBase = childNode.basis.resolve(mainSize)
       let fallback = childNode.preferredMain(childNatural, row,
         if row: innerW else: innerH)
-      bases[childSlot] = if mainBase.ok: mainBase.value else: fallback
+      let mainInset = if row: childNode.contentInsetX
+        else: childNode.contentInsetY
+      bases[childSlot] = max(
+        if mainBase.ok: mainBase.value else: fallback, mainInset)
       let minLength = if row: childNode.minW else: childNode.minH
       let maxLength = if row: childNode.maxW else: childNode.maxH
       let dimensionBase = if row: innerW else: innerH
@@ -914,6 +918,7 @@ proc placeNode(nodes: seq[ElementNode]; natural: seq[NaturalSize];
           max(minValue.value, 0'f32)
         else:
           max(autoMin, 0'f32)
+      minimum[childSlot] = max(minimum[childSlot], mainInset)
       maximum[childSlot] = if maxValue.ok:
           max(maxValue.value, minimum[childSlot])
         else:
@@ -962,8 +967,11 @@ proc placeNode(nodes: seq[ElementNode]; natural: seq[NaturalSize];
     elif free < 0:
       for itemIndex in line.first ..< line.pastLast:
         let childSlot = flexSlots[itemIndex]
-        factors[childSlot] = nodes[childSlot].shrink *
-          max(bases[childSlot], 0'f32)
+        let childNode = nodes[childSlot]
+        let mainInset = if row: childNode.contentInsetX
+          else: childNode.contentInsetY
+        factors[childSlot] = childNode.shrink *
+          max(bases[childSlot] - mainInset, 0'f32)
       distribute(nodes, flexSlots, line.first, line.pastLast, sizes,
         minimum, maximum, factors, -free, false)
     line.main = lineGaps
