@@ -11,6 +11,13 @@ export view_paint.TerminalGrid, view_paint.TerminalPaintOptions,
   view_paint.defaultTerminalPaintOptions
 
 type
+  ## Selects what happens to terminal text when a selection ends.
+  TerminalCopyOnSelect* = enum
+    ## Leave the selection in the terminal without copying it.
+    copyOnSelectNone,
+    ## Copy the selected text to the system clipboard.
+    copyOnSelectClipboard
+
   TerminalTheme* = ref object
     foreground*, background*: ui.Color
     cursor*, cursorText*: ui.Color
@@ -31,6 +38,7 @@ type
     env*: seq[string]
     font*: TerminalPaintOptions
     scrollbackMaxBytes*: int
+    copyOnSelect*: TerminalCopyOnSelect
     noBlink*, optionAsAlt*: bool
     theme*, darkTheme*: TerminalTheme
     onTitle*: proc(title: string) {.closure.}
@@ -40,9 +48,11 @@ type
 
   TerminalViewState = ref object
     hasGrid, hasFocus, focused, cursorBlinking, pointerPressed: bool
+    selecting, ticking: bool
     hasPendingKey: bool
     grid: TerminalGrid
     scale, scrollRemainder: float32
+    pointerX, pointerY: float32
     blinkStart: MonoTime
     preedit: string
     preeditCaret: int
@@ -331,6 +341,57 @@ proc pointerButton(button: int): vtInput.MouseButton =
   of 2: vtInput.buttonMiddle
   else: vtInput.buttonNone
 
+proc selectionCell(terminal: Terminal; x, y: float32):
+    tuple[column, row, paddingLeft, paddingTop: int] =
+  let grid = terminal.state.grid
+  let scale = max(terminal.state.scale, 0.01'f32)
+  result.paddingLeft = int(round(terminal.options.font.paddingX * scale))
+  result.paddingTop = int(round(terminal.options.font.paddingY * scale))
+  result.column = int(floor(float64((x * scale -
+    float32(result.paddingLeft)) / float32(max(grid.cellWidthPixels, 1)))))
+  result.row = int(floor(float64((y * scale -
+    float32(result.paddingTop)) / float32(max(grid.cellHeightPixels, 1)))))
+  result.column = max(0, min(result.column, max(grid.cols - 1, 0)))
+  result.row = max(0, min(result.row, max(grid.rows - 1, 0)))
+
+proc selectionGeometry(terminal: Terminal; paddingLeft, paddingTop: int):
+    tuple[columns, cellWidth, paddingLeft, screenHeight: int] =
+  let grid = terminal.state.grid
+  (columns: grid.cols, cellWidth: max(grid.cellWidthPixels, 1),
+    paddingLeft: paddingLeft,
+    screenHeight: paddingTop + grid.rows * max(grid.cellHeightPixels, 1))
+
+proc copySelection(terminal: Terminal; services: ui.Services;
+                   clear: bool): bool =
+  let selected = terminal.session.selectedText()
+  if selected.isNone or selected.get().len == 0:
+    return false
+  services.writeClipboard(selected.get())
+  if clear:
+    terminal.session.clearSelection()
+    services.invalidate()
+  true
+
+proc tickSelection(terminal: Terminal) =
+  if not terminal.state.selecting or not terminal.state.ticking or
+      not terminal.state.hasGrid:
+    return
+  let direction = terminal.session.selectionAutoscroll()
+  if direction == 0:
+    terminal.state.ticking = false
+    return
+  terminal.session.scrollForSelection(direction)
+  let pointer = terminal.selectionCell(terminal.state.pointerX,
+    terminal.state.pointerY)
+  let geometry = terminal.selectionGeometry(pointer.paddingLeft,
+    pointer.paddingTop)
+  let scale = max(terminal.state.scale, 0.01'f32)
+  discard terminal.session.selectionTick(pointer.column, pointer.row,
+    float64(terminal.state.pointerX * scale),
+    float64(terminal.state.pointerY * scale), geometry.columns,
+    geometry.cellWidth, geometry.paddingLeft, geometry.screenHeight)
+  terminal.state.ticking = terminal.session.selectionAutoscroll() != 0
+
 proc applyTheme(terminal: Terminal; dark: bool): TerminalTheme =
   if dark and terminal.options.darkTheme != nil:
     return terminal.options.darkTheme
@@ -365,6 +426,7 @@ proc reportKey(terminal: Terminal; event: ui.InputEvent): bool =
     else: return false
   if action != vtInput.keyRelease:
     terminal.session.scrollToBottom()
+    terminal.session.clearSelection()
   terminal.session.sendKey(vtInput.KeyEvent(action: action, key: key,
     mods: keyMods(event.mods), unshifted: unshiftedCodepoint(
       if event.physicalKey != ui.keyUnknown: event.physicalKey else: event.key)),
@@ -382,6 +444,7 @@ proc flushPendingKey(terminal: Terminal) =
         shiftedCodepoint(pending.unshifted) else: pending.unshifted
     text = toUTF8(Rune(codepoint))
   terminal.session.scrollToBottom()
+  terminal.session.clearSelection()
   terminal.session.sendKey(vtInput.KeyEvent(
     action: if pending.repeat: vtInput.keyRepeat else: vtInput.keyPress,
     key: pending.key, mods: keyMods(pending.mods), text: text,
@@ -390,11 +453,13 @@ proc flushPendingKey(terminal: Terminal) =
 proc sendPendingText(terminal: Terminal; text: string) =
   if not terminal.state.hasPendingKey:
     terminal.session.scrollToBottom()
+    terminal.session.clearSelection()
     terminal.session.send(text)
     return
   let pending = terminal.state.pendingKey
   terminal.state.hasPendingKey = false
   terminal.session.scrollToBottom()
+  terminal.session.clearSelection()
   let runes = text.toRunes()
   if pending.key == vtInput.keyUnidentified or runes.len != 1:
     terminal.session.send(text)
@@ -421,6 +486,29 @@ proc handleInput(terminal: Terminal; services: ui.Services;
         terminal.state.takenKeys.add(event.key)
       terminal.state.pendingTyped = true
       return true
+    var clipboardShortcutMods = false
+    when defined(macosx):
+      clipboardShortcutMods = (event.mods and ui.modSuper) != 0
+    else:
+      clipboardShortcutMods =
+        (event.mods and (ui.modCtrl or ui.modShift)) ==
+        (ui.modCtrl or ui.modShift)
+    if clipboardShortcutMods and event.key == ui.keyC:
+      discard terminal.copySelection(services, clear = true)
+      if event.key notin terminal.state.takenKeys:
+        terminal.state.takenKeys.add(event.key)
+      terminal.state.pendingTyped = true
+      return true
+    if clipboardShortcutMods and event.key == ui.keyV:
+      terminal.state.preedit.setLen(0)
+      terminal.state.hasPendingKey = false
+      terminal.session.scrollToBottom()
+      terminal.session.clearSelection()
+      terminal.session.paste(services.readClipboard())
+      if event.key notin terminal.state.takenKeys:
+        terminal.state.takenKeys.add(event.key)
+      terminal.state.pendingTyped = true
+      return true
     if (event.mods and ui.modSuper) != 0:
       return false
     let sourceKey = if event.physicalKey != ui.keyUnknown:
@@ -438,6 +526,7 @@ proc handleInput(terminal: Terminal; services: ui.Services;
     for index in countdown(terminal.state.takenKeys.high, 0):
       if terminal.state.takenKeys[index] == event.key:
         terminal.state.takenKeys.delete(index)
+        terminal.state.pendingTyped = false
         return true
     if terminal.state.hasPendingKey and
         terminal.state.pendingKey.sourceKey == event.key:
@@ -460,10 +549,20 @@ proc handleInput(terminal: Terminal; services: ui.Services;
     terminal.state.preeditCaret = event.caret
     return true
   of ui.InputKind.InputCommand:
+    if event.text == "copy":
+      discard terminal.copySelection(services, clear = false)
+      return true
+    if event.text == "selectAll":
+      if terminal.session.selectAll() and
+          terminal.options.copyOnSelect == copyOnSelectClipboard:
+        discard terminal.copySelection(services, clear = false)
+      services.invalidate()
+      return true
     if event.text == "paste" or event.text == "pasteAndMatchStyle":
       terminal.state.preedit.setLen(0)
       terminal.state.hasPendingKey = false
       terminal.session.scrollToBottom()
+      terminal.session.clearSelection()
       terminal.session.paste(services.readClipboard())
       return true
     return false
@@ -471,37 +570,80 @@ proc handleInput(terminal: Terminal; services: ui.Services;
       ui.InputKind.InputPointerMove:
     let tracking = terminal.session.mouseTracking() and
       (event.mods and ui.modShift) == 0
-    if not terminal.state.hasGrid or
-        (not tracking and
-          not (event.kind == ui.InputKind.InputPointerUp and
-            terminal.state.pointerPressed)):
+    if not terminal.state.hasGrid:
       return false
-    let button = event.button.pointerButton()
-    if event.kind == ui.InputKind.InputPointerDown and
-        button == vtInput.buttonNone:
+    if (tracking and not terminal.state.selecting) or
+        terminal.state.pointerPressed:
+      let button = event.button.pointerButton()
+      if event.kind == ui.InputKind.InputPointerDown and
+          button == vtInput.buttonNone:
+        return false
+      let action = case event.kind
+        of ui.InputKind.InputPointerDown:
+          terminal.state.pointerPressed = true
+          vtInput.mousePress
+        of ui.InputKind.InputPointerUp:
+          terminal.state.pointerPressed = false
+          vtInput.mouseRelease
+        else: vtInput.mouseMotion
+      let grid = terminal.state.grid
+      let scale = max(terminal.state.scale, 0.01'f32)
+      let paddingX = int(round(terminal.options.font.paddingX * scale))
+      let paddingY = int(round(terminal.options.font.paddingY * scale))
+      let screenWidth = paddingX * 2 + grid.cols * grid.cellWidthPixels
+      let screenHeight = paddingY * 2 + grid.rows * grid.cellHeightPixels
+      let sent = terminal.session.sendMouse(action, button,
+        keyMods(event.mods), event.x * scale, event.y * scale,
+        screenWidth, screenHeight, grid.cellWidthPixels,
+        grid.cellHeightPixels, paddingX, paddingY,
+        terminal.state.pointerPressed)
+      if event.kind == ui.InputKind.InputPointerMove:
+        return sent
+      return true
+
+    if event.kind == ui.InputKind.InputPointerDown and event.button != 0:
       return false
-    let action = case event.kind
-      of ui.InputKind.InputPointerDown:
-        terminal.state.pointerPressed = true
-        vtInput.mousePress
-      of ui.InputKind.InputPointerUp:
-        terminal.state.pointerPressed = false
-        vtInput.mouseRelease
-      else: vtInput.mouseMotion
-    let grid = terminal.state.grid
+    if event.kind == ui.InputKind.InputPointerMove and
+        not terminal.state.selecting:
+      return false
+    if event.kind == ui.InputKind.InputPointerUp and
+        not terminal.state.selecting:
+      return false
+    terminal.state.pointerX = event.x
+    terminal.state.pointerY = event.y
+    let pointer = terminal.selectionCell(event.x, event.y)
+    let geometry = terminal.selectionGeometry(pointer.paddingLeft,
+      pointer.paddingTop)
     let scale = max(terminal.state.scale, 0.01'f32)
-    let paddingX = int(round(terminal.options.font.paddingX * scale))
-    let paddingY = int(round(terminal.options.font.paddingY * scale))
-    let screenWidth = paddingX * 2 + grid.cols * grid.cellWidthPixels
-    let screenHeight = paddingY * 2 + grid.rows * grid.cellHeightPixels
-    let sent = terminal.session.sendMouse(action, button,
-      keyMods(event.mods), event.x * scale, event.y * scale,
-      screenWidth, screenHeight, grid.cellWidthPixels,
-      grid.cellHeightPixels, paddingX, paddingY,
-      terminal.state.pointerPressed)
-    if event.kind == ui.InputKind.InputPointerMove:
-      return sent
-    return true
+    let pixelX = float64(event.x * scale)
+    let pixelY = float64(event.y * scale)
+    case event.kind
+    of ui.InputKind.InputPointerDown:
+      terminal.state.selecting = terminal.session.selectionPress(
+        pointer.column, pointer.row, pixelX, pixelY,
+        uint64(getMonoTime().ticks), 5.0 * float64(scale))
+      terminal.state.ticking = false
+      services.invalidate()
+      return terminal.state.selecting
+    of ui.InputKind.InputPointerMove:
+      discard terminal.session.selectionDrag(pointer.column, pointer.row,
+        pixelX, pixelY, geometry.columns, geometry.cellWidth,
+        geometry.paddingLeft, geometry.screenHeight,
+        rectangle = (event.mods and ui.modAlt) != 0)
+      terminal.state.ticking = terminal.session.selectionAutoscroll() != 0
+      services.invalidate()
+      return true
+    of ui.InputKind.InputPointerUp:
+      terminal.state.selecting = false
+      terminal.state.ticking = false
+      terminal.session.selectionRelease(pointer.column, pointer.row,
+        inside = true)
+      if terminal.options.copyOnSelect == copyOnSelectClipboard:
+        discard terminal.copySelection(services, clear = false)
+      services.invalidate()
+      return true
+    else:
+      return false
   of ui.InputKind.InputScroll:
     if not terminal.state.hasGrid or event.dy == 0:
       return false
@@ -565,6 +707,10 @@ proc view*(context: ui.Context; terminal: Terminal): ui.Element =
   let blinkPhase = elapsed mod 1200
   let cursorBlinkOn = terminal.options.noBlink or not focused or
     blinkPhase < 600
+  if terminal.state.ticking:
+    terminal.tickSelection()
+    if terminal.state.ticking:
+      context.after(initDuration(milliseconds = 40))
   var frame = terminal.session.snapshot()
   terminal.state.cursorBlinking = frame.cursor.visible and frame.cursor.blinking
   if focused and terminal.state.cursorBlinking:

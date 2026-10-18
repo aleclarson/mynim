@@ -1,5 +1,6 @@
 import std/[options, os, unittest]
-import mynim/plugins/terminal/internal/vt/[frame, library, render, terminal]
+import mynim/plugins/terminal/internal/vt/[frame, library, render, selection,
+    terminal]
 
 suite "Ghostty terminal state":
   test "validates the library and dimensions before construction":
@@ -46,6 +47,47 @@ suite "Ghostty terminal state":
     check terminal.activeScreen()
     terminal.write("\e[?1049l")
     check not terminal.activeScreen()
+
+  test "selects cells and formats the selection for copy":
+    let path = getEnv("MYNIM_GHOSTTY_VT")
+    if path.len == 0:
+      skip()
+    let library = openGhosttyVT(path)
+    defer: library.close()
+    let terminal = newGhosttyTerminal(library, 20, 4)
+    defer: terminal.close()
+    terminal.write("hello")
+    let gesture = newGhosttySelectionGesture(library)
+    defer: gesture.close(terminal)
+
+    let first = terminal.cellAt(0, 0)
+    let last = terminal.cellAt(5, 0)
+    check first.isSome
+    check last.isSome
+    check first.get().x == 0
+    check last.get().x == 5
+    let pressed = gesture.press(terminal, first.get(), 0.5, 0.5, 1)
+    terminal.setSelection(pressed)
+    let dragged = gesture.drag(terminal, last.get(), 4.5, 0.5,
+      20, 1, 0, 4)
+    check dragged.isSome
+    check dragged.get().finish.x == 4
+    terminal.setSelection(dragged)
+    check terminal.selectedText().get() == "hello"
+
+    let renderState = newGhosttyRenderState(library)
+    defer: renderState.close()
+    let frame = renderState.snapshot(terminal)
+    check frame.viewport[0].selection.isSome
+    check frame.viewport[0].selection.get().start == 0
+    check frame.viewport[0].selection.get().finish == 4
+
+    let all = terminal.selectAll()
+    check all.isSome
+    terminal.setSelection(all)
+    check terminal.selectedText().get() == "hello"
+    terminal.setSelection(none(GhosttySelection))
+    check terminal.selectedText().isNone
 
   test "creates, writes, resizes, resets and closes a terminal":
     let path = getEnv("MYNIM_GHOSTTY_VT")

@@ -2,7 +2,7 @@
 
 import std/[locks, options]
 import ./pty
-import ./vt/[effects, encode, frame, input, library, render, terminal]
+import ./vt/[effects, encode, frame, input, library, render, selection, terminal]
 
 type
   TerminalEventKind* = enum
@@ -27,6 +27,7 @@ type
     inputChanged: Cond
     library: GhosttyVT
     terminal: GhosttyTerminal
+    selectionGesture: GhosttySelectionGesture
     renderState: GhosttyRenderState
     keyEncoder: GhosttyKeyEncoder
     mouseEncoder: GhosttyMouseEncoder
@@ -291,6 +292,12 @@ proc releaseGhostty(session: TerminalSession) =
     except CatchableError as error:
       session.recordInputError(error.msg)
     session.renderState = nil
+  if not session.selectionGesture.isNil:
+    try:
+      session.selectionGesture.close(session.terminal)
+    except CatchableError as error:
+      session.recordInputError(error.msg)
+    session.selectionGesture = nil
   if not session.terminal.isNil:
     try:
       session.terminal.close()
@@ -325,6 +332,7 @@ proc newTerminalSession*(library: GhosttyVT; process: PtyOptions;
 
   try:
     result.terminal = newGhosttyTerminal(library, cols, rows)
+    result.selectionGesture = newGhosttySelectionGesture(library)
     result.terminal.setTerminfoName(terminfoName)
     result.terminal.setScrollbackMaxBytes(scrollbackMaxBytes)
     result.terminal.setDefaultCursor(cursorStyleBlock, cursorBlink)
@@ -472,6 +480,125 @@ proc scrollToBottom*(session: TerminalSession) =
   session.lockTerminal()
   try:
     session.terminal.scrollToBottom()
+  finally:
+    session.terminalGuard.release()
+
+proc selectionPress*(session: TerminalSession; column, row: int;
+    x, y: float64; timeNs: uint64; repeatDistance = 5.0): bool =
+  ## Starts a pointer selection and installs any click selection immediately.
+  if session.isNil:
+    raise newException(ValueError, "terminal session is nil")
+  session.lockTerminal()
+  try:
+    let reference = session.terminal.cellAt(column, row)
+    if reference.isNone:
+      return false
+    let selection = session.selectionGesture.press(session.terminal,
+      reference.get(), x, y, timeNs, repeatDistance)
+    session.terminal.setSelection(selection)
+    result = true
+  finally:
+    session.terminalGuard.release()
+
+proc selectionDrag*(session: TerminalSession; column, row: int;
+    x, y: float64; columns, cellWidth, paddingLeft, screenHeight: int;
+    rectangle = false): bool =
+  ## Extends and installs a pointer selection.
+  if session.isNil:
+    raise newException(ValueError, "terminal session is nil")
+  session.lockTerminal()
+  try:
+    let reference = session.terminal.cellAt(column, row)
+    if reference.isNone:
+      return false
+    let selection = session.selectionGesture.drag(session.terminal,
+      reference.get(), x, y, columns, cellWidth, paddingLeft, screenHeight,
+      rectangle)
+    if selection.isSome:
+      session.terminal.setSelection(selection)
+    result = true
+  finally:
+    session.terminalGuard.release()
+
+proc selectionRelease*(session: TerminalSession; column, row: int;
+                       inside: bool) =
+  ## Ends a pointer selection, preserving its final range.
+  if session.isNil:
+    raise newException(ValueError, "terminal session is nil")
+  session.lockTerminal()
+  try:
+    var reference = none(GhosttyGridRef)
+    if inside:
+      reference = session.terminal.cellAt(column, row)
+    session.selectionGesture.release(session.terminal, reference)
+  finally:
+    session.terminalGuard.release()
+
+proc selectionAutoscroll*(session: TerminalSession): int =
+  ## Returns the active selection drag's scroll direction.
+  if session.isNil:
+    return 0
+  session.lockTerminal()
+  try:
+    result = session.selectionGesture.autoscroll(session.terminal)
+  finally:
+    session.terminalGuard.release()
+
+proc selectionTick*(session: TerminalSession; column, row: int;
+    x, y: float64; columns, cellWidth, paddingLeft, screenHeight: int): bool =
+  ## Advances a selection after one viewport autoscroll tick.
+  if session.isNil:
+    raise newException(ValueError, "terminal session is nil")
+  session.lockTerminal()
+  try:
+    let selection = session.selectionGesture.autoscrollTick(session.terminal,
+      column, row, x, y, columns, cellWidth, paddingLeft, screenHeight)
+    if selection.isSome:
+      session.terminal.setSelection(selection)
+      result = true
+  finally:
+    session.terminalGuard.release()
+
+proc selectAll*(session: TerminalSession): bool =
+  ## Selects all retained terminal content.
+  if session.isNil:
+    raise newException(ValueError, "terminal session is nil")
+  session.lockTerminal()
+  try:
+    let selection = session.terminal.selectAll()
+    if selection.isSome:
+      session.terminal.setSelection(selection)
+      result = true
+  finally:
+    session.terminalGuard.release()
+
+proc clearSelection*(session: TerminalSession) =
+  ## Clears the terminal's active selection.
+  if session.isNil:
+    raise newException(ValueError, "terminal session is nil")
+  session.lockTerminal()
+  try:
+    session.terminal.setSelection(none(GhosttySelection))
+  finally:
+    session.terminalGuard.release()
+
+proc selectedText*(session: TerminalSession): Option[string] =
+  ## Copies selected content from Ghostty using its terminal text formatter.
+  if session.isNil:
+    return none(string)
+  session.lockTerminal()
+  try:
+    result = session.terminal.selectedText()
+  finally:
+    session.terminalGuard.release()
+
+proc scrollForSelection*(session: TerminalSession; rows: int) =
+  ## Scrolls the viewport and keeps terminal access serialized with its gesture.
+  if session.isNil:
+    raise newException(ValueError, "terminal session is nil")
+  session.lockTerminal()
+  try:
+    session.terminal.scrollBy(rows)
   finally:
     session.terminalGuard.release()
 

@@ -60,3 +60,34 @@ suite "native Terminal API":
       tester.typeKey(0, ui.keyM, "m")
       tester.key(0, ui.keyEnter)
       check terminal.waitForExit() == 0
+
+  test "selects terminal output and copies it through UI commands":
+    if getEnv("MYNIM_GHOSTTY_VT").len == 0:
+      skip()
+    when defined(windows):
+      skip()
+    else:
+      let terminal = newTerminal(TerminalOptions(command: @[
+        "/bin/sh", "-c", "printf hello"],
+        copyOnSelect: copyOnSelectClipboard))
+      defer: terminal.close()
+      check terminal.waitForExit() == 0
+      let tester = ui.newTester(proc(c: ui.Context) =
+        discard view(c, terminal).size(800, 500)
+      , 800, 500)
+      defer: tester.close()
+      tester.setFocused(true)
+      tester.clickAt(20, 20)
+      tester.setClipboard("stale")
+      tester.command("selectAll")
+      check tester.clipboard() == "hello"
+      tester.command("copy")
+      check tester.clipboard() == "hello"
+      tester.command("selectAll")
+      tester.key(ui.modSuper, ui.keyC)
+      check tester.clipboard() == "hello"
+      tester.setClipboard("stale")
+      tester.press(10, 12)
+      tester.move(50, 12)
+      tester.release(50, 12)
+      check tester.clipboard() == "hello"
