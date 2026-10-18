@@ -16,6 +16,37 @@ suite "Ghostty terminal state":
     expect IOError:
       discard renderState.size()
 
+  test "moves the active viewport through scrollback":
+    let path = getEnv("MYNIM_GHOSTTY_VT")
+    if path.len == 0:
+      skip()
+    let library = openGhosttyVT(path)
+    defer: library.close()
+    let terminal = newGhosttyTerminal(library, 80, 24)
+    defer: terminal.close()
+    var output = ""
+    for row in 0 ..< 100:
+      output.add("line" & $row & "\r\n")
+    terminal.write(output)
+    let bottom = terminal.scrollbar()
+    check bottom.len == 24
+    check bottom.total > bottom.len
+    check terminal.viewportActive()
+    check not terminal.activeScreen()
+
+    terminal.scrollBy(-10)
+    check not terminal.viewportActive()
+    check terminal.scrollbar().offset > 0
+    terminal.scrollToBottom()
+    check terminal.viewportActive()
+
+    terminal.write("\e[?1007h")
+    check terminal.mode(modeAltScroll)
+    terminal.write("\e[?1049h")
+    check terminal.activeScreen()
+    terminal.write("\e[?1049l")
+    check not terminal.activeScreen()
+
   test "creates, writes, resizes, resets and closes a terminal":
     let path = getEnv("MYNIM_GHOSTTY_VT")
     if path.len == 0:

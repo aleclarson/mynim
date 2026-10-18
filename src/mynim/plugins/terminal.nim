@@ -363,6 +363,8 @@ proc reportKey(terminal: Terminal; event: ui.InputEvent): bool =
     of ui.InputKind.InputKeyDown:
       if event.repeat: vtInput.keyRepeat else: vtInput.keyPress
     else: return false
+  if action != vtInput.keyRelease:
+    terminal.session.scrollToBottom()
   terminal.session.sendKey(vtInput.KeyEvent(action: action, key: key,
     mods: keyMods(event.mods), unshifted: unshiftedCodepoint(
       if event.physicalKey != ui.keyUnknown: event.physicalKey else: event.key)),
@@ -379,6 +381,7 @@ proc flushPendingKey(terminal: Terminal) =
     let codepoint = if (pending.mods and ui.modShift) != 0:
         shiftedCodepoint(pending.unshifted) else: pending.unshifted
     text = toUTF8(Rune(codepoint))
+  terminal.session.scrollToBottom()
   terminal.session.sendKey(vtInput.KeyEvent(
     action: if pending.repeat: vtInput.keyRepeat else: vtInput.keyPress,
     key: pending.key, mods: keyMods(pending.mods), text: text,
@@ -386,10 +389,12 @@ proc flushPendingKey(terminal: Terminal) =
 
 proc sendPendingText(terminal: Terminal; text: string) =
   if not terminal.state.hasPendingKey:
+    terminal.session.scrollToBottom()
     terminal.session.send(text)
     return
   let pending = terminal.state.pendingKey
   terminal.state.hasPendingKey = false
+  terminal.session.scrollToBottom()
   let runes = text.toRunes()
   if pending.key == vtInput.keyUnidentified or runes.len != 1:
     terminal.session.send(text)
@@ -458,13 +463,16 @@ proc handleInput(terminal: Terminal; services: ui.Services;
     if event.text == "paste" or event.text == "pasteAndMatchStyle":
       terminal.state.preedit.setLen(0)
       terminal.state.hasPendingKey = false
+      terminal.session.scrollToBottom()
       terminal.session.paste(services.readClipboard())
       return true
     return false
   of ui.InputKind.InputPointerDown, ui.InputKind.InputPointerUp,
       ui.InputKind.InputPointerMove:
+    let tracking = terminal.session.mouseTracking() and
+      (event.mods and ui.modShift) == 0
     if not terminal.state.hasGrid or
-        (not terminal.session.mouseTracking() and
+        (not tracking and
           not (event.kind == ui.InputKind.InputPointerUp and
             terminal.state.pointerPressed)):
       return false
@@ -495,8 +503,7 @@ proc handleInput(terminal: Terminal; services: ui.Services;
       return sent
     return true
   of ui.InputKind.InputScroll:
-    if not terminal.state.hasGrid or not terminal.session.mouseTracking() or
-        event.dy == 0:
+    if not terminal.state.hasGrid or event.dy == 0:
       return false
     let grid = terminal.state.grid
     let cellHeight = max(grid.cellHeight, 1'f32)
@@ -509,16 +516,27 @@ proc handleInput(terminal: Terminal; services: ui.Services;
       return true
     terminal.state.scrollRemainder -= float32(rows) * cellHeight
     let scale = max(terminal.state.scale, 0.01'f32)
-    let paddingX = int(round(terminal.options.font.paddingX * scale))
-    let paddingY = int(round(terminal.options.font.paddingY * scale))
-    let screenWidth = paddingX * 2 + grid.cols * grid.cellWidthPixels
-    let screenHeight = paddingY * 2 + grid.rows * grid.cellHeightPixels
-    let wheel = if rows < 0: vtInput.wheelUp else: vtInput.wheelDown
-    for _ in 0 ..< abs(rows):
-      discard terminal.session.sendMouse(vtInput.mousePress, wheel,
-        keyMods(event.mods), event.x * scale, event.y * scale,
-        screenWidth, screenHeight, grid.cellWidthPixels,
-        grid.cellHeightPixels, paddingX, paddingY, false)
+    if terminal.session.mouseTracking() and
+        (event.mods and ui.modShift) == 0:
+      let paddingX = int(round(terminal.options.font.paddingX * scale))
+      let paddingY = int(round(terminal.options.font.paddingY * scale))
+      let screenWidth = paddingX * 2 + grid.cols * grid.cellWidthPixels
+      let screenHeight = paddingY * 2 + grid.rows * grid.cellHeightPixels
+      let wheel = if rows < 0: vtInput.wheelUp else: vtInput.wheelDown
+      for _ in 0 ..< abs(rows):
+        discard terminal.session.sendMouse(vtInput.mousePress, wheel,
+          keyMods(event.mods), event.x * scale, event.y * scale,
+          screenWidth, screenHeight, grid.cellWidthPixels,
+          grid.cellHeightPixels, paddingX, paddingY, false)
+      return true
+    if terminal.session.activeScreen() and
+        terminal.session.mode(vtTerminal.modeAltScroll):
+      let key = if rows < 0: vtInput.keyArrowUp else: vtInput.keyArrowDown
+      for _ in 0 ..< abs(rows):
+        terminal.session.sendKey(vtInput.KeyEvent(action: vtInput.keyPress,
+          key: key, mods: keyMods(event.mods)), terminal.options.optionAsAlt)
+      return true
+    terminal.session.scrollBy(rows)
     return true
   of ui.InputKind.InputSelect:
     return false

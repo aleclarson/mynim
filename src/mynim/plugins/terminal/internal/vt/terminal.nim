@@ -24,6 +24,12 @@ type
   TerminalModeConfig {.bycopy.} = object
     mode: uint16
     value: bool
+  TerminalScrollbar* {.bycopy.} = object
+    total*, offset*, len*: uint64
+  ScrollViewport {.bycopy.} = object
+    tag: int32
+    padding: int32
+    value: array[2, uint64]
   TerminalColor* {.bycopy.} = object
     r*, g*, b*: uint8
   TerminalPalette* = array[256, TerminalColor]
@@ -44,9 +50,12 @@ const
   dataRows = 2'i32
   dataCursorX = 3'i32
   dataCursorY = 4'i32
+  dataActiveScreen = 6'i32
+  dataScrollbar = 9'i32
   dataMouseTracking = 11'i32
   dataTitle = 12'i32
   dataPwd = 13'i32
+  dataViewportActive = 32'i32
   dataMode = 37'i32
   dataScrollbackMaxBytes = 34'i32
   optionTerminfoName = 37'i32
@@ -82,6 +91,11 @@ static:
   doAssert sizeof(TerminalModeConfig) == 4
   doAssert offsetOf(TerminalModeConfig, mode) == 0
   doAssert offsetOf(TerminalModeConfig, value) == 2
+  doAssert sizeof(TerminalScrollbar) == 3 * sizeof(uint64)
+  doAssert offsetOf(TerminalScrollbar, offset) == sizeof(uint64)
+  doAssert offsetOf(TerminalScrollbar, len) == 2 * sizeof(uint64)
+  doAssert sizeof(ScrollViewport) == 24
+  doAssert offsetOf(ScrollViewport, value) == 8
   doAssert sizeof(TerminalColor) == 3
   doAssert offsetOf(TerminalColor, r) == 0
   doAssert offsetOf(TerminalColor, g) == 1
@@ -205,6 +219,44 @@ proc getUint16(terminal: GhosttyTerminal; key: int32): int =
 proc size*(terminal: GhosttyTerminal): tuple[cols, rows: int] =
   ## Returns the active terminal's cell dimensions.
   (getUint16(terminal, dataColumns), getUint16(terminal, dataRows))
+
+proc scrollbar*(terminal: GhosttyTerminal): TerminalScrollbar =
+  ## Returns total scrollback rows, the viewport offset, and visible rows.
+  let handle = requireHandle(terminal)
+  let getData = cast[TerminalGetProc](requiredSymbol(terminal.library,
+    "ghostty_terminal_get"))
+  checkResult("scrollbar query", getData(handle, dataScrollbar, addr result))
+
+proc activeScreen*(terminal: GhosttyTerminal): bool =
+  ## Reports whether the alternate screen is active.
+  let handle = requireHandle(terminal)
+  var active: int32
+  let getData = cast[TerminalGetProc](requiredSymbol(terminal.library,
+    "ghostty_terminal_get"))
+  getData(handle, dataActiveScreen, addr active) == success and active == 1
+
+proc viewportActive*(terminal: GhosttyTerminal): bool =
+  ## Reports whether the viewport follows the active screen.
+  let handle = requireHandle(terminal)
+  var active: bool
+  let getData = cast[TerminalGetProc](requiredSymbol(terminal.library,
+    "ghostty_terminal_get"))
+  getData(handle, dataViewportActive, addr active) != success or active
+
+proc scrollViewport(terminal: GhosttyTerminal; tag: int32;
+                    value = [0'u64, 0'u64]) =
+  let handle = requireHandle(terminal)
+  let scroll = cast[proc(terminal: pointer; viewport: ScrollViewport) {.cdecl.}](
+    requiredSymbol(terminal.library, "ghostty_terminal_scroll_viewport"))
+  scroll(handle, ScrollViewport(tag: tag, value: value))
+
+proc scrollBy*(terminal: GhosttyTerminal; rows: int) =
+  ## Moves the viewport by rows; negative values scroll toward history.
+  terminal.scrollViewport(2, [uint64(cast[int64](rows)), 0'u64])
+
+proc scrollToBottom*(terminal: GhosttyTerminal) =
+  ## Returns the viewport to the active screen.
+  terminal.scrollViewport(1)
 
 proc cursor*(terminal: GhosttyTerminal): tuple[x, y: int] =
   ## Returns the cursor column and row, both zero-based.

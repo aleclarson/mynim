@@ -448,6 +448,33 @@ proc mode*(session: TerminalSession; mode: TerminalMode): bool =
   finally:
     session.terminalGuard.release()
 
+proc activeScreen*(session: TerminalSession): bool =
+  if session.isNil:
+    raise newException(ValueError, "terminal session is nil")
+  session.lockTerminal()
+  try:
+    result = session.terminal.activeScreen()
+  finally:
+    session.terminalGuard.release()
+
+proc scrollBy*(session: TerminalSession; rows: int) =
+  if session.isNil:
+    raise newException(ValueError, "terminal session is nil")
+  session.lockTerminal()
+  try:
+    session.terminal.scrollBy(rows)
+  finally:
+    session.terminalGuard.release()
+
+proc scrollToBottom*(session: TerminalSession) =
+  if session.isNil:
+    raise newException(ValueError, "terminal session is nil")
+  session.lockTerminal()
+  try:
+    session.terminal.scrollToBottom()
+  finally:
+    session.terminalGuard.release()
+
 proc setColors*(session: TerminalSession; foreground, background: TerminalColor;
                 cursor = none(TerminalColor);
                 palette = none(TerminalPalette)) =
