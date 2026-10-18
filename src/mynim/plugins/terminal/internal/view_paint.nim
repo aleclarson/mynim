@@ -8,6 +8,8 @@ type
   TerminalPaintOptions* = object
     fontFamily*: string
     fontFeatures*: string
+    preedit*: string
+    preeditCaret*: int
     fontSize*: float32
     fontWeight*: int
     lineHeight*: float32
@@ -35,10 +37,10 @@ type
     underline: int
 
 proc defaultTerminalPaintOptions*(fontSize = 13'f32): TerminalPaintOptions =
-  ## Returns monospace terminal defaults with coding ligatures disabled.
+  ## Returns the default monospace terminal text options.
   TerminalPaintOptions(
     fontFamily: "monospace",
-    fontFeatures: "liga=0,calt=0",
+    fontFeatures: "",
     fontSize: fontSize,
     fontWeight: 400,
     lineHeight: 1,
@@ -54,7 +56,7 @@ proc finite(value: float32): bool =
 
 proc normalized(options: TerminalPaintOptions): TerminalPaintOptions =
   result = options
-  result.fontFamily = options.fontFamily.strip()
+  result.fontFamily = strutils.strip(options.fontFamily)
   if result.fontFamily.len == 0:
     result.fontFamily = "monospace"
   if not result.fontSize.finite or result.fontSize <= 0:
@@ -303,9 +305,11 @@ proc paintFrame*(painter: var ui.Painter; bounds: ui.Rect;
     var blockCursor = false
     var cursorRect = ui.Rect()
     var cursorStyle = cursorBlock
-    let cursorOn = options.cursorBlinkOn or not frame.cursor.blinking
+    let cursorOn = options.preedit.len == 0 and
+      (options.cursorBlinkOn or not frame.cursor.blinking)
     if cursorOn and frame.cursor.inView and frame.cursor.visible and
-        frame.cursor.y >= 0 and frame.cursor.y < min(frame.rows, frame.viewport.len):
+        frame.cursor.y >= 0 and frame.cursor.y < min(frame.rows,
+            frame.viewport.len):
       cursorColumn = frame.cursor.x
       if frame.cursor.wideTail and cursorColumn > 0:
         dec cursorColumn
@@ -317,7 +321,8 @@ proc paintFrame*(painter: var ui.Painter; bounds: ui.Rect;
           cursorStyle = cursorBlockHollow
         let wide = frame.viewport[cursorRow].cells[cursorColumn].cell.wide ==
           cellWide
-        cursorRect = ui.Rect(x: originX + float32(cursorColumn) * grid.cellWidth,
+        cursorRect = ui.Rect(x: originX + float32(cursorColumn) *
+            grid.cellWidth,
           y: originY + float32(cursorRow) * grid.cellHeight,
           w: grid.cellWidth * (if wide: 2'f32 else: 1'f32),
           h: grid.cellHeight)
@@ -337,7 +342,8 @@ proc paintFrame*(painter: var ui.Painter; bounds: ui.Rect;
         grid.cellWidth, frame.colors,
         options.selectionText, cursorText,
         selectedStart, selectedFinish,
-        if y == cursorRow: cursorColumn else: -1, blockCursor and y == cursorRow,
+        if y == cursorRow: cursorColumn else: -1, blockCursor and y ==
+        cursorRow,
         options)
       target.paintOverlines(row, rowY, originX, grid.cellWidth, scale,
         frame.colors)
@@ -356,4 +362,38 @@ proc paintFrame*(painter: var ui.Painter; bounds: ui.Rect;
           w: cursorRect.w, h: thickness), cursorColor, 0)
       of cursorBlock:
         discard
+    if options.preedit.len > 0 and options.focused and
+        frame.cursor.inView and frame.cursor.visible and
+        frame.cursor.y >= 0 and frame.cursor.y < min(frame.rows,
+            frame.viewport.len):
+      var preeditColumn = frame.cursor.x
+      if frame.cursor.wideTail and preeditColumn > 0:
+        dec preeditColumn
+      let preeditX = originX + float32(preeditColumn) * grid.cellWidth
+      let preeditY = originY + float32(frame.cursor.y) * grid.cellHeight
+      let span = ui.Span(text: options.preedit, font: options.fontFamily,
+        features: options.fontFeatures, size: options.fontSize,
+        weight: options.fontWeight, color: foreground)
+      let preeditSize = target.measureText(0, span)
+      let preeditWidth = max(preeditSize.width, grid.cellWidth)
+      target.fill(ui.Rect(x: preeditX, y: preeditY, w: preeditWidth,
+        h: grid.cellHeight), background, 0)
+      discard target.richText(preeditX, preeditY + grid.textOffsetY, 0, span)
+      let thickness = 1 / scale
+      target.fill(ui.Rect(x: preeditX,
+        y: preeditY + grid.cellHeight - thickness,
+        w: preeditWidth, h: thickness), foreground, 0)
+      var prefix = ""
+      var runeIndex = 0
+      let caret = max(0, options.preeditCaret)
+      for rune in options.preedit.runes:
+        if runeIndex >= caret:
+          break
+        prefix.add(toUTF8(rune))
+        inc runeIndex
+      let caretWidth = target.measureText(0, ui.Span(text: prefix,
+        font: options.fontFamily, features: options.fontFeatures,
+        size: options.fontSize, weight: options.fontWeight)).width
+      target.fill(ui.Rect(x: preeditX + caretWidth, y: preeditY,
+        w: 1 / scale, h: grid.cellHeight), foreground, 0)
   )

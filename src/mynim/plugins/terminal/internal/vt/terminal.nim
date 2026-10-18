@@ -44,6 +44,7 @@ const
   dataRows = 2'i32
   dataCursorX = 3'i32
   dataCursorY = 4'i32
+  dataMouseTracking = 11'i32
   dataTitle = 12'i32
   dataPwd = 13'i32
   dataMode = 37'i32
@@ -289,6 +290,14 @@ proc mode*(terminal: GhosttyTerminal; mode: TerminalMode): bool =
     "ghostty_terminal_get"))
   checkResult("terminal mode query", getData(handle, dataMode, addr config))
   config.value
+
+proc mouseTracking*(terminal: GhosttyTerminal): bool =
+  ## Reports whether the terminal has enabled mouse tracking.
+  let handle = requireHandle(terminal)
+  var value: bool
+  let getData = cast[TerminalGetProc](requiredSymbol(terminal.library,
+    "ghostty_terminal_get"))
+  getData(handle, dataMouseTracking, addr value) == success and value
 
 proc setResizePullScrollback*(terminal: GhosttyTerminal; enabled: bool) =
   ## Controls whether a larger screen pulls rows back from scrollback.

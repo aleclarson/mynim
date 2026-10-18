@@ -19,7 +19,7 @@ type
     held*: bool
     exitCode*: int
 
-  TerminalWake* = proc() {.closure, gcsafe.}
+  TerminalWake* = proc() {.closure.}
 
   TerminalSessionData = object
     terminalGuard: Lock
@@ -300,6 +300,7 @@ proc releaseGhostty(session: TerminalSession) =
 
 proc newTerminalSession*(library: GhosttyVT; process: PtyOptions;
     cols = 80; rows = 24; cellWidth = 1; cellHeight = 1;
+    cursorBlink = true;
     terminfoName = "xterm-256color";
     scrollbackMaxBytes = defaultScrollbackBytes): TerminalSession =
   ## Starts a PTY-backed Ghostty terminal and its input/output workers.
@@ -326,7 +327,7 @@ proc newTerminalSession*(library: GhosttyVT; process: PtyOptions;
     result.terminal = newGhosttyTerminal(library, cols, rows)
     result.terminal.setTerminfoName(terminfoName)
     result.terminal.setScrollbackMaxBytes(scrollbackMaxBytes)
-    result.terminal.setDefaultCursor(cursorStyleBlock, false)
+    result.terminal.setDefaultCursor(cursorStyleBlock, cursorBlink)
     result.terminal.setModeDefault(modeGraphemes, true)
     result.keyEncoder = newGhosttyKeyEncoder(library)
     result.mouseEncoder = newGhosttyMouseEncoder(library)
@@ -437,10 +438,61 @@ proc sendFocus*(session: TerminalSession; gained: bool) =
     session.terminalGuard.release()
   session.send(report)
 
+proc mode*(session: TerminalSession; mode: TerminalMode): bool =
+  ## Reports a Ghostty mode while serializing access to the terminal.
+  if session.isNil:
+    raise newException(ValueError, "terminal session is nil")
+  session.lockTerminal()
+  try:
+    result = session.terminal.mode(mode)
+  finally:
+    session.terminalGuard.release()
+
+proc setColors*(session: TerminalSession; foreground, background: TerminalColor;
+                cursor = none(TerminalColor);
+                palette = none(TerminalPalette)) =
+  ## Applies default foreground/background and optional cursor/palette colors.
+  if session.isNil:
+    raise newException(ValueError, "terminal session is nil")
+  session.lockTerminal()
+  try:
+    session.terminal.setColors(foreground, background, cursor, palette)
+  finally:
+    session.terminalGuard.release()
+
+proc paste*(session: TerminalSession; text: string) =
+  ## Sanitizes and brackets clipboard text according to current terminal mode.
+  if session.isNil:
+    raise newException(ValueError, "terminal session is nil")
+  session.terminalGuard.acquire()
+  session.inputGuard.acquire()
+  let stopped = session.closing or session.closed
+  session.inputGuard.release()
+  if stopped or session.terminal.isNil:
+    session.terminalGuard.release()
+    raise newException(IOError, "terminal session is closed")
+  var encoded: seq[byte]
+  try:
+    encoded = encodePaste(session.library, text,
+      session.terminal.mode(modeBracketedPaste))
+  finally:
+    session.terminalGuard.release()
+  session.send(encoded)
+
+proc mouseTracking*(session: TerminalSession): bool =
+  ## Reports whether the active screen tracks mouse clicks or motion.
+  if session.isNil:
+    raise newException(ValueError, "terminal session is nil")
+  session.lockTerminal()
+  try:
+    result = session.terminal.mouseTracking()
+  finally:
+    session.terminalGuard.release()
+
 proc sendMouse*(session: TerminalSession; action: MouseAction;
     button: MouseButton; mods: Mods; x, y: float32;
     screenWidth, screenHeight, cellWidth, cellHeight, padLeft, padTop: int;
-    anyButtonPressed: bool) =
+    anyButtonPressed: bool): bool =
   ## Syncs mouse modes and geometry, encodes one pointer event, and queues it.
   if session.isNil:
     raise newException(ValueError, "terminal session is nil")
@@ -452,6 +504,7 @@ proc sendMouse*(session: TerminalSession; action: MouseAction;
     encoded = session.mouseEncoder.encode(action, button, mods, x, y)
   finally:
     session.terminalGuard.release()
+  result = encoded.len > 0
   session.send(encoded)
 
 proc resize*(session: TerminalSession; cols, rows: int;

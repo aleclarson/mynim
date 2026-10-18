@@ -82,7 +82,7 @@ proc cfStringGetLength(s: ctRef): int
 proc cfStringGetCharacters(s: ctRef, r: cfRange, outv: ptr uint16)
   {.importc: "CFStringGetCharacters", dynlib: libCFs, cdecl.}
 proc cfDictionaryCreate(alloc: ctRef, keys, values: ptr ctRef, n: int,
-                        keyCallbacks, valueCallbacks: ctRef): ctRef
+                        keyCallbacks, valueCallbacks: pointer): ctRef
   {.importc: "CFDictionaryCreate", dynlib: libCFs, cdecl.}
 proc cfDictionaryGetValue(d, key: ctRef): ctRef
   {.importc: "CFDictionaryGetValue", dynlib: libCFs, cdecl.}
@@ -91,10 +91,10 @@ proc cfArrayGetCount(a: ctRef): int
 proc cfArrayGetValueAtIndex(a: ctRef, i: int): ctRef
   {.importc: "CFArrayGetValueAtIndex", dynlib: libCFs, cdecl.}
 proc cfSetCreate(alloc: ctRef, values: ptr ctRef, n: int,
-                 callbacks: ctRef): ctRef
+                 callbacks: pointer): ctRef
   {.importc: "CFSetCreate", dynlib: libCFs, cdecl.}
 proc cfArrayCreate(alloc: ctRef, values: ptr ctRef, n: int,
-                   callbacks: ctRef): ctRef
+                   callbacks: pointer): ctRef
   {.importc: "CFArrayCreate", dynlib: libCFs, cdecl.}
 proc cfNumberCreate(alloc: ctRef, typ: int, value: pointer): ctRef
   {.importc: "CFNumberCreate", dynlib: libCFs, cdecl.}
@@ -276,7 +276,7 @@ proc ctResponds(obj: ctRef, name: string): bool =
   msgSendBool(obj, selRegisterNameCT("respondsToSelector:"),
               selRegisterNameCT(name))
 
-## Constants are pointers to CFStringRefs, or callback structs.
+## CF pointer constants are stored indirectly at their exported symbol.
 proc cfConst(lib: string, name: string): ctRef =
   let h = dlopen(lib, rtldNow)
   if h.isNil:
@@ -285,6 +285,13 @@ proc cfConst(lib: string, name: string): ctRef =
   if p.isNil:
     return 0
   cast[ptr ctRef](p)[]
+
+proc cfCallbacks(lib: string, name: string): pointer =
+  ## CF collection callback exports are structs, unlike pointer constants.
+  let h = dlopen(lib, rtldNow)
+  if h.isNil:
+    return nil
+  dlsym(h, name)
 
 proc cfOptFn[T](lib, name: string, fn: var T) =
   let h = dlopen(lib, rtldNow)
@@ -305,7 +312,7 @@ var
   ctSRGBName: ctRef
 
   cfKeyCallbacks, cfValueCallbacks, cfSetCallbacks,
-    cfArrayCallbacks: ctRef
+    cfArrayCallbacks: pointer
   ctFontAttributeName, ctParagraphStyleName, ctFamilyNameAttribute,
     ctTraitsAttribute, ctWeightTrait, ctSymbolicTrait: ctRef
 
@@ -352,10 +359,10 @@ proc loadCoreText() =
   if ctLoaded:
     return
   ctLoaded = true
-  cfKeyCallbacks = cfConst(libCFs, "kCFTypeDictionaryKeyCallBacks")
-  cfValueCallbacks = cfConst(libCFs, "kCFTypeDictionaryValueCallBacks")
-  cfSetCallbacks = cfConst(libCFs, "kCFTypeSetCallBacks")
-  cfArrayCallbacks = cfConst(libCFs, "kCFTypeArrayCallBacks")
+  cfKeyCallbacks = cfCallbacks(libCFs, "kCFTypeDictionaryKeyCallBacks")
+  cfValueCallbacks = cfCallbacks(libCFs, "kCFTypeDictionaryValueCallBacks")
+  cfSetCallbacks = cfCallbacks(libCFs, "kCFTypeSetCallBacks")
+  cfArrayCallbacks = cfCallbacks(libCFs, "kCFTypeArrayCallBacks")
   ctFontAttributeName = cfConst(libCT, "kCTFontAttributeName")
   ctParagraphStyleName = cfConst(libCT, "kCTParagraphStyleAttributeName")
   ctFamilyNameAttribute = cfConst(libCT, "kCTFontFamilyNameAttribute")

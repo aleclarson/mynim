@@ -189,6 +189,7 @@ static:
 proc `or`*(left, right: Mods): Mods {.borrow.}
 proc `==`*(left, right: MouseButton): bool {.borrow.}
 proc `==`*(left, right: Mods): bool {.borrow.}
+proc `==`*(left, right: Key): bool {.borrow.}
 
 proc requiredSymbol(library: GhosttyVT; name: string): pointer =
   result = library.symbol(name)
