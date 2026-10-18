@@ -103,6 +103,42 @@ block flex_base_is_not_smaller_than_padding:
   doAssert abs(layout.bounds(padded).h - 176'f32) < 0.01'f32
   doAssert abs(layout.bounds(other).h - 324'f32) < 0.01'f32
 
+block flex_base_is_not_clamped_by_minimum:
+  let c = newContext()
+  var column, first, minimum: Element
+  c.build(proc(ctx: Context) =
+    column = ctx.column().size(100, 500)
+    discard column.children(proc() =
+      first = ctx.box().grow()
+      minimum = ctx.box().minHeight(166).grow()
+    )
+  )
+  let layout = c.layout(100, 500)
+  doAssert abs(layout.bounds(first).h - 250'f32) < 0.01'f32
+  doAssert abs(layout.bounds(minimum).h - 250'f32) < 0.01'f32
+
+block content_sized_row_respects_basis_limits:
+  let c = newContext()
+  var parent, fixed, capped: Element
+  c.build(proc(ctx: Context) =
+    parent = ctx.row()
+    discard parent.children(proc() =
+      fixed = ctx.row()
+      discard fixed.children(proc() =
+        discard ctx.box().basis(47).shrink(0)
+      )
+      capped = ctx.row()
+      discard capped.children(proc() =
+        discard ctx.box().basis(56).children(proc() =
+          discard ctx.box().width(117)
+        )
+      )
+    )
+  )
+  let layout = c.layout(600, 500)
+  doAssert layout.bounds(fixed).w == 47
+  doAssert layout.bounds(capped).w == 117
+
 block grow_in_content_sized_column:
   let c = newContext()
   var parent, growing, content, after: Element

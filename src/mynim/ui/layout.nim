@@ -137,6 +137,26 @@ proc checkGridCellCount(columns, rows, base: int) =
     raise newException(ValueError,
       "ui: grid placement exceeds 1,048,576 occupied cells")
 
+proc rowItemWidth(node: ElementNode; natural: NaturalSize): float32 =
+  result = natural.w
+  let basis = node.basis.resolve(-1)
+  if not basis.ok:
+    return
+  let base = node.clampWidth(basis.value, -1)
+  if node.grow == 0:
+    let minimum = node.minW.resolve(-1)
+    let autoMinimum = if minimum.ok:
+        max(minimum.value, node.contentInsetX)
+      elif node.scrollX or node.scrollY or node.clipX:
+        node.contentInsetX
+      else:
+        let width = node.width.resolve(-1)
+        max(if width.ok: min(natural.w, width.value) else: natural.w,
+          node.contentInsetX)
+    result = max(min(result, base), autoMinimum)
+  if node.shrink == 0:
+    result = max(result, base)
+
 proc gridCellOccupied(scratch: GridScratch; base, columns, row,
                       column: int): bool =
   let index = base + row * columns + column
@@ -617,11 +637,7 @@ proc measureTree(nodes: seq[ElementNode]; natural: var seq[NaturalSize];
         let childSize = natural[child]
         if not childNode.absolute and not node.grid:
           if node.row:
-            let basis = childNode.basis.resolve(-1)
-            let mainW = if basis.ok:
-                childNode.clampWidth(basis.value, -1)
-              else:
-                childSize.w
+            let mainW = childNode.rowItemWidth(childSize)
             contentW += mainW + childNode.marginX
             contentH = max(contentH, childSize.h + childNode.marginY)
           else:
@@ -744,51 +760,73 @@ proc measureTree(nodes: seq[ElementNode]; natural: var seq[NaturalSize];
           rawW = contentHeight * node.aspectRatio + node.contentInsetX
     let measured = NaturalSize(
       w: node.clampWidth(rawW, -1),
-      h: node.clampHeight(rawH, -1))
-    if measured.w != previous.w or measured.h != previous.h:
+      h: node.clampHeight(rawH, -1),
+      baseW: rawW,
+      baseH: rawH)
+    if measured.w != previous.w or measured.h != previous.h or
+        measured.baseW != previous.baseW or measured.baseH != previous.baseH:
       result = true
     natural[slot] = measured
 
 proc distribute(nodes: seq[ElementNode]; children: seq[int];
                 first, pastLast: int;
-                sizes, minimum, maximum, factors: var seq[float32];
-                amount: float32; growing: bool) =
-  template room(child: int): float32 =
-    if growing:
-      if classify(maximum[child]) == fcInf: Inf.float32
-      else: maximum[child] - sizes[child]
+                sizes, bases, minimum, maximum, factors: var seq[float32];
+                space: float32; row, growing: bool) =
+  for itemIndex in first ..< pastLast:
+    let child = children[itemIndex]
+    let base = bases[child]
+    let hypothetical = sizes[child]
+    if factors[child] <= 0 or
+        (growing and base > hypothetical) or
+        (not growing and base < hypothetical):
+      factors[child] = 0
     else:
-      sizes[child] - minimum[child]
-  var remaining = amount
-  for _ in 0 .. (pastLast - first):
+      sizes[child] = base
+
+  for _ in 0 ..< pastLast - first:
+    var free = space
     var totalFactor: float32
     for itemIndex in first ..< pastLast:
       let child = children[itemIndex]
-      if room(child) > 0 and factors[child] > 0:
+      let node = nodes[child]
+      let margin = if row: node.marginX else: node.marginY
+      if factors[child] > 0:
+        free -= bases[child] + margin
         totalFactor += factors[child]
-    if totalFactor <= 0 or remaining <= 0:
+      else:
+        free -= sizes[child] + margin
+    if totalFactor <= 0:
       break
 
-    var changed: float32
+    var totalViolation: float32
     for itemIndex in first ..< pastLast:
       let child = children[itemIndex]
-      let available = room(child)
-      if available > 0 and factors[child] > 0:
-        let share = remaining * factors[child] / totalFactor
-        let delta = min(share, available)
-        if growing:
-          sizes[child] += delta
-        else:
-          sizes[child] -= delta
-        changed += delta
-    remaining -= changed
-    if changed <= 0:
+      if factors[child] > 0:
+        let tentative = bases[child] + free * factors[child] / totalFactor
+        let clamped = min(max(tentative, minimum[child]), maximum[child])
+        totalViolation += clamped - tentative
+        sizes[child] = clamped
+    if totalViolation == 0:
+      break
+
+    var froze = false
+    for itemIndex in first ..< pastLast:
+      let child = children[itemIndex]
+      if factors[child] > 0:
+        let tentative = bases[child] + free * factors[child] / totalFactor
+        let clamped = min(max(tentative, minimum[child]), maximum[child])
+        let violation = clamped - tentative
+        if (totalViolation > 0 and violation > 0) or
+            (totalViolation < 0 and violation < 0):
+          factors[child] = 0
+          froze = true
+    if not froze:
       break
 
 proc preferredMain(node: ElementNode; natural: NaturalSize; row: bool;
                    base: float32): float32 =
   let dimension = if row: node.width else: node.height
-  let intrinsic = if row: natural.w else: natural.h
+  let intrinsic = if row: natural.baseW else: natural.baseH
   let resolved = dimension.resolve(base)
   if resolved.ok: resolved.value else: intrinsic
 
@@ -963,7 +1001,7 @@ proc placeNode(nodes: seq[ElementNode]; natural: seq[NaturalSize];
         let childSlot = flexSlots[itemIndex]
         factors[childSlot] = nodes[childSlot].grow
       distribute(nodes, flexSlots, line.first, line.pastLast, sizes,
-        minimum, maximum, factors, free, true)
+        bases, minimum, maximum, factors, mainSize - lineGaps, row, true)
     elif free < 0:
       for itemIndex in line.first ..< line.pastLast:
         let childSlot = flexSlots[itemIndex]
@@ -973,7 +1011,7 @@ proc placeNode(nodes: seq[ElementNode]; natural: seq[NaturalSize];
         factors[childSlot] = childNode.shrink *
           max(bases[childSlot] - mainInset, 0'f32)
       distribute(nodes, flexSlots, line.first, line.pastLast, sizes,
-        minimum, maximum, factors, -free, false)
+        bases, minimum, maximum, factors, mainSize - lineGaps, row, false)
     line.main = lineGaps
     for itemIndex in line.first ..< line.pastLast:
       let childSlot = flexSlots[itemIndex]

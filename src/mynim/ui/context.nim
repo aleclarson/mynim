@@ -380,6 +380,7 @@ type
 
   NaturalSize = object
     w, h: float32
+    baseW, baseH: float32
 
   FlexLine = object
     first, pastLast: int
