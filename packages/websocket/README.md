@@ -38,6 +38,14 @@ all response `Set-Cookie` fields, including fields from a rejected handshake.
 Its URL uses `http:` for `ws:` and `https:` for `wss:`; the app owns cookie
 matching, expiry, and storage.
 
+Set `Options.transport` to own the opening handshake's network, proxy, and
+TLS work. It receives a prepared HTTP(S) `GET` request and cancellation context, which
+the handler must honor; it must not follow redirects. For a `101` response,
+return the status and
+headers, a `DuplexStream`, and any WebSocket bytes already read past the HTTP
+headers in `readBuffer`. The transport overrides `Options.proxy` and
+`Options.tlsContext`; cookie-jar callbacks still apply.
+
 The native plugin uses `http_proxy`/`HTTP_PROXY` for `ws:` and
 `https_proxy`/`HTTPS_PROXY` for `wss:`, subject to `no_proxy`/`NO_PROXY` and
 the loopback bypass. Set `Options.proxy` to override the environment. HTTP

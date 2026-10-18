@@ -141,6 +141,31 @@ proc socks5ProxyScenario(server: AsyncSocket): Future[void] {.async.} =
   discard await client.recv(1)
   client.close()
 
+proc httpsForwardProxyScenario(server: AsyncSocket): Future[void] {.async.} =
+  let accepted = await server.acceptAddr()
+  let client = accepted.client
+  let context = newContext(certFile = tlsFixtures / "localhost.crt",
+    keyFile = tlsFixtures / "localhost.key", verifyMode = CVerifyNone)
+  try:
+    context.wrapConnectedSocket(client, handshakeAsServer)
+    var request = ""
+    while not request.endsWith("\r\n\r\n"):
+      request.add await client.recv(1)
+    check "GET http://example.invalid/live HTTP/1.1" in request
+    check "host: example.invalid" in request.toLowerAscii()
+    var key = ""
+    for line in request.split("\r\n"):
+      if line.toLowerAscii().startsWith("sec-websocket-key:"):
+        key = line.split(':', maxsplit = 1)[1].strip()
+    await client.send("HTTP/1.1 101 Switching Protocols\r\n" &
+      "Upgrade: websocket\r\nConnection: Upgrade\r\n" &
+      "Sec-WebSocket-Accept: " & ws.acceptKey(key) & "\r\n\r\n" &
+      "\x81\x01h")
+    discard await client.recv(1)
+  except CatchableError as error:
+    check error.msg.len == 0
+  client.close()
+
 proc tlsProxyScenario(server: AsyncSocket; port: Port): Future[string] {.async.} =
   let accepted = await server.acceptAddr()
   let client = accepted.client
@@ -294,6 +319,116 @@ proc rejectedCookieJarTransportScenario(): Future[void] {.async.} =
   check storedCookies == @["rejected=stored; Path=/"]
   server.close()
 
+proc customTransportScenario(): Future[void] {.async.} =
+  var calls = 0
+  var observed: ws.TransportRequest
+  var askedUrl: Uri
+  var storedCookies: seq[string]
+  var incoming = "\x81\x01r"
+  var outgoing = ""
+  var closed = false
+  let receive = proc(maxBytes: int; ctx: CancelCtx): Future[string] {.async.} =
+    if incoming.len == 0: return ""
+    let count = min(maxBytes, incoming.len)
+    result = incoming[0..<count]
+    incoming.delete(0..<count)
+  let send = proc(data: string; ctx: CancelCtx): Future[void] {.async.} =
+    outgoing.add data
+  let closeStreamCallback = proc() = closed = true
+  let stream = ws.newDuplexStream(receive, send, closeStreamCallback)
+  var options = ws.defaultOptions()
+  options.proxy = newProxy("https://127.0.0.1:1")
+  options.cookieJar = ws.CookieJar(
+    cookies: proc(url: Uri): seq[string] =
+      askedUrl = url
+      @["jar=custom"],
+    store: proc(url: Uri; setCookieHeaders: seq[string]) =
+      storedCookies = setCookieHeaders
+  )
+  options.allow = proc(request: ws.HandshakeRequest): bool =
+    for header in request.headers:
+      check "jar=custom" notin header.value
+    true
+  let roundTrip = proc(request: ws.TransportRequest; ctx: CancelCtx):
+      Future[ws.TransportResponse] {.async.} =
+    inc calls
+    observed = request
+    var key = ""
+    for header in request.headers:
+      if header.name.toLowerAscii() == "sec-websocket-key": key = header.value
+    ws.TransportResponse(statusCode: 101, statusText: "Switching Protocols",
+      headers: @[
+        ws.Header(name: "Upgrade", value: "websocket"),
+        ws.Header(name: "Connection", value: "keep-alive, Upgrade"),
+        ws.Header(name: "Sec-WebSocket-Accept", value: ws.acceptKey(key)),
+        ws.Header(name: "Sec-WebSocket-Protocol", value: "custom.v1"),
+        ws.Header(name: "Set-Cookie", value: "server=custom; Path=/"),
+      ], stream: stream, readBuffer: "\x81\x01b")
+  options.transport = roundTrip
+
+  let request = ws.HandshakeRequest(
+    url: "wss://example.invalid/custom?mode=1",
+    headers: @[ws.Header(name: "X-Client", value: "mynim")])
+  let connection = await ws.dialAsync(options, request, @["custom.v1"], newCtx())
+  check calls == 1
+  check observed.httpMethod == "GET"
+  check observed.url.scheme == "https"
+  check observed.url.hostname == "example.invalid"
+  check observed.url.path == "/custom"
+  check observed.host == "example.invalid"
+  check observed.headers.anyIt(it.name.toLowerAscii() == "x-client" and
+    it.value == "mynim")
+  check observed.headers.anyIt(it.name.toLowerAscii() == "cookie" and
+    it.value == "jar=custom")
+  check askedUrl.scheme == "https"
+  check storedCookies == @["server=custom; Path=/"]
+  check connection.protocol == "custom.v1"
+  check (await connection.readMessage()).payload == @[byte('b')]
+  check (await connection.readMessage()).payload == @[byte('r')]
+  await connection.close(1000)
+  check outgoing.len >= 6
+  connection.terminate()
+  check closed
+
+proc customTransportCancellationScenario(): Future[void] {.async.} =
+  let ctx = newCtx()
+  let pendingRead = newFuture[string]("custom transport read")
+  var closed = false
+  let receive = proc(maxBytes: int; readCtx: CancelCtx): Future[string] =
+    pendingRead
+  let send = proc(data: string; sendCtx: CancelCtx): Future[void] {.async.} =
+    discard
+  let closeStreamCallback = proc() =
+    closed = true
+    if not pendingRead.finished:
+      pendingRead.fail(newException(IOError, "custom stream closed"))
+  let stream = ws.newDuplexStream(receive, send, closeStreamCallback)
+  var options = ws.defaultOptions()
+  options.transport = proc(request: ws.TransportRequest; roundTripCtx: CancelCtx):
+      Future[ws.TransportResponse] {.async.} =
+    var key = ""
+    for header in request.headers:
+      if header.name.toLowerAscii() == "sec-websocket-key": key = header.value
+    ws.TransportResponse(statusCode: 101,
+      headers: @[
+        ws.Header(name: "Upgrade", value: "websocket"),
+        ws.Header(name: "Connection", value: "Upgrade"),
+        ws.Header(name: "Sec-WebSocket-Accept", value: ws.acceptKey(key)),
+      ], stream: stream)
+  let connection = await ws.dialAsync(options,
+    ws.HandshakeRequest(url: "ws://example.invalid/cancel"), @[], ctx)
+  let cancelLater = proc(): Future[void] {.async.} =
+    await sleepAsync(20)
+    ctx.cancel()
+  asyncCheck cancelLater()
+  var canceled = false
+  try:
+    discard await connection.readMessage()
+  except ValueError as error:
+    canceled = "canceled" in error.msg
+  check canceled
+  check closed
+
 proc httpProxyTransportScenario(): Future[void] {.async.} =
   let server = newAsyncSocket(domain = AF_INET, buffered = false)
   server.setSockOpt(OptReuseAddr, true)
@@ -333,6 +468,23 @@ proc socks5ProxyTransportScenario(): Future[void] {.async.} =
   let connection = await ws.dialAsync(options, request, @[], newCtx())
   let message = await connection.readMessage()
   check message.payload == @[byte('x')]
+  connection.terminate()
+  await serving
+  server.close()
+
+proc httpsProxyTransportScenario(): Future[void] {.async.} =
+  let server = newAsyncSocket(domain = AF_INET, buffered = false)
+  server.setSockOpt(OptReuseAddr, true)
+  server.bindAddr(Port(0), "127.0.0.1")
+  server.listen()
+  let address = server.getLocalAddr()
+  let serving = httpsForwardProxyScenario(server)
+  var options = ws.defaultOptions()
+  options.proxy = newProxy("https://localhost:" & $address[1])
+  options.tlsContext = newContext(caFile = tlsFixtures / "localhost.crt")
+  let connection = await ws.dialAsync(options,
+    ws.HandshakeRequest(url: "ws://example.invalid/live"), @[], newCtx())
+  check (await connection.readMessage()).payload == @[byte('h')]
   connection.terminate()
   await serving
   server.close()
@@ -412,6 +564,10 @@ suite "WebSocket transport":
   test "opens a local connection, checks headers, and answers a ping":
     waitFor transportScenario()
 
+  test "delegates handshakes to a caller-supplied round trip":
+    waitFor customTransportScenario()
+    waitFor customTransportCancellationScenario()
+
   test "uses app-managed cookie jars for handshake requests and responses":
     waitFor cookieJarTransportScenario()
     waitFor rejectedCookieJarTransportScenario()
@@ -419,6 +575,7 @@ suite "WebSocket transport":
   test "uses authenticated HTTP and SOCKS proxies for ws and wss":
     waitFor httpProxyTransportScenario()
     waitFor socks5ProxyTransportScenario()
+    waitFor httpsProxyTransportScenario()
     waitFor wssHttpProxyTransportScenario()
 
   test "validates TLS chains and hostnames before sending headers":

@@ -19,15 +19,41 @@ type
     url*: string
     headers*: seq[Header]
 
-  AllowHandshake* = proc(request: HandshakeRequest): bool {.closure.} ## Approves a handshake before network I/O.
+  AllowHandshake* = proc(request: HandshakeRequest): bool {.closure.} ## App policy for a prepared handshake.
 
   CookieJar* = object ## Supplies request cookies and receives response cookies.
-    cookies*: proc(url: Uri): seq[string] {.closure.} ## Returns `name=value` cookies for an HTTP(S) URL.
-    store*: proc(url: Uri; setCookieHeaders: seq[string]) {.closure.} ## Receives raw response Set-Cookie fields.
+    cookies*: proc(url: Uri): seq[string] {.closure.} ## Returns request cookies for an HTTP(S) URL.
+    store*: proc(url: Uri; setCookieHeaders: seq[string]) {.closure.} ## Receives raw Set-Cookie fields.
+
+  StreamReceive* = proc(maxBytes: int; ctx: CancelCtx): Future[string] {.closure.}
+  StreamSend* = proc(data: string; ctx: CancelCtx): Future[void] {.closure.}
+  StreamClose* = proc() {.closure.}
+
+  DuplexStream* = ref object ## Full-duplex stream retained after HTTP 101.
+    receive*: StreamReceive ## Reads at most `maxBytes` bytes.
+    send*: StreamSend ## Writes all bytes or raises.
+    close*: StreamClose ## Closes and unblocks pending operations.
+
+  TransportRequest* = object ## Prepared HTTP upgrade request for a custom transport.
+    httpMethod*: string ## Always `GET`.
+    url*: Uri ## `http:` for `ws:` and `https:` for `wss:`.
+    host*: string ## Value for the HTTP Host field.
+    headers*: seq[Header] ## WebSocket fields and app-managed cookies.
+
+  TransportResponse* = object ## Response returned by a custom round trip.
+    statusCode*: int
+    statusText*: string
+    headers*: seq[Header]
+    stream*: DuplexStream ## Required for 101; closed if validation fails.
+    readBuffer*: string ## WebSocket bytes read past the response headers.
+
+  RoundTrip* = proc(request: TransportRequest; ctx: CancelCtx):
+      Future[TransportResponse] {.closure.} ## Owns handshake I/O, proxying, and TLS.
 
   Options* = object ## Configures WebSocket handshakes and connections.
     allow*: AllowHandshake ## Optional app policy for the outgoing handshake.
     cookieJar*: CookieJar ## Optional app-managed cookie callbacks.
+    transport*: RoundTrip ## Overrides proxy and TLS settings when supplied.
     maxMessageSize*: int64 ## Maximum incoming message size; defaults to 64 MiB.
     closeTimeoutMs*: int ## Close handshake timeout in milliseconds; defaults to 5 seconds.
     tlsContext*: SslContext ## Optional verified TLS context for secure connections.
@@ -47,7 +73,7 @@ type
     error: ref CatchableError
 
   WebSocketConn* = ref object
-    socket: AsyncSocket
+    stream: DuplexStream
     ctx: CancelCtx
     maxMessageSize: int64
     closeTimeoutMs: int
@@ -419,6 +445,11 @@ proc readHandshake(socket: AsyncSocket; ctx: CancelCtx;
     if response.find("\r\n\r\n") >= 0: return response
   raise newException(ValueError, "websocket: handshake headers are too large")
 
+proc responseCookies(headers: openArray[Header]): seq[string] =
+  for header in headers:
+    if header.name.toLowerAscii() == "set-cookie":
+      result.add header.value
+
 proc responseCookies(response: string): seq[string] =
   let headerEnd = response.find("\r\n\r\n")
   if headerEnd < 0: return
@@ -472,27 +503,88 @@ proc parseHandshake(response: string; key: string;
     raise newException(ValueError, "websocket: server chose unrequested extensions")
   result.headerEnd = headerEnd + 4
 
+proc newDuplexStream*(receive: StreamReceive; send: StreamSend;
+                      close: StreamClose): DuplexStream =
+  ## Creates a byte stream for a caller-supplied WebSocket transport.
+  DuplexStream(receive: receive, send: send, close: close)
+
+proc socketStream(socket: AsyncSocket): DuplexStream =
+  newDuplexStream(
+    proc(maxBytes: int; ctx: CancelCtx): Future[string] = socket.recv(maxBytes),
+    proc(data: string; ctx: CancelCtx): Future[void] = socket.send(data),
+    proc() = socket.close()
+  )
+
+proc closeStream(stream: DuplexStream) =
+  if stream != nil and stream.close != nil:
+    stream.close()
+
+proc sendStream(stream: DuplexStream; data: string; ctx: CancelCtx):
+    Future[void] {.async.} =
+  if stream == nil or stream.send == nil:
+    raise newException(IOError, "websocket: transport stream is not writable")
+  let pending = stream.send(data, ctx)
+  if pending == nil:
+    raise newException(IOError, "websocket: transport returned no write future")
+  while not pending.finished:
+    if ctx.done():
+      stream.closeStream()
+      raise newException(ValueError, "websocket: connection canceled")
+    await sleepAsync(readPollMs)
+  pending.read()
+
+proc validateTransportHandshake(response: TransportResponse; key: string;
+                                protocols: openArray[string]): string =
+  if response.statusCode != 101:
+    let status = if response.statusText.len > 0:
+        $response.statusCode & " " & response.statusText
+      else: $response.statusCode
+    raise newException(ValueError,
+      "websocket: server answered handshake with " & status)
+  var headers = initTable[string, string]()
+  for header in response.headers:
+    if not validHeaderName(header.name) or '\r' in header.value or
+        '\n' in header.value or '\0' in header.value:
+      raise newException(ValueError, "websocket: malformed handshake header")
+    let name = header.name.toLowerAscii()
+    if headers.hasKey(name): headers[name].add ", " & header.value.strip()
+    else: headers[name] = header.value.strip()
+  if headers.getOrDefault("upgrade").toLowerAscii() != "websocket" or
+      not hasToken(headers.getOrDefault("connection"), "upgrade"):
+    raise newException(ValueError, "websocket: server did not upgrade the connection")
+  if headers.getOrDefault("sec-websocket-accept") != acceptKey(key):
+    raise newException(ValueError, "websocket: wrong Sec-WebSocket-Accept")
+  result = headers.getOrDefault("sec-websocket-protocol")
+  if result.len > 0 and result notin protocols:
+    raise newException(ValueError, "websocket: server chose unrequested protocol " &
+      result.escape())
+  if headers.getOrDefault("sec-websocket-extensions").len > 0:
+    raise newException(ValueError, "websocket: server chose unrequested extensions")
+
 proc dialAsync*(options: Options; request: HandshakeRequest;
                 protocols: seq[string]; ctx: CancelCtx):
                 Future[WebSocketConn] {.async.} =
   let parts = urlParts(request.url)
-  let proxy = options.proxyFor(parts)
-  let proxyScheme = if proxy == nil: "" else: proxy.url.scheme.toLowerAscii()
-  if proxy != nil and proxy.url.hostname.len == 0:
-    raise newException(ValueError, "websocket: proxy URL must include a hostname")
-  if parts.secure and proxyScheme == "https":
-    raise newException(ValueError,
-      "websocket: secure WebSocket over an HTTPS proxy is unsupported")
-  if proxyScheme notin ["", "http", "https", "socks5", "socks5h"]:
-    raise newException(ValueError,
-      "websocket: unsupported proxy scheme " & proxyScheme.escape())
+  var proxy: Proxy
+  var proxyScheme = ""
+  if options.transport == nil:
+    proxy = options.proxyFor(parts)
+    proxyScheme = if proxy == nil: "" else: proxy.url.scheme.toLowerAscii()
+    if proxy != nil and proxy.url.hostname.len == 0:
+      raise newException(ValueError, "websocket: proxy URL must include a hostname")
+    if parts.secure and proxyScheme == "https":
+      raise newException(ValueError,
+        "websocket: secure WebSocket over an HTTPS proxy is unsupported")
+    if proxyScheme notin ["", "http", "https", "socks5", "socks5h"]:
+      raise newException(ValueError,
+        "websocket: unsupported proxy scheme " & proxyScheme.escape())
   var nonce = urandom(16)
   let key = encode(nonce)
   let headers = normalizedHeaders(request, protocols, key)
-  var hostHeader = if headers.host.len > 0: headers.host else: parts.hostHeader
+  let hostHeader = if headers.host.len > 0: headers.host else: parts.hostHeader
   if '\r' in hostHeader or '\n' in hostHeader:
     raise newException(ValueError, "websocket: invalid Host header")
-  var handshakeRequest = HandshakeRequest(url: request.url,
+  let handshakeRequest = HandshakeRequest(url: request.url,
     headers: headers.values)
   if options.allow != nil and not options.allow(handshakeRequest):
     raise newException(ValueError,
@@ -508,79 +600,111 @@ proc dialAsync*(options: Options; request: HandshakeRequest;
       if cookie.len > 0: jarCookies.add cookie
 
   var socket: AsyncSocket
+  var stream: DuplexStream
   var firstRead: Future[string]
   try:
-    let dialHost = if proxy == nil: parts.host else: proxy.url.hostname
-    let dialPort = if proxy == nil: parts.port else: proxy.proxyPort()
-    socket = await dialSocket(dialHost, dialPort, ctx)
-    if proxyScheme in ["socks5", "socks5h"]:
-      await socks5Connect(socket, proxy, parts.host, parts.port, ctx)
-    elif proxyScheme == "http" and parts.secure:
-      await connectHttpProxy(socket, parts, proxy, ctx)
-    elif proxyScheme == "https":
-      when defined(ssl):
-        var tlsContext = options.tlsContext
-        if tlsContext == nil: tlsContext = newContext()
-        tlsContext.wrapConnectedSocket(socket, handshakeAsClient,
-          proxy.url.hostname)
-        if not isIpAddress(proxy.url.hostname) and
-            SSL_set_tlsext_host_name(socket.sslHandle(),
-              proxy.url.hostname.cstring) != 1:
-          raise newException(IOError,
-            "websocket: could not set proxy TLS server name")
-        firstRead = await beginTlsHandshake(socket, tlsContext,
-          proxy.url.hostname, ctx)
-      else:
+    if options.transport != nil:
+      var transportHeaders = headers.values
+      for cookie in jarCookies:
+        transportHeaders.add Header(name: "Cookie", value: cookie)
+      let transportRequest = TransportRequest(httpMethod: "GET",
+        url: cookieUrl, host: hostHeader, headers: transportHeaders)
+      let pending = options.transport(transportRequest, ctx)
+      if pending == nil:
         raise newException(ValueError,
-          "websocket: this build does not include TLS support")
-    if parts.secure:
-      when defined(ssl):
-        var tlsContext = options.tlsContext
-        if tlsContext == nil: tlsContext = newContext()
-        tlsContext.wrapConnectedSocket(socket, handshakeAsClient, parts.host)
-        if not isIpAddress(parts.host) and
-            SSL_set_tlsext_host_name(socket.sslHandle(), parts.host.cstring) != 1:
-          raise newException(IOError, "websocket: could not set TLS server name")
-        firstRead = await beginTlsHandshake(socket, tlsContext, parts.host, ctx)
-      else:
+          "websocket: custom transport returned no response future")
+      while not pending.finished:
+        if ctx.done():
+          raise newException(ValueError, "websocket: handshake canceled")
+        await sleepAsync(readPollMs)
+      let response = pending.read()
+      stream = response.stream
+      let setCookieHeaders = responseCookies(response.headers)
+      if options.cookieJar.store != nil and setCookieHeaders.len > 0:
+        options.cookieJar.store(cookieUrl, setCookieHeaders)
+      let protocol = response.validateTransportHandshake(key, protocols)
+      if stream == nil or stream.receive == nil or stream.send == nil or
+          stream.close == nil:
         raise newException(ValueError,
-          "websocket: this build does not include TLS support")
+          "websocket: custom transport returned an incomplete duplex stream")
+      result = WebSocketConn(stream: stream, ctx: ctx,
+        maxMessageSize: max(1'i64, options.maxMessageSize),
+        closeTimeoutMs: max(1, options.closeTimeoutMs),
+        nextSeq: 1, protocol: protocol, readBuffer: response.readBuffer)
+    else:
+      let dialHost = if proxy == nil: parts.host else: proxy.url.hostname
+      let dialPort = if proxy == nil: parts.port else: proxy.proxyPort()
+      socket = await dialSocket(dialHost, dialPort, ctx)
+      if proxyScheme in ["socks5", "socks5h"]:
+        await socks5Connect(socket, proxy, parts.host, parts.port, ctx)
+      elif proxyScheme == "http" and parts.secure:
+        await connectHttpProxy(socket, parts, proxy, ctx)
+      elif proxyScheme == "https":
+        when defined(ssl):
+          var tlsContext = options.tlsContext
+          if tlsContext == nil: tlsContext = newContext()
+          tlsContext.wrapConnectedSocket(socket, handshakeAsClient,
+            proxy.url.hostname)
+          if not isIpAddress(proxy.url.hostname) and
+              SSL_set_tlsext_host_name(socket.sslHandle(),
+                proxy.url.hostname.cstring) != 1:
+            raise newException(IOError,
+              "websocket: could not set proxy TLS server name")
+          firstRead = await beginTlsHandshake(socket, tlsContext,
+            proxy.url.hostname, ctx)
+        else:
+          raise newException(ValueError,
+            "websocket: this build does not include TLS support")
+      if parts.secure:
+        when defined(ssl):
+          var tlsContext = options.tlsContext
+          if tlsContext == nil: tlsContext = newContext()
+          tlsContext.wrapConnectedSocket(socket, handshakeAsClient, parts.host)
+          if not isIpAddress(parts.host) and
+              SSL_set_tlsext_host_name(socket.sslHandle(), parts.host.cstring) != 1:
+            raise newException(IOError, "websocket: could not set TLS server name")
+          firstRead = await beginTlsHandshake(socket, tlsContext, parts.host, ctx)
+        else:
+          raise newException(ValueError,
+            "websocket: this build does not include TLS support")
 
-    var requestTarget = parts.resource
-    if proxy != nil and not parts.secure and proxyScheme in ["http", "https"]:
-      var absoluteUrl = parts.url
-      absoluteUrl.scheme = "http"
-      requestTarget = $absoluteUrl
-    var wire = "GET " & requestTarget & " HTTP/1.1\r\nHost: " & hostHeader & "\r\n"
-    wire.add headers.wire
-    for cookie in jarCookies:
-      wire.add "Cookie: " & cookie & "\r\n"
-    if proxy != nil and not parts.secure and proxyScheme in ["http", "https"] and
-        proxy.url.username.len > 0:
-      var hasProxyAuthorization = false
-      for header in headers.values:
-        if header.name.toLowerAscii() == "proxy-authorization":
-          hasProxyAuthorization = true
-          break
-      if not hasProxyAuthorization:
-        wire.add "Proxy-Authorization: Basic " &
-          encode(proxy.url.username & ":" & proxy.url.password) & "\r\n"
-    wire.add "\r\n"
-    await socketSend(socket, wire, ctx)
-    let response = await readHandshake(socket, ctx, firstRead)
-    let setCookieHeaders = responseCookies(response)
-    if options.cookieJar.store != nil and setCookieHeaders.len > 0:
-      options.cookieJar.store(cookieUrl, setCookieHeaders)
-    let parsed = parseHandshake(response, key, protocols)
-    result = WebSocketConn(socket: socket, ctx: ctx,
-      maxMessageSize: max(1'i64, options.maxMessageSize),
-      closeTimeoutMs: max(1, options.closeTimeoutMs),
-      nextSeq: 1, protocol: parsed.protocol,
-      readBuffer: response[parsed.headerEnd..^1])
+      var requestTarget = parts.resource
+      if proxy != nil and not parts.secure and proxyScheme in ["http", "https"]:
+        var absoluteUrl = parts.url
+        absoluteUrl.scheme = "http"
+        requestTarget = $absoluteUrl
+      var wire = "GET " & requestTarget & " HTTP/1.1\r\nHost: " & hostHeader & "\r\n"
+      wire.add headers.wire
+      for cookie in jarCookies:
+        wire.add "Cookie: " & cookie & "\r\n"
+      if proxy != nil and not parts.secure and proxyScheme in ["http", "https"] and
+          proxy.url.username.len > 0:
+        var hasProxyAuthorization = false
+        for header in headers.values:
+          if header.name.toLowerAscii() == "proxy-authorization":
+            hasProxyAuthorization = true
+            break
+        if not hasProxyAuthorization:
+          wire.add "Proxy-Authorization: Basic " &
+            encode(proxy.url.username & ":" & proxy.url.password) & "\r\n"
+      wire.add "\r\n"
+      await socketSend(socket, wire, ctx)
+      let response = await readHandshake(socket, ctx, firstRead)
+      let setCookieHeaders = responseCookies(response)
+      if options.cookieJar.store != nil and setCookieHeaders.len > 0:
+        options.cookieJar.store(cookieUrl, setCookieHeaders)
+      let parsed = parseHandshake(response, key, protocols)
+      stream = socketStream(socket)
+      result = WebSocketConn(stream: stream, ctx: ctx,
+        maxMessageSize: max(1'i64, options.maxMessageSize),
+        closeTimeoutMs: max(1, options.closeTimeoutMs),
+        nextSeq: 1, protocol: parsed.protocol,
+        readBuffer: response[parsed.headerEnd..^1])
     result.mutex.initLock()
     result.changed.initCond()
   except:
-    if socket != nil: socket.close()
+    if stream != nil: stream.closeStream()
+    elif socket != nil: socket.close()
     raise
 
 proc writeFrame(conn: WebSocketConn; opcode: uint8; payload: seq[byte]):
@@ -608,7 +732,7 @@ proc writeFrame(conn: WebSocketConn; opcode: uint8; payload: seq[byte]):
   let mask = urandom(4)
   for value in mask: frame.add char(value)
   for i, value in payload: frame.add char(value xor mask[i mod 4])
-  await conn.socket.send(frame)
+  await sendStream(conn.stream, frame, conn.ctx)
 
 proc writeClose(conn: WebSocketConn; code: int; reason: string): Future[void] {.async.} =
   if code != closeNoStatus and not validCloseCode(code):
@@ -708,13 +832,15 @@ proc readExact(conn: WebSocketConn; count: int; control = false):
     for i in 0..<take: result.add byte(conn.readBuffer[i])
     conn.readBuffer.delete(0 ..< take)
   while result.len < count:
-    let future = conn.socket.recv(count - result.len)
+    let future = conn.stream.receive(count - result.len, conn.ctx)
+    if future == nil:
+      raise newException(IOError, "websocket: transport returned no read future")
     while not future.finished:
       await conn.flushOutgoing()
       if conn.ctx.done():
         try: await conn.writeClose(closeGoingAway, "")
         except CatchableError: discard
-        conn.socket.close()
+        conn.stream.closeStream()
         raise newException(ValueError, "websocket: connection canceled")
       acquire(conn.mutex)
       let closeSent = conn.closeSent
@@ -722,11 +848,15 @@ proc readExact(conn: WebSocketConn; count: int; control = false):
       release(conn.mutex)
       if closeSent and closeStarted.ticks != 0 and
           (getMonoTime() - closeStarted).inMilliseconds >= conn.closeTimeoutMs:
-        conn.socket.close()
+        conn.stream.closeStream()
       await sleepAsync(readPollMs)
     let piece = future.read()
     if piece.len == 0: raise newException(IOError, "websocket: connection closed")
-    for ch in piece: result.add byte(ch)
+    let remaining = count - result.len
+    let take = min(remaining, piece.len)
+    for i in 0..<take: result.add byte(piece[i])
+    if take < piece.len:
+      conn.readBuffer = piece[take..^1] & conn.readBuffer
 
 proc readFrame(conn: WebSocketConn): Future[tuple[fin: bool, opcode: uint8,
     payload: seq[byte]]] {.async.} =
@@ -797,7 +927,7 @@ proc terminate*(conn: WebSocketConn) =
   if not conn.done: conn.done = true
   conn.changed.broadcast()
   release(conn.mutex)
-  conn.socket.close()
+  conn.stream.closeStream()
 
 proc closing*(conn: WebSocketConn): bool =
   acquire(conn.mutex)
