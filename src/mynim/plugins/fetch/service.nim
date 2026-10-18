@@ -252,17 +252,17 @@ proc fetchAsync(options: Options; request: Request; ctx: core.CancelCtx;
   if current.scheme notin ["http", "https"]:
     raise newException(ValueError,
       "fetch: unsupported URL scheme " & current.scheme.escape())
-  if request.httpMethod.len == 0:
-    raise newException(ValueError, "fetch: method cannot be empty")
-  if not isHttpToken(request.httpMethod):
+  let initialMethod = if request.httpMethod.len == 0: "GET"
+                      else: request.httpMethod
+  if not isHttpToken(initialMethod):
     raise newException(ValueError,
-      "fetch: invalid HTTP method " & request.httpMethod.escape())
+      "fetch: invalid HTTP method " & initialMethod.escape())
   if request.redirect notin ["follow", "manual", "error"]:
     raise newException(ValueError,
       "fetch: invalid redirect mode " & request.redirect.escape())
-  if request.hasBody and request.httpMethod.toUpperAscii() in ["GET", "HEAD"]:
+  if request.hasBody and initialMethod.toUpperAscii() in ["GET", "HEAD"]:
     raise newException(ValueError,
-      "fetch: a " & request.httpMethod.toUpperAscii() & " request cannot have a body")
+      "fetch: a " & initialMethod.toUpperAscii() & " request cannot have a body")
   if options.allow != nil and not options.allow(request):
     var safeUrl = current
     safeUrl.password = ""
@@ -298,7 +298,7 @@ proc fetchAsync(options: Options; request: Request; ctx: core.CancelCtx;
     if client != nil: client.close()
 
   var headers = toHttpHeaders(request.headers)
-  var httpVerb = request.httpMethod
+  var httpVerb = initialMethod
   var body = if request.hasBody: request.body else: ""
   var hasBody = request.hasBody
   var redirected = false

@@ -286,6 +286,14 @@ block custom_transport_receives_extension_methods_and_streams_response:
   doAssert "invalid HTTP method" in invalidError.msg
   doAssert calls == 2
 
+  let (defaultMethodParts, defaultMethodError) = run(service.Request(
+    url: "http://example.invalid/custom", redirect: "follow"), options)
+  doAssert defaultMethodError == nil
+  doAssert received.httpMethod == "GET"
+  doAssert defaultMethodParts.len == 2
+  doAssert defaultMethodParts[1].chunk == "GET::"
+  doAssert calls == 3
+
 block configured_proxy_receives_absolute_http_target:
   let proxied = Options(proxy: newProxy(origin))
   let (parts, err) = run(service.Request(url: "http://example.invalid/proxy",
