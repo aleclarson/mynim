@@ -21,8 +21,16 @@ type
     colors*: RenderColors
     viewport*: seq[TerminalFrameRow]
 
-proc snapshotCurrent*(state: GhosttyRenderState): TerminalFrame =
-  ## Copies the already-updated render state into Nim-owned data.
+proc cachedRow(rows: openArray[TerminalFrameRow]; id: RowID): int =
+  for index, row in rows:
+    if row.id.bits == id.bits:
+      return index
+  -1
+
+proc snapshotCurrent*(state: GhosttyRenderState;
+                      previous: openArray[TerminalFrameRow] = []):
+    TerminalFrame =
+  ## Copies changed rows and reuses immutable snapshots of unchanged row IDs.
   ## Calls that mutate or read the render state must be serialized.
   let (cols, rows) = state.size()
   result.cols = cols
@@ -32,34 +40,47 @@ proc snapshotCurrent*(state: GhosttyRenderState): TerminalFrame =
   result.colors = state.colors()
   result.viewport = newSeqOfCap[TerminalFrameRow](rows)
   var styles = initTable[uint16, RenderStyle]()
+  let full = result.dirty == renderFull
 
   state.rows()
   while state.nextRow():
-    var row = TerminalFrameRow(
-      viewportY: state.rowViewportY(),
-      dirty: state.rowDirty(),
-      selection: state.rowSelection(),
-      id: state.rowId())
-    let cells = state.rowCells()
-    row.cells = newSeq[TerminalFrameCell](cells.len)
-    for x, cell in cells:
-      var codepoints: seq[uint32]
-      if cell.grapheme:
-        codepoints = state.cellGraphemes(x)
-      elif cell.codepoint != 0:
-        codepoints = @[cell.codepoint]
-      var style: RenderStyle
-      if styles.hasKey(cell.styleId):
-        style = styles[cell.styleId]
-      else:
-        style = state.cellStyle(x)
-        styles[cell.styleId] = style
-      row.cells[x] = TerminalFrameCell(
-        cell: cell, codepoints: move(codepoints), style: style)
+    let id = state.rowId()
+    let viewportY = state.rowViewportY()
+    let dirty = state.rowDirty()
+    let selection = state.rowSelection()
+    let cached = if full or dirty: -1 else: previous.cachedRow(id)
+    var row: TerminalFrameRow
+    if cached >= 0 and previous[cached].selection == selection:
+      row = previous[cached]
+      row.viewportY = viewportY
+      row.dirty = false
+    else:
+      row = TerminalFrameRow(
+        viewportY: viewportY,
+        dirty: dirty,
+        selection: selection,
+        id: id)
+      let cells = state.rowCells()
+      row.cells = newSeq[TerminalFrameCell](cells.len)
+      for x, cell in cells:
+        var codepoints: seq[uint32]
+        if cell.grapheme:
+          codepoints = state.cellGraphemes(x)
+        elif cell.codepoint != 0:
+          codepoints = @[cell.codepoint]
+        var style: RenderStyle
+        if styles.hasKey(cell.styleId):
+          style = styles[cell.styleId]
+        else:
+          style = state.cellStyle(x)
+          styles[cell.styleId] = style
+        row.cells[x] = TerminalFrameCell(
+          cell: cell, codepoints: move(codepoints), style: style)
     result.viewport.add(move(row))
 
 proc snapshot*(state: GhosttyRenderState;
-               terminal: GhosttyTerminal): TerminalFrame =
-  ## Updates render state and copies every viewport row into Nim-owned data.
+               terminal: GhosttyTerminal;
+               previous: openArray[TerminalFrameRow] = []): TerminalFrame =
+  ## Updates render state and copies changed rows into Nim-owned data.
   state.update(terminal)
-  state.snapshotCurrent()
+  state.snapshotCurrent(previous)

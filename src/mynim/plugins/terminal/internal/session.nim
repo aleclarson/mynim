@@ -61,6 +61,7 @@ type
     inputError: string
     processExitCode: Option[int]
     events: seq[TerminalEvent]
+    cachedRows: seq[TerminalFrameRow]
     wake: TerminalWake
     onNotify: TerminalNotify
     noClipboardWrite: bool
@@ -272,7 +273,9 @@ proc onRenderHold(rawTerminal, userdata: pointer; held: bool) {.cdecl.} =
   try:
     if held:
       session.renderState.update(session.terminal)
-      session.heldFrame = some(session.renderState.snapshotCurrent())
+      let frame = session.renderState.snapshotCurrent(session.cachedRows)
+      session.cachedRows = frame.viewport
+      session.heldFrame = some(frame)
     else:
       session.heldFrame = none(TerminalFrame)
     session.renderHeld = held
@@ -287,6 +290,7 @@ proc onReset(rawTerminal, userdata: pointer) {.cdecl.} =
   if not session.isNil:
     try:
       session.heldFrame = none(TerminalFrame)
+      session.cachedRows = @[]
       session.renderHeld = false
       session.addEvent(TerminalEvent(kind: terminalReset))
     except CatchableError as error:
@@ -1102,7 +1106,9 @@ proc snapshot*(session: TerminalSession): TerminalFrame =
     if session.renderHeld and session.heldFrame.isSome:
       result = session.heldFrame.get()
     else:
-      result = session.renderState.snapshot(session.terminal)
+      result = session.renderState.snapshot(session.terminal,
+        session.cachedRows)
+      session.cachedRows = result.viewport
   finally:
     session.terminalGuard.release()
 
@@ -1127,10 +1133,13 @@ proc rowText*(session: TerminalSession; row: int):
     return
   session.lockTerminal()
   try:
-    let frame = if session.renderHeld and session.heldFrame.isSome:
-        session.heldFrame.get()
-      else:
-        session.renderState.snapshot(session.terminal)
+    var frame: TerminalFrame
+    if session.renderHeld and session.heldFrame.isSome:
+      frame = session.heldFrame.get()
+    else:
+      frame = session.renderState.snapshot(session.terminal,
+        session.cachedRows)
+      session.cachedRows = frame.viewport
     for visibleRow in frame.viewport:
       if visibleRow.viewportY != row:
         continue

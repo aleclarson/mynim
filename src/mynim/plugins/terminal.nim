@@ -1058,6 +1058,7 @@ proc view*(context: ui.Context; terminal: Terminal): ui.Element =
         frame.cursor.blinking
     paintOptions.cursorBlinkOn = cursorBlinkOn
     painter.paintFrame(bounds, frame, paintOptions)
+    terminal.session.clean()
     painter.paintScrollbar(bounds, terminal.session.scrollbar(),
       uiTheme.scrollbar, uiTheme.scrollbarWidth,
       terminal.options.font.paddingX, terminal.options.font.paddingY)

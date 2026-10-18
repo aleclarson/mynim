@@ -193,6 +193,20 @@ suite "Ghostty terminal state":
     renderState.clean()
     check renderState.dirty() == renderClean
 
+    let reusedFrame = renderState.snapshot(terminal, copiedFrame.viewport)
+    check reusedFrame.dirty == renderClean
+    check reusedFrame.viewport.len == copiedFrame.viewport.len
+    for y, row in reusedFrame.viewport:
+      check row.id.bits == copiedFrame.viewport[y].id.bits
+      check not row.dirty
+      check row.cells[0].cell.codepoint ==
+        copiedFrame.viewport[y].cells[0].cell.codepoint
+
+    terminal.write("Z")
+    let changedFrame = renderState.snapshot(terminal, reusedFrame.viewport)
+    check changedFrame.viewport[1].dirty
+    check changedFrame.viewport[1].cells[3].cell.codepoint == uint32(ord('Z'))
+
     terminal.reset()
     check terminal.size() == (cols: 100, rows: 30)
     check terminal.cursor() == (x: 0, y: 0)
