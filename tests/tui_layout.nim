@@ -95,6 +95,44 @@ block flex_shrink_uses_inner_base_size:
   doAssert abs(layout.bounds(first).w - 133.333'f32) < 0.01'f32
   doAssert abs(layout.bounds(padded).w - 166.667'f32) < 0.01'f32
 
+block flex_text_shrinks_to_min_content_width:
+  let c = newContext()
+  var row, label, fixed, nowrapRow, nowrapLabel, nowrapFixed: Element
+  c.build(proc(ctx: Context) =
+    row = ctx.row().size(100, 40).alignItems(Align.Start)
+    discard row.children(proc() =
+      label = ctx.text("alpha beta").shrink(1)
+      fixed = ctx.box().size(60, 10).shrink(0)
+    )
+  )
+  let layout = c.layout(100, 40)
+  doAssert layout.bounds(label).w < 60
+  doAssert layout.bounds(fixed).w == 60
+  doAssert layout.bounds(fixed).x == layout.bounds(label).w
+
+  c.build(proc(ctx: Context) =
+    nowrapRow = ctx.row().size(100, 40).alignItems(Align.Start)
+    discard nowrapRow.children(proc() =
+      nowrapLabel = ctx.text("alpha beta").noWrap().shrink(1)
+      nowrapFixed = ctx.box().size(60, 10).shrink(0)
+    )
+  )
+  let noWrapLayout = c.layout(100, 40)
+  doAssert noWrapLayout.bounds(nowrapLabel).w > 60
+  doAssert noWrapLayout.bounds(nowrapFixed).w == 60
+
+block fit_content_grid_tracks_start_at_min_content:
+  let c = newContext()
+  var grid, label: Element
+  c.build(proc(ctx: Context) =
+    grid = ctx.grid().columnTracks(fitContent()).size(20, 30)
+    discard grid.children(proc() = label = ctx.text("alpha beta"))
+  )
+  let layout = c.layout(100, 30)
+  doAssert layout.bounds(grid).w == 20
+  doAssert layout.bounds(label).w < 60
+  doAssert layout.bounds(label).w > 0
+
 block flex_base_is_not_smaller_than_padding:
   let c = newContext()
   var column, padded, other: Element

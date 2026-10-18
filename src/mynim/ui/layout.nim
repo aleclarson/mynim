@@ -112,6 +112,22 @@ proc shapeText(nodes: var seq[ElementNode]) =
       keepSpaces: true, noWrap: node.textNoWrap,
       spans: node.textSpanStyles))
 
+proc minContentTextWidth(node: ElementNode): float32 =
+  if node.shapedText == nil:
+    return
+  var params = node.shapedText.params
+  params.maxLines = 0
+  params.ellipsis = ""
+  if node.textNoWrap:
+    params.width = 0
+    params.noWrap = true
+    params.noBreakWords = false
+  else:
+    params.width = 1
+    params.noWrap = false
+    params.noBreakWords = true
+  textStack.shared().layout(params).width
+
 proc shapeTextToBounds(nodes: var seq[ElementNode]; rects: seq[Rect];
                        firstSlot = 0; lastSlot = -1): bool =
   let system = textStack.shared()
@@ -137,8 +153,9 @@ proc checkGridCellCount(columns, rows, base: int) =
     raise newException(ValueError,
       "ui: grid placement exceeds 1,048,576 occupied cells")
 
-proc rowItemWidth(node: ElementNode; natural: NaturalSize): float32 =
-  result = natural.w
+proc rowItemWidth(node: ElementNode; natural: NaturalSize;
+                  minContent = false): float32 =
+  result = if minContent: natural.minContentW else: natural.w
   let basis = node.basis.resolve(-1)
   if not basis.ok:
     return
@@ -151,7 +168,8 @@ proc rowItemWidth(node: ElementNode; natural: NaturalSize): float32 =
         node.contentInsetX
       else:
         let width = node.width.resolve(-1)
-        max(if width.ok: min(natural.w, width.value) else: natural.w,
+        max(if width.ok: min(natural.minContentW, width.value)
+            else: natural.minContentW,
           node.contentInsetX)
     result = max(min(result, base), autoMinimum)
   if node.shrink == 0:
@@ -504,8 +522,12 @@ proc gridCellDimension(node: ElementNode; natural: NaturalSize;
     else:
       result.size = node.clampHeight(max(area - margins, 0'f32), base)
   else:
-    let naturalSize = if horizontal: natural.w else: natural.h
-    let value = min(naturalSize, max(area - margins, 0'f32))
+    let available = max(area - margins, 0'f32)
+    let naturalSize = if horizontal:
+        min(natural.w, max(natural.minContentW, available))
+      else:
+        min(natural.h, available)
+    let value = naturalSize
     if horizontal:
       result.size = node.clampWidth(value, base)
     else:
@@ -534,22 +556,27 @@ proc gridArea(values: seq[float32]; first, start, span: int;
 
 proc gridColumns(nodes: seq[ElementNode]; natural: seq[NaturalSize];
                  parent: int; scratch: var GridScratch; first, pastLast,
-                 columns, valuesFirst: int; available, base: float32) =
+                 columns, valuesFirst: int; available, base: float32;
+                 minContent = false) =
   let grid = nodes[parent]
   let contributionFirst = scratch.contributions.len
   for itemIndex in first ..< pastLast:
     let item = scratch.items[itemIndex]
     let node = nodes[item.slot]
     let width = node.width.resolve(base)
-    let contentWidth = if width.ok:
+    let minimumWidth = if width.ok:
         node.clampWidth(width.value, base)
+      else:
+        natural[item.slot].minContentW
+    let maximumWidth = if width.ok:
+        minimumWidth
       else:
         natural[item.slot].w
     scratch.contributions.add(GridContribution(start: item.col,
-      span: item.colSpan, minimum: contentWidth + node.marginX,
-      maximum: contentWidth + node.marginX))
+      span: item.colSpan, minimum: minimumWidth + node.marginX,
+      maximum: maximumWidth + node.marginX))
   sizeGridTracks(grid.cols, columns, available, grid.gapX,
-    scratch, contributionFirst, scratch.contributions.len, false,
+    scratch, contributionFirst, scratch.contributions.len, minContent,
     grid.justify == Align.Auto, scratch.values, valuesFirst)
   scratch.contributions.setLen(contributionFirst)
 
@@ -637,7 +664,7 @@ proc gridRows(nodes: seq[ElementNode]; natural: seq[NaturalSize]; parent: int;
 
 proc measureGrid(nodes: seq[ElementNode]; natural: seq[NaturalSize];
                  parent: int; constraints: seq[Rect];
-                 scratch: var GridScratch): tuple[w, h: float32] =
+                 scratch: var GridScratch): tuple[w, h, minW: float32] =
   let grid = nodes[parent]
   let itemsFirst = scratch.items.len
   let valuesFirst = scratch.values.len
@@ -663,6 +690,14 @@ proc measureGrid(nodes: seq[ElementNode]; natural: seq[NaturalSize];
   let columnsFirst = scratch.values.len
   gridColumns(nodes, natural, parent, scratch, placed.first,
     placed.pastLast, placed.columns, columnsFirst, columnAvailable, widthBase)
+  let minimumColumnsFirst = scratch.values.len
+  gridColumns(nodes, natural, parent, scratch, placed.first,
+    placed.pastLast, placed.columns, minimumColumnsFirst, Inf.float32,
+    widthBase, true)
+  result.minW = grid.gapX * float32(max(placed.columns - 1, 0))
+  for index in 0 ..< placed.columns:
+    result.minW += scratch.values[minimumColumnsFirst + index]
+  scratch.values.setLen(minimumColumnsFirst)
   var usedWidth = grid.gapX * float32(max(placed.columns - 1, 0))
   for index in 0 ..< placed.columns:
     usedWidth += scratch.values[columnsFirst + index]
@@ -699,10 +734,11 @@ proc measureTree(nodes: seq[ElementNode]; natural: var seq[NaturalSize];
   for slot in countdown(last, firstSlot):
     let previous = natural[slot]
     let node = nodes[slot]
-    var contentW, contentH: float32
+    var contentW, contentMinW, contentH: float32
     if node.hasText and not node.textInline and not node.textOverlay and
         node.shapedText != nil:
       contentW = node.shapedText.width
+      contentMinW = node.minContentTextWidth()
       contentH = node.shapedText.height
     if node.bitmap != nil and node.bitmap.image != nil:
       let source = node.bitmapSource
@@ -716,6 +752,7 @@ proc measureTree(nodes: seq[ElementNode]; natural: var seq[NaturalSize];
           else:
             1'f32
         contentW = max(contentW, em * aspect)
+        contentMinW = max(contentMinW, em * aspect)
         contentH = max(contentH, em)
       else:
         contentW = max(contentW, node.vector.width)
@@ -723,6 +760,7 @@ proc measureTree(nodes: seq[ElementNode]; natural: var seq[NaturalSize];
     elif node.icon:
       let em = if node.textStyle.size > 0: node.textStyle.size else: 16'f32
       contentW = max(contentW, em)
+      contentMinW = max(contentMinW, em)
       contentH = max(contentH, em)
     var baselineAscent = -Inf.float32
     var baselineDescent = -Inf.float32
@@ -735,7 +773,13 @@ proc measureTree(nodes: seq[ElementNode]; natural: var seq[NaturalSize];
         if not childNode.absolute and not node.grid:
           if node.row:
             let mainW = childNode.rowItemWidth(childSize)
+            let minMainW = childNode.rowItemWidth(childSize, true)
             contentW += mainW + childNode.marginX
+            if node.wrap:
+              contentMinW = max(contentMinW,
+                minMainW + childNode.marginX)
+            else:
+              contentMinW += minMainW + childNode.marginX
             contentH = max(contentH, childSize.h + childNode.marginY)
             let align = if childNode.selfAlign == Align.Auto:
                 (if node.align == Align.Auto: Align.Stretch else: node.align)
@@ -750,6 +794,8 @@ proc measureTree(nodes: seq[ElementNode]; natural: var seq[NaturalSize];
                 childSize.h + childNode.marginY - baseline)
           else:
             contentW = max(contentW, childSize.w + childNode.marginX)
+            contentMinW = max(contentMinW,
+              childSize.minContentW + childNode.marginX)
             let basis = childNode.basis.resolve(-1)
             let mainH = if basis.ok:
                 childNode.clampHeight(basis.value, -1)
@@ -765,6 +811,7 @@ proc measureTree(nodes: seq[ElementNode]; natural: var seq[NaturalSize];
     if node.grid and not node.textInlineParagraph:
       let gridNatural = measureGrid(nodes, natural, slot, constraints, scratch)
       contentW = max(contentW, gridNatural.w)
+      contentMinW = max(contentMinW, gridNatural.minW)
       contentH = max(contentH, gridNatural.h)
 
     var measuredMain = (if node.row: node.width else: node.height).resolve(-1)
@@ -854,6 +901,10 @@ proc measureTree(nodes: seq[ElementNode]; natural: var seq[NaturalSize];
     let width = node.width.resolve(-1)
     let height = node.height.resolve(-1)
     var rawW = if width.ok: width.value else: contentW + node.contentInsetX
+    let minContent = if node.scrollX or node.scrollY: 0'f32
+      else: contentMinW
+    let rawMinW = if width.ok: width.value
+      else: minContent + node.contentInsetX
     var rawH = if height.ok: height.value else: contentH + node.contentInsetY
     if node.aspectRatio > 0:
       if width.ok and not height.ok:
@@ -872,9 +923,11 @@ proc measureTree(nodes: seq[ElementNode]; natural: var seq[NaturalSize];
     let measured = NaturalSize(
       w: node.clampWidth(rawW, -1),
       h: node.clampHeight(rawH, -1),
+      minContentW: node.clampWidth(rawMinW, -1),
       baseW: rawW,
       baseH: rawH)
     if measured.w != previous.w or measured.h != previous.h or
+        measured.minContentW != previous.minContentW or
         measured.baseW != previous.baseW or measured.baseH != previous.baseH:
       result = true
     natural[slot] = measured
@@ -960,6 +1013,9 @@ proc crossSize(node: ElementNode; natural: NaturalSize; row: bool;
              else: mainContent * node.aspectRatio) + crossInset
   elif not resolved.ok and align == Align.Stretch and not autoMargin:
     value = max(available - margins, 0'f32)
+  elif not row and base >= 0:
+    value = min(natural.w,
+      max(natural.minContentW, max(base - margins, 0'f32)))
   if row:
     node.clampHeight(value, base)
   else:
@@ -1088,8 +1144,10 @@ proc placeNode(nodes: seq[ElementNode]; natural: seq[NaturalSize];
       let maxValue = maxLength.resolve(dimensionBase)
       var autoMin: float32
       if row:
-        autoMin = childNatural.w
-      elif childNode.grow == 0:
+        if not (childNode.scrollX or childNode.scrollY or childNode.clipX):
+          autoMin = childNatural.minContentW
+      elif childNode.grow == 0 and
+          not (childNode.scrollX or childNode.scrollY or childNode.clipY):
         autoMin = childNatural.h
       let preferred = if row:
           childNode.width.resolve(dimensionBase)
