@@ -754,6 +754,34 @@ proc strokePath*(painter: var Painter; path: Path; width: float32;
   ## Draws a vector path with round joins and caps.
   painter.paintPath(path, width, color, LinearGradient(), false)
 
+proc paintPolylineSegment(painter: var Painter;
+    a, b: array[2, float32]; width, halfWidth: float32; color: Color) =
+  let rootX = painter.root.x * painter.scale
+  let rootY = painter.root.y * painter.scale
+  let ax = a[0] - rootX
+  let ay = a[1] - rootY
+  let bx = b[0] - rootX
+  let by = b[1] - rootY
+  let dx = bx - ax
+  let dy = by - ay
+  if not ax.finite or not ay.finite or not bx.finite or not by.finite or
+      not dx.finite or not dy.finite:
+    return
+  let length = float32(hypot(float64(dx), float64(dy)))
+  if not length.finite or not (length + width).finite:
+    return
+  var transform = scene.translation(ax, ay)
+  if length > 0:
+    transform = scene.matrix(dx / length, dy / length, -dy / length,
+      dx / length, ax, ay)
+  var op = scene.Op(kind: scene.opFill,
+    rect: scene.Rect(x: -halfWidth, y: -halfWidth,
+      w: length + width, h: width),
+    radii: scene.uniform(halfWidth), color: sceneColor(color),
+    opacity: painter.opacity, transform: transform)
+  op.wide = painter.frame.addWide(wideColors(color, transparent, transparent))
+  painter.frame.ops.add(op)
+
 proc strokePolyline*(painter: var Painter;
     points: openArray[array[2, float32]]; width: float32; color: Color) =
   ## Draws finite runs of points with round joins and caps; lone points are ignored.
@@ -762,9 +790,15 @@ proc strokePolyline*(painter: var Painter;
       scaledWidth <= 0 or
       not scaledWidth.finite or color.a == 0:
     return
+  let gpuFastPath = painter.gpuFastPaths and color.a == 255 and
+    painter.opacity == 1
+  let halfWidth = scaledWidth / 2
   var first = [0'f32, 0'f32]
+  var previous = [0'f32, 0'f32]
   var hasPoint, hasSegment, hasAnySegment = false
-  let path = newPath()
+  var path: Path
+  if not gpuFastPath:
+    path = newPath()
   for point in points:
     let x = point[0] * painter.scale
     let y = point[1] * painter.scale
@@ -774,15 +808,26 @@ proc strokePolyline*(painter: var Painter;
       hasSegment = false
     elif not hasPoint:
       first = point
+      previous = [x, y]
       hasPoint = true
     elif not hasSegment:
-      discard path.moveTo(first[0], first[1])
-        .lineTo(point[0], point[1])
+      if not gpuFastPath:
+        discard path.moveTo(first[0], first[1])
+          .lineTo(point[0], point[1])
+      else:
+        painter.paintPolylineSegment(previous, [x, y], scaledWidth,
+          halfWidth, color)
+      previous = [x, y]
       hasSegment = true
       hasAnySegment = true
     else:
-      discard path.lineTo(point[0], point[1])
-  if hasAnySegment:
+      if not gpuFastPath:
+        discard path.lineTo(point[0], point[1])
+      else:
+        painter.paintPolylineSegment(previous, [x, y], scaledWidth,
+          halfWidth, color)
+      previous = [x, y]
+  if hasAnySegment and not gpuFastPath:
     painter.strokePath(path, width, color)
 
 proc strokePathGradient*(painter: var Painter; path: Path; width: float32;
@@ -1527,9 +1572,10 @@ proc collectPaintOrder(nodes: seq[ElementNode]; slot: int;
     child = int(nodes[child].nextSibling)
 
 proc paintScene*(layout: LayoutResult; scale = 1'f32;
-                 clear = transparent): scene.Scene =
+                 clear = transparent; gpuFastPaths = false): scene.Scene =
   ## Converts a current layout into a device-pixel scene for Mygo's renderers.
   ## Element bounds are translated to the layout root's origin before snapping.
+  ## Set `gpuFastPaths` only when submitting to an initialized GPU renderer.
   if layout.owner == nil or layout.owner.closed or
       layout.owner.inBuild or not layout.owner.hasFrame or
       layout.generation != layout.owner.generation or
@@ -1604,7 +1650,7 @@ proc paintScene*(layout: LayoutResult; scale = 1'f32;
           var painter = Painter(frame: result, textSystem: system,
             theme: layout.owner.themeSnapshot,
             localeTag: layout.owner.localeSnapshot, root: layout.root,
-            scale: scale, opacity: opacity)
+            scale: scale, opacity: opacity, gpuFastPaths: gpuFastPaths)
           node.material.paintMaterial(painter, layout.rects[slot], node.radius)
         if fillVisible or borderVisible:
           var op = scene.Op(kind: scene.opFill, rect: rect,
@@ -1667,7 +1713,7 @@ proc paintScene*(layout: LayoutResult; scale = 1'f32;
           var painter = Painter(frame: result, textSystem: system,
             theme: layout.owner.themeSnapshot,
             localeTag: layout.owner.localeSnapshot, root: layout.root,
-            scale: scale, opacity: opacity)
+            scale: scale, opacity: opacity, gpuFastPaths: gpuFastPaths)
           node.drawFn(painter, layout.rects[slot])
         result.applyLayoutTransform(firstNodeOp, layout, slot, scale)
         for _ in 0..<clipCount:

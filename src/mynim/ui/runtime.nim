@@ -125,7 +125,7 @@ proc releaseGpu(rt: Runtime) =
       rt.glRenderer.release()
       rt.glRenderer = nil
 
-proc tryGpu(rt: Runtime; frame: scene.Scene): bool =
+proc prepareGpu(rt: Runtime): bool =
   when defined(macosx):
     let native = rt.conn.surface.native()
     if native.layer == 0:
@@ -136,15 +136,7 @@ proc tryGpu(rt: Runtime; frame: scene.Scene): bool =
         rt.metalRenderer = metalGpu.new(native.layer)
       except CatchableError as error:
         rt.gpuError = error.msg
-    if rt.metalRenderer == nil:
-      return false
-    try:
-      rt.metalRenderer.render(frame)
-      return true
-    except CatchableError as error:
-      rt.gpuError = error.msg
-      rt.releaseGpu()
-      false
+    rt.metalRenderer != nil
   elif defined(linux) and (defined(amd64) or defined(arm64)):
     let native = rt.conn.surface.native()
     if native.glArea == 0:
@@ -156,14 +148,7 @@ proc tryGpu(rt: Runtime; frame: scene.Scene): bool =
         rt.glRenderer = renderer
       else:
         rt.gpuError = error.msg
-    if rt.glRenderer == nil:
-      return false
-    let error = rt.glRenderer.render(frame)
-    if error == nil:
-      return true
-    rt.gpuError = error.msg
-    rt.releaseGpu()
-    false
+    rt.glRenderer != nil
   elif defined(windows):
     let native = rt.conn.surface.native()
     if native.hwnd == 0:
@@ -175,14 +160,7 @@ proc tryGpu(rt: Runtime; frame: scene.Scene): bool =
         rt.d3d11Renderer = renderer
       else:
         rt.gpuError = error
-    if rt.d3d11Renderer == nil:
-      return false
-    let error = rt.d3d11Renderer.render(frame)
-    if error.len == 0:
-      return true
-    rt.gpuError = error
-    rt.releaseGpu()
-    false
+    rt.d3d11Renderer != nil
   elif defined(emscripten):
     let native = rt.conn.surface.native()
     if native.canvas == 0:
@@ -194,8 +172,36 @@ proc tryGpu(rt: Runtime; frame: scene.Scene): bool =
         rt.glRenderer = renderer
       else:
         rt.gpuError = error.msg
-    if rt.glRenderer == nil:
-      return false
+    rt.glRenderer != nil
+  else:
+    false
+
+proc tryGpu(rt: Runtime; frame: scene.Scene): bool =
+  if not rt.prepareGpu():
+    return false
+  when defined(macosx):
+    try:
+      rt.metalRenderer.render(frame)
+      true
+    except CatchableError as error:
+      rt.gpuError = error.msg
+      rt.releaseGpu()
+      false
+  elif defined(linux) and (defined(amd64) or defined(arm64)):
+    let error = rt.glRenderer.render(frame)
+    if error == nil:
+      return true
+    rt.gpuError = error.msg
+    rt.releaseGpu()
+    false
+  elif defined(windows):
+    let error = rt.d3d11Renderer.render(frame)
+    if error.len == 0:
+      return true
+    rt.gpuError = error
+    rt.releaseGpu()
+    false
+  elif defined(emscripten):
     let error = rt.glRenderer.render(frame)
     if error == nil:
       return true
@@ -2273,7 +2279,8 @@ proc renderFrame(rt: Runtime; presentFrame = true) =
     if rt.autoScrollGridReorder(rt.gridReorder):
       rt.requestFrame()
   rt.updateTextInput()
-  rt.frameScene = layout.paintScene(scale)
+  let gpuFastPaths = presentFrame and rt.prepareGpu()
+  rt.frameScene = layout.paintScene(scale, gpuFastPaths = gpuFastPaths)
   rt.paintLocalDrag(rt.frameScene)
   rt.hasScene = true
   if presentFrame:
@@ -2342,7 +2349,8 @@ proc renderPoseOnlyFrame(rt: Runtime) =
   rt.frameLayout = layout
   rt.refreshPointer()
   rt.updateTextInput()
-  rt.frameScene = layout.paintScene(scale)
+  let gpuFastPaths = rt.prepareGpu()
+  rt.frameScene = layout.paintScene(scale, gpuFastPaths = gpuFastPaths)
   rt.paintLocalDrag(rt.frameScene)
   rt.hasScene = true
   layout.placeWebViews(rt.conn, scale)

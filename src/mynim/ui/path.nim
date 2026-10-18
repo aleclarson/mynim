@@ -30,6 +30,7 @@ type
     localeTag: string
     root: Rect
     scale, opacity: float32
+    gpuFastPaths: bool
 
 proc newPath*(): Path =
   ## Creates an empty vector path.
