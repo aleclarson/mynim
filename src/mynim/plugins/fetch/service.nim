@@ -324,6 +324,8 @@ proc fetchAsync(options: Options; request: Request; ctx: core.CancelCtx;
       if response == nil or response.bodyStream == nil:
         raise newException(ValueError,
           "fetch: transport returned an incomplete response")
+      if response.headers == nil:
+        response.headers = newHttpHeaders()
     else:
       response = await waitCancelable(
         client.request(current, httpMethod(httpVerb), body, requestHeaders), client, ctx)

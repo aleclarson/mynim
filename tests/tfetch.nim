@@ -241,6 +241,7 @@ block request_body_and_headers_are_sent:
 block custom_transport_receives_extension_methods_and_streams_response:
   var received: TransportRequest
   var calls = 0
+  var omitResponseHeaders = false
   proc roundTrip(request: TransportRequest; ctx: CancelCtx):
       Future[AsyncResponse] {.async.} =
     received = request
@@ -250,7 +251,8 @@ block custom_transport_receives_extension_methods_and_streams_response:
       request.headers.getOrDefault("x-check"))
     stream.complete()
     return AsyncResponse(version: "HTTP/1.1", status: "207 Multi-Status",
-      headers: newHttpHeaders([("X-Transport", "custom")]), bodyStream: stream)
+      headers: if omitResponseHeaders: nil else:
+        newHttpHeaders([("X-Transport", "custom")]), bodyStream: stream)
 
   let options = Options(transport: roundTrip)
   let (parts, err) = run(service.Request(url: "http://example.invalid/custom",
@@ -267,13 +269,22 @@ block custom_transport_receives_extension_methods_and_streams_response:
   doAssert parts[1].chunk == "PROPFIND:payload:sent"
   doAssert calls == 1
 
+  omitResponseHeaders = true
+  let (emptyHeaderParts, emptyHeaderError) = run(service.Request(
+    url: "http://example.invalid/custom", httpMethod: "PROPFIND",
+    redirect: "follow"), options)
+  doAssert emptyHeaderError == nil
+  doAssert emptyHeaderParts.len == 2
+  doAssert emptyHeaderParts[0].headers.len == 0
+  doAssert calls == 2
+
   let (invalidParts, invalidError) = run(service.Request(
     url: "http://example.invalid/custom", httpMethod: "PROPFIND\r\nX-Evil: yes",
     redirect: "follow"), options)
   doAssert invalidParts.len == 0
   doAssert invalidError != nil
   doAssert "invalid HTTP method" in invalidError.msg
-  doAssert calls == 1
+  doAssert calls == 2
 
 block configured_proxy_receives_absolute_http_target:
   let proxied = Options(proxy: newProxy(origin))
