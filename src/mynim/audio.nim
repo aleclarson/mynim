@@ -62,7 +62,7 @@ type
     rate: float64
     mono: bool
     frameCount: int64
-    playing, active, snap, fadeIn, closed: bool
+    playing, active, snap, fadeIn, closed, orphan: bool
     volume, pan, speed: float64
     looping: bool
     loopStart, loopEnd: int64
@@ -75,8 +75,10 @@ type
     gain, target, gainStep: array[4, float32]
     rampLeft: int
 
-  Player* = ref object ## A sound player with independent position and controls.
+  PlayerObj = object
     voice: Voice
+
+  Player* = ref PlayerObj ## A sound player with independent position and controls.
 
   WavDecoder = ref object of Decoder
     stream: Stream
@@ -111,6 +113,13 @@ const
   outputChannels = 2
   rampFrames = outputSampleRate div 200
   nullFrames = outputSampleRate div 100
+
+proc abandonPlayer(voice: Voice) {.raises: [].}
+
+proc `=destroy`(player: PlayerObj) =
+  if not player.voice.isNil:
+    abandonPlayer(player.voice)
+    `=destroy`(player.voice)
 
 proc audioError(message: string): ref AudioError =
   newException(AudioError, "audio: " & message)
@@ -404,6 +413,17 @@ proc close(voice: Voice) =
   voice.playing = false
   voice.source.close()
 
+proc abandonPlayer(voice: Voice) {.raises: [].} =
+  withLock audioLock:
+    if voice.source of StreamSource:
+      if voice.active and not voice.closed:
+        voice.orphan = true
+      else:
+        try:
+          voice.close()
+        except Exception:
+          discard
+
 proc ended(voice: Voice): bool =
   voice.endFrame >= 0 and voice.index >= voice.endFrame
 
@@ -537,7 +557,9 @@ proc mix(output: var seq[float32]): bool =
   for voice in voices:
     if voice.closed or not voice.mixVoice(output, masterVolume):
       voice.active = false
-      if voice.closed:
+      if voice.orphan:
+        voice.close()
+      elif voice.closed:
         voice.source.close()
       continue
     voices[write] = voice

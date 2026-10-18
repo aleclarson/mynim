@@ -57,6 +57,16 @@ proc waitClosed(decoder: TestDecoder) =
     sleep(1)
   doAssert false, "stream decoder did not close"
 
+proc waitAtEnd(source: StreamSource) =
+  for attempt in 0 ..< 2000:
+    acquire(source.lock)
+    let ended = source.atEnd
+    release(source.lock)
+    if ended:
+      return
+    sleep(1)
+  doAssert false, "stream decoder did not reach the end"
+
 proc frameTime(frame: int): Duration =
   initDuration(nanoseconds = int64(frame) * 1_000_000_000 div outputSampleRate)
 
@@ -189,3 +199,32 @@ block streamLoopRangeAndSeek:
   doAssert abs(seekOutput[checkFrame * 2] - expected) < 0.0001'f32
   seekPlayer.close()
   waitClosed(seekDecoder)
+
+block droppedPausedPlayerClosesDecoder:
+  resetAudioTest()
+  let decoder = TestDecoder(channelCount: 1, frameCount: -1)
+  var player = newPlayer(decoder)
+  let source = StreamSource(player.voice.source)
+  waitBuffered(source, 1000)
+  player = nil
+  waitClosed(decoder)
+  doAssert source.closed
+
+block droppedPlayingPlayerRunsToEndThenClosesDecoder:
+  resetAudioTest()
+  let decoder = TestDecoder(channelCount: 1, frameCount: 64)
+  var player = newPlayer(decoder)
+  let voice = player.voice
+  let source = StreamSource(voice.source)
+  waitBuffered(source, 64)
+  waitAtEnd(source)
+  player.play()
+  player = nil
+  doAssert voice.orphan
+  doAssert not decoder.closed.load(moAcquire)
+
+  var output = newSeq[float32](128 * outputChannels)
+  doAssert not mix(output)
+  doAssert not voice.active
+  doAssert voice.closed
+  waitClosed(decoder)

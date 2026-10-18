@@ -1,4 +1,4 @@
-import std/[assertions, streams, times]
+import std/[assertions, atomics, os, streams, times]
 import mynim/audio
 
 proc addText(bytes: var seq[byte]; text: string) =
@@ -63,6 +63,27 @@ proc bytesString(bytes: openArray[byte]): string =
     copyMem(addr result[0], unsafeAddr bytes[0], bytes.len)
 
 proc closeTo(a, b: float32): bool = abs(a - b) < 0.00001'f32
+
+type ClosingDecoder = ref object of Decoder
+  closed: Atomic[bool]
+
+method sampleRate(decoder: ClosingDecoder): int = 48_000
+method channels(decoder: ClosingDecoder): int = 1
+method length(decoder: ClosingDecoder): int64 = -1
+method setPosition(decoder: ClosingDecoder; frame: int64) = discard
+method read(decoder: ClosingDecoder; samples: var seq[float32]): int =
+  for sample in samples.mitems:
+    sample = 0
+  samples.len
+method close(decoder: ClosingDecoder) =
+  decoder.closed.store(true, moRelease)
+
+proc waitClosed(decoder: ClosingDecoder) =
+  for attempt in 0 ..< 2000:
+    if decoder.closed.load(moAcquire):
+      return
+    sleep(1)
+  doAssert false, "dropped stream player did not close its decoder"
 
 block decodesIntegerPcmWidths:
   let eight = decodeSound(wav(1, 1, 8, @[0'u8, 128, 255]))
@@ -162,3 +183,9 @@ block storesGeneratedSamples:
   let sound = newSound(8000, 2, @[1.0'f32, -1.0, 0.5])
   doAssert sound.channels() == 2
   doAssert sound.samples() == @[1.0'f32, -1.0]
+
+block droppingPausedStreamPlayerClosesDecoder:
+  let decoder = ClosingDecoder()
+  var player = newPlayer(decoder)
+  player = nil
+  waitClosed(decoder)
