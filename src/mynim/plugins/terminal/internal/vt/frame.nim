@@ -21,11 +21,9 @@ type
     colors*: RenderColors
     viewport*: seq[TerminalFrameRow]
 
-proc snapshot*(state: GhosttyRenderState;
-               terminal: GhosttyTerminal): TerminalFrame =
-  ## Updates render state and copies every viewport row into Nim-owned data.
+proc snapshotCurrent*(state: GhosttyRenderState): TerminalFrame =
+  ## Copies the already-updated render state into Nim-owned data.
   ## Calls that mutate or read the render state must be serialized.
-  state.update(terminal)
   let (cols, rows) = state.size()
   result.cols = cols
   result.rows = rows
@@ -59,3 +57,9 @@ proc snapshot*(state: GhosttyRenderState;
       row.cells[x] = TerminalFrameCell(
         cell: cell, codepoints: move(codepoints), style: style)
     result.viewport.add(move(row))
+
+proc snapshot*(state: GhosttyRenderState;
+               terminal: GhosttyTerminal): TerminalFrame =
+  ## Updates render state and copies every viewport row into Nim-owned data.
+  state.update(terminal)
+  state.snapshotCurrent()
