@@ -21,6 +21,7 @@ type
   TerminalResetFn* = proc(terminal, userdata: pointer) {.cdecl.}
   TerminalClipboardWriteFn* = proc(terminal, userdata: pointer;
     request: ptr GhosttyClipboardWrite) {.cdecl.}
+  TerminalClipboardReadFn* = proc(terminal, userdata, request: pointer) {.cdecl.}
   TerminalDesktopNotificationFn* = proc(terminal, userdata: pointer;
     notification: ptr GhosttyTerminalDesktopNotification) {.cdecl.}
   TerminalCallbacks* = object
@@ -31,6 +32,7 @@ type
     renderHold*: TerminalRenderHoldFn
     reset*: TerminalResetFn
     clipboardWrite*: TerminalClipboardWriteFn
+    clipboardRead*: TerminalClipboardReadFn
     desktopNotification*: TerminalDesktopNotificationFn
 
 const
@@ -42,6 +44,7 @@ const
   optionPwdChanged = 25'i32
   optionClipboardWrite = 26'i32
   optionDesktopNotification = 29'i32
+  optionClipboardRead = 38'i32
   optionRenderHold = 41'i32
   optionReset = 43'i32
 
@@ -76,6 +79,8 @@ proc setCallbacks*(terminal: GhosttyTerminal; userdata: pointer;
       callbackPtr(callbacks.pwdChanged))
     setOption(setProc, handle, optionClipboardWrite,
       callbackPtr(callbacks.clipboardWrite))
+    setOption(setProc, handle, optionClipboardRead,
+      callbackPtr(callbacks.clipboardRead))
     setOption(setProc, handle, optionDesktopNotification,
       callbackPtr(callbacks.desktopNotification))
     setOption(setProc, handle, optionRenderHold,
@@ -87,6 +92,7 @@ proc setCallbacks*(terminal: GhosttyTerminal; userdata: pointer;
     discard setProc(handle, optionTitleChanged, nil)
     discard setProc(handle, optionPwdChanged, nil)
     discard setProc(handle, optionClipboardWrite, nil)
+    discard setProc(handle, optionClipboardRead, nil)
     discard setProc(handle, optionDesktopNotification, nil)
     discard setProc(handle, optionRenderHold, nil)
     discard setProc(handle, optionReset, nil)
@@ -103,6 +109,7 @@ proc clearCallbacks*(terminal: GhosttyTerminal) =
   setOption(setProc, handle, optionTitleChanged, nil)
   setOption(setProc, handle, optionPwdChanged, nil)
   setOption(setProc, handle, optionClipboardWrite, nil)
+  setOption(setProc, handle, optionClipboardRead, nil)
   setOption(setProc, handle, optionDesktopNotification, nil)
   setOption(setProc, handle, optionRenderHold, nil)
   setOption(setProc, handle, optionReset, nil)

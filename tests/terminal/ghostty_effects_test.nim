@@ -34,6 +34,11 @@ proc onReset(rawTerminal, userdata: pointer) {.cdecl.} =
   discard rawTerminal
   inc cast[ptr EffectProbe](userdata).resets
 
+proc onClipboardReadDenied(rawTerminal, userdata, request: pointer) {.cdecl.} =
+  discard rawTerminal
+  discard userdata
+  discard request
+
 proc callbacks(): TerminalCallbacks =
   TerminalCallbacks(
     writePty: onWritePty,
@@ -41,7 +46,8 @@ proc callbacks(): TerminalCallbacks =
     titleChanged: onTitleChanged,
     pwdChanged: onPwdChanged,
     renderHold: onRenderHold,
-    reset: onReset)
+    reset: onReset,
+    clipboardRead: onClipboardReadDenied)
 
 suite "Ghostty terminal effects":
   test "closed terminals reject callback registration":
@@ -71,6 +77,9 @@ suite "Ghostty terminal effects":
     check probe.renderHolds == @[true, false]
     check terminal.title() == "Mynim"
     check terminal.pwd() == "file:///tmp/mynim"
+
+    terminal.write("\x1b]52;c;?\x1b\\")
+    check probe.replies == "\x1b]52;c;\x1b\\"
 
     terminal.write("\x1bc")
     check probe.resets == 1

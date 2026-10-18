@@ -256,6 +256,12 @@ proc onClipboardWrite(rawTerminal, userdata: pointer;
       session.recordInputError(error.msg)
   replyFn(request, addr reply)
 
+proc onClipboardReadDenied(rawTerminal, userdata, request: pointer) {.cdecl.} =
+  ## Leave reads unanswered so Ghostty emits the protocol's denied response.
+  discard rawTerminal
+  discard userdata
+  discard request
+
 proc onDesktopNotification(rawTerminal, userdata: pointer;
     notification: ptr GhosttyTerminalDesktopNotification) {.cdecl.} =
   discard rawTerminal
@@ -284,6 +290,7 @@ proc sessionCallbacks(): TerminalCallbacks =
     renderHold: onRenderHold,
     reset: onReset,
     clipboardWrite: onClipboardWrite,
+    clipboardRead: onClipboardReadDenied,
     desktopNotification: onDesktopNotification)
 
 proc dispatchNotifications(session: TerminalSession) =

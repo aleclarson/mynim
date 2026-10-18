@@ -72,6 +72,24 @@ suite "native Terminal API":
       deniedTester.frame()
       check deniedTester.clipboard() == "preserved"
 
+  test "denies OSC 52 clipboard reads by default":
+    if getEnv("MYNIM_GHOSTTY_VT").len == 0:
+      skip()
+    when defined(windows):
+      skip()
+    else:
+      let script = "stty -echo -icanon min 0 time 10; " &
+        "printf '\\033]52;c;?\\033\\\\'; " &
+        "response=$(dd bs=1 count=9 2>/dev/null); " &
+        "stty icanon echo; " &
+        "expected=$(printf '\\033]52;c;\\033\\\\'); " &
+        "test \"$response\" = \"$expected\""
+      let terminal = newTerminal(TerminalOptions(command: @[
+        "/bin/sh", "-c", script]))
+      defer: terminal.close()
+      check terminal.waitForExit() == 0
+      check terminal.failure().len == 0
+
   test "builds a GPU scene and sizes the PTY from the native view":
     if getEnv("MYNIM_GHOSTTY_VT").len == 0:
       skip()
