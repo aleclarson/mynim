@@ -36,6 +36,42 @@ type
     ## Consume the secondary click without an action.
     rightClickIgnore
 
+  TerminalAction* = enum
+    ## Removes a binding; the key goes to the terminal program.
+    terminalActionNone,
+    ## Consumes a key without doing anything.
+    terminalActionIgnore,
+    ## Copies a selection to the clipboard.
+    terminalActionCopy,
+    ## Pastes the clipboard through the configured paste path.
+    terminalActionPaste,
+    ## Selects all retained terminal content.
+    terminalActionSelectAll,
+    ## Clears scrollback and rows above the cursor outside the alternate screen.
+    terminalActionClearScreen,
+    ## Increases, decreases, or resets the terminal font size.
+    terminalActionIncreaseFontSize,
+    terminalActionDecreaseFontSize,
+    terminalActionResetFontSize,
+    ## Scrolls the primary-screen history by a page or to either end.
+    terminalActionScrollPageUp,
+    terminalActionScrollPageDown,
+    terminalActionScrollToTop,
+    terminalActionScrollToBottom
+
+  TerminalKeybind* = object
+    ## Binds an exact modifier/key pair to an action.
+    mods*: ui.Modifiers
+    key*: ui.Key
+    action*: TerminalAction
+    ## When true, a key passes to the program if the action has no work.
+    performable*: bool
+
+  TerminalZoom* = object
+    ## `steps` changes font size by one DIP per step; `reset` restores the base.
+    steps*: int
+    reset*: bool
+
   TerminalClipboardAccess* = enum
     ## Program reads are refused by default.
     clipboardReadDeny,
@@ -85,6 +121,10 @@ type
     scrollbackMaxBytes*: int
     copyOnSelect*: TerminalCopyOnSelect
     rightClick*: TerminalRightClickAction
+    ## Replaces defaults with bindings for the same exact modifiers and key.
+    keybinds*: seq[TerminalKeybind]
+    ## Starts without platform defaults; entries in `keybinds` still apply.
+    noDefaultKeybinds*: bool
     noBlink*, optionAsAlt*: bool
     ## Prevents terminal programs from writing to the system clipboard.
     noClipboardWrite*: bool
@@ -108,6 +148,10 @@ type
     ## it pending.
     onClipboardRequest*: proc(request: TerminalClipboardRequest) {.closure.}
     onKey*: proc(mods: ui.Modifiers; key: ui.Key): bool {.closure.}
+    ## Handles whole-row wheel scroll before scrollback; true consumes it.
+    onScroll*: proc(rows: int): bool {.closure.}
+    ## Handles font zoom; false applies the change to this terminal's font.
+    onZoom*: proc(zoom: TerminalZoom): bool {.closure.}
     ## Handles a modifier-clicked terminal link and reports whether it opened.
     openLink*: proc(link: string): bool {.closure.}
 
@@ -117,9 +161,10 @@ type
     hasPendingKey: bool
     grid: TerminalGrid
     bounds: ui.Rect
-    scale, scrollRemainder: float32
+    scale, scrollRemainder, zoomRemainder: float32
     pointerX, pointerY, scrollbarWidth, scrollbarGrabOffset: float32
     blinkStart: MonoTime
+    fontSize: float32
     preedit: string
     preeditCaret: int
     pendingTyped: bool
@@ -137,6 +182,7 @@ type
     library: GhosttyVT
     session: TerminalSession
     state: TerminalViewState
+    keybinds: seq[TerminalKeybind]
     closed: bool
 
 proc lightTheme*(): TerminalTheme =
@@ -172,6 +218,72 @@ let
 proc defaultTerminalOptions*(): TerminalOptions =
   TerminalOptions(font: defaultTerminalPaintOptions(),
     scrollbackMaxBytes: 10 * 1024 * 1024)
+
+proc defaultTerminalKeybinds*(): seq[TerminalKeybind] =
+  template addKeybind(modifierValue: ui.Modifiers; keyValue: ui.Key;
+                      actionValue: TerminalAction) =
+    result.add(TerminalKeybind(mods: modifierValue, key: keyValue,
+      action: actionValue))
+  template performable(modifierValue: ui.Modifiers; keyValue: ui.Key;
+                       actionValue: TerminalAction) =
+    result.add(TerminalKeybind(mods: modifierValue, key: keyValue,
+      action: actionValue,
+      performable: true))
+  template bindScroll(mods: ui.Modifiers) =
+    performable(mods, ui.keyPageUp, terminalActionScrollPageUp)
+    performable(mods, ui.keyPageDown, terminalActionScrollPageDown)
+    performable(mods, ui.keyHome, terminalActionScrollToTop)
+    performable(mods, ui.keyEnd, terminalActionScrollToBottom)
+
+  when defined(macosx):
+    let command = ui.modSuper
+    addKeybind(command, ui.keyC, terminalActionCopy)
+    addKeybind(command, ui.keyV, terminalActionPaste)
+    addKeybind(command, ui.keyA, terminalActionSelectAll)
+    performable(command, ui.keyK, terminalActionClearScreen)
+    addKeybind(command, ui.keyEqual, terminalActionIncreaseFontSize)
+    addKeybind(command or ui.modShift, ui.keyEqual,
+      terminalActionIncreaseFontSize)
+    addKeybind(command, ui.keyMinus, terminalActionDecreaseFontSize)
+    addKeybind(command, ui.key0, terminalActionResetFontSize)
+    bindScroll(command)
+    performable(ui.modShift, ui.keyPageUp, terminalActionScrollPageUp)
+    performable(ui.modShift, ui.keyPageDown, terminalActionScrollPageDown)
+  else:
+    addKeybind(ui.modCtrl or ui.modShift, ui.keyC, terminalActionCopy)
+    addKeybind(ui.modCtrl or ui.modShift, ui.keyV, terminalActionPaste)
+    addKeybind(ui.modCtrl, ui.keyInsert, terminalActionCopy)
+    addKeybind(ui.modShift, ui.keyInsert, terminalActionPaste)
+    addKeybind(ui.modCtrl or ui.modShift, ui.keyA, terminalActionSelectAll)
+    addKeybind(ui.modCtrl, ui.keyEqual, terminalActionIncreaseFontSize)
+    addKeybind(ui.modCtrl or ui.modShift, ui.keyEqual,
+      terminalActionIncreaseFontSize)
+    addKeybind(ui.modCtrl, ui.keyMinus, terminalActionDecreaseFontSize)
+    addKeybind(ui.modCtrl, ui.key0, terminalActionResetFontSize)
+    when defined(windows):
+      performable(ui.modCtrl, ui.keyC, terminalActionCopy)
+      performable(ui.modCtrl, ui.keyV, terminalActionPaste)
+      performable(ui.modCtrl or ui.modShift, ui.keyK,
+        terminalActionClearScreen)
+      performable(ui.modShift, ui.keyPageUp, terminalActionScrollPageUp)
+      performable(ui.modShift, ui.keyPageDown, terminalActionScrollPageDown)
+      bindScroll(ui.modCtrl or ui.modShift)
+    else:
+      bindScroll(ui.modShift)
+
+proc resolveTerminalKeybinds(options: TerminalOptions): seq[TerminalKeybind] =
+  if not options.noDefaultKeybinds:
+    result = defaultTerminalKeybinds()
+  for binding in options.keybinds:
+    var index = 0
+    while index < result.len:
+      if result[index].mods == binding.mods and
+          result[index].key == binding.key:
+        result.delete(index)
+      else:
+        inc index
+    if binding.action != terminalActionNone:
+      result.add(binding)
 
 proc allow*(request: TerminalClipboardRequest) =
   ## Allows this read once its view can fetch the clipboard on the UI thread.
@@ -267,6 +379,7 @@ proc newTerminal*(options = defaultTerminalOptions()): Terminal =
   let options = options.normalized()
   new(result)
   result.options = options
+  result.keybinds = resolveTerminalKeybinds(options)
   result.state = TerminalViewState(blinkStart: getMonoTime(),
     pasteProviders: initTable[uint64, PendingPasteProvider]())
   result.library = loadGhosttyVT()
@@ -530,7 +643,7 @@ proc selectAll(terminal: Terminal; services: ui.Services) =
     discard terminal.copySelection(services, clear = false)
   services.invalidate()
 
-proc pasteClipboard(terminal: Terminal; services: ui.Services) =
+proc pasteClipboard(terminal: Terminal; services: ui.Services): bool {.discardable.} =
   let formats = services.clipboardFormats()
   if formats.len == 0:
     return
@@ -540,13 +653,14 @@ proc pasteClipboard(terminal: Terminal; services: ui.Services) =
   else:
     services.readClipboardData(transfer.Text)
   if terminal.options.onPaste != nil and terminal.options.onPaste(data):
-    return
+    return true
   terminal.state.preedit.setLen(0)
   terminal.state.hasPendingKey = false
   terminal.session.scrollToBottom()
   terminal.session.clearSelection()
   # Keep the original clipboard formats for PasteNoText when only text was read.
   terminal.pasteDataWithHeld(data, formats)
+  true
 
 proc tickSelection(terminal: Terminal) =
   if not terminal.state.selecting or not terminal.state.ticking or
@@ -862,6 +976,71 @@ proc sendPendingText(terminal: Terminal; text: string) =
     key: pending.key, mods: keyMods(pending.mods), consumed: consumed,
     text: text, unshifted: pending.unshifted), terminal.options.optionAsAlt)
 
+proc takeKey(terminal: Terminal; key: ui.Key) =
+  if key notin terminal.state.takenKeys:
+    terminal.state.takenKeys.add(key)
+  terminal.state.pendingTyped = true
+
+proc zoom(terminal: Terminal; services: ui.Services;
+          request: TerminalZoom): bool =
+  if terminal.options.onZoom != nil and terminal.options.onZoom(request):
+    services.invalidate()
+    return true
+  if request.reset:
+    terminal.state.fontSize = 0
+  elif request.steps != 0:
+    var baseSize = terminal.options.font.fontSize
+    if classify(baseSize) in {fcNan, fcInf, fcNegInf} or baseSize <= 0:
+      baseSize = defaultTerminalPaintOptions().fontSize
+    let currentSize = if terminal.state.fontSize > 0:
+        terminal.state.fontSize else: baseSize
+    terminal.state.fontSize = max(currentSize + float32(request.steps), 1'f32)
+  services.invalidate()
+  true
+
+proc performAction(terminal: Terminal; services: ui.Services;
+                   binding: TerminalKeybind): bool =
+  case binding.action
+  of terminalActionNone:
+    return false
+  of terminalActionIgnore:
+    return true
+  of terminalActionCopy:
+    return terminal.copySelection(services, clear = binding.performable)
+  of terminalActionPaste:
+    return terminal.pasteClipboard(services)
+  of terminalActionSelectAll:
+    terminal.selectAll(services)
+    return true
+  of terminalActionClearScreen:
+    result = terminal.session.clearScreen()
+    if result:
+      services.invalidate()
+  of terminalActionIncreaseFontSize:
+    return terminal.zoom(services, TerminalZoom(steps: 1))
+  of terminalActionDecreaseFontSize:
+    return terminal.zoom(services, TerminalZoom(steps: -1))
+  of terminalActionResetFontSize:
+    return terminal.zoom(services, TerminalZoom(reset: true))
+  of terminalActionScrollPageUp, terminalActionScrollPageDown,
+      terminalActionScrollToTop, terminalActionScrollToBottom:
+    if terminal.session.activeScreen():
+      return false
+    let page = max(terminal.session.size().rows - 1, 1)
+    case binding.action
+    of terminalActionScrollPageUp:
+      terminal.session.scrollBy(-page)
+    of terminalActionScrollPageDown:
+      terminal.session.scrollBy(page)
+    of terminalActionScrollToTop:
+      terminal.session.scrollToOffset(0)
+    of terminalActionScrollToBottom:
+      terminal.session.scrollToBottom()
+    else:
+      discard
+    services.invalidate()
+    return true
+
 proc handleInput(terminal: Terminal; services: ui.Services;
                  event: ui.InputEvent): bool =
   if terminal == nil or terminal.closed:
@@ -872,33 +1051,15 @@ proc handleInput(terminal: Terminal; services: ui.Services;
     terminal.flushPendingKey()
     if terminal.options.onKey != nil and
         terminal.options.onKey(event.mods, event.key):
-      if event.key notin terminal.state.takenKeys:
-        terminal.state.takenKeys.add(event.key)
-      terminal.state.pendingTyped = true
+      terminal.takeKey(event.key)
       return true
-    var clipboardShortcutMods = false
-    when defined(macosx):
-      clipboardShortcutMods = (event.mods and ui.modSuper) != 0
-    else:
-      clipboardShortcutMods =
-        (event.mods and (ui.modCtrl or ui.modShift)) ==
-        (ui.modCtrl or ui.modShift)
-    if clipboardShortcutMods and event.key == ui.keyC:
-      discard terminal.copySelection(services, clear = true)
-      if event.key notin terminal.state.takenKeys:
-        terminal.state.takenKeys.add(event.key)
-      terminal.state.pendingTyped = true
-      return true
-    if clipboardShortcutMods and event.key == ui.keyV:
-      terminal.state.preedit.setLen(0)
-      terminal.state.hasPendingKey = false
-      terminal.session.scrollToBottom()
-      terminal.session.clearSelection()
-      terminal.session.paste(services.readClipboard())
-      if event.key notin terminal.state.takenKeys:
-        terminal.state.takenKeys.add(event.key)
-      terminal.state.pendingTyped = true
-      return true
+    for binding in terminal.keybinds:
+      if binding.mods == event.mods and binding.key == event.key:
+        let performed = terminal.performAction(services, binding)
+        if performed or not binding.performable:
+          terminal.takeKey(event.key)
+          return true
+        break
     if (event.mods and ui.modSuper) != 0:
       return false
     let sourceKey = if event.physicalKey != ui.keyUnknown:
@@ -1084,6 +1245,18 @@ proc handleInput(terminal: Terminal; services: ui.Services;
   of ui.InputKind.InputScroll:
     if not terminal.state.hasGrid or event.dy == 0:
       return false
+    let zoomModifier = when defined(macosx): ui.modSuper else: ui.modCtrl
+    if (event.mods and zoomModifier) != 0:
+      if event.precise:
+        terminal.state.zoomRemainder -= event.dy
+        let steps = int(terminal.state.zoomRemainder / 40'f32)
+        if steps != 0:
+          terminal.state.zoomRemainder -= float32(steps) * 40'f32
+          discard terminal.zoom(services, TerminalZoom(steps: steps))
+      else:
+        discard terminal.zoom(services, TerminalZoom(
+          steps: if event.dy < 0: 1 else: -1))
+      return true
     let grid = terminal.state.grid
     let cellHeight = max(grid.cellHeight, 1'f32)
     var delta = event.dy
@@ -1095,8 +1268,15 @@ proc handleInput(terminal: Terminal; services: ui.Services;
       return true
     terminal.state.scrollRemainder -= float32(rows) * cellHeight
     let scale = max(terminal.state.scale, 0.01'f32)
-    if terminal.session.mouseTracking() and
-        (event.mods and ui.modShift) == 0:
+    let wheelTracked = terminal.session.mouseTracking() and
+      (event.mods and ui.modShift) == 0
+    let wheelArrows = terminal.session.activeScreen() and
+      terminal.session.mode(vtTerminal.modeAltScroll)
+    if not wheelTracked and not wheelArrows and
+        terminal.options.onScroll != nil and
+        terminal.options.onScroll(rows):
+      return true
+    if wheelTracked:
       let paddingX = int(round(terminal.options.font.paddingX * scale))
       let paddingY = int(round(terminal.options.font.paddingY * scale))
       let screenWidth = paddingX * 2 + grid.cols * grid.cellWidthPixels
@@ -1108,8 +1288,7 @@ proc handleInput(terminal: Terminal; services: ui.Services;
           screenWidth, screenHeight, grid.cellWidthPixels,
           grid.cellHeightPixels, paddingX, paddingY, false)
       return true
-    if terminal.session.activeScreen() and
-        terminal.session.mode(vtTerminal.modeAltScroll):
+    if wheelArrows:
       let key = if rows < 0: vtInput.keyArrowUp else: vtInput.keyArrowDown
       for _ in 0 ..< abs(rows):
         terminal.session.sendKey(vtInput.KeyEvent(action: vtInput.keyPress,
@@ -1194,6 +1373,8 @@ proc view*(context: ui.Context; terminal: Terminal): ui.Element =
       terminal.state.appliedTheme = theme
       themeChanged = true
     var paintOptions = terminal.options.font
+    if terminal.state.fontSize > 0:
+      paintOptions.fontSize = terminal.state.fontSize
     paintOptions.focused = focused
     paintOptions.cursorBlinkOn = cursorBlinkOn
     paintOptions.preedit = terminal.state.preedit

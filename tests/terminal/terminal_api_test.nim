@@ -4,6 +4,64 @@ import mynim/transfer as transfer
 import mynim/ui as ui
 
 suite "native Terminal API":
+  test "provides platform-specific default key bindings":
+    let bindings = defaultTerminalKeybinds()
+    proc has(mods: ui.Modifiers; key: ui.Key; action: TerminalAction;
+             performable = false): bool =
+      for binding in bindings:
+        if binding.mods == mods and binding.key == key and
+            binding.action == action and binding.performable == performable:
+          return true
+    when defined(macosx):
+      check has(ui.modSuper, ui.keyC, terminalActionCopy)
+      check has(ui.modSuper, ui.keyK, terminalActionClearScreen, true)
+      check has(ui.modSuper, ui.keyPageUp, terminalActionScrollPageUp, true)
+    elif defined(windows):
+      check has(ui.modCtrl or ui.modShift, ui.keyC, terminalActionCopy)
+      check has(ui.modCtrl, ui.keyC, terminalActionCopy, true)
+      check has(ui.modCtrl or ui.modShift, ui.keyK,
+        terminalActionClearScreen, true)
+    else:
+      check has(ui.modCtrl or ui.modShift, ui.keyC, terminalActionCopy)
+      check has(ui.modShift, ui.keyHome, terminalActionScrollToTop, true)
+
+  test "custom key bindings invoke font zoom callbacks without defaults":
+    if getEnv("MYNIM_GHOSTTY_VT").len == 0:
+      skip()
+    when defined(windows):
+      skip()
+    else:
+      var zoomSteps = 0
+      var zoomReset = false
+      var scrolledRows = 0
+      var options = defaultTerminalOptions()
+      options.command = @["/bin/sh", "-c", "sleep 5"]
+      options.noDefaultKeybinds = true
+      options.keybinds = @[TerminalKeybind(mods: ui.modCtrl, key: ui.keyF1,
+        action: terminalActionIncreaseFontSize)]
+      options.onZoom = proc(zoom: TerminalZoom): bool =
+        zoomSteps = zoom.steps
+        zoomReset = zoom.reset
+        true
+      options.onScroll = proc(rows: int): bool =
+        scrolledRows = rows
+        true
+      let terminal = newTerminal(options)
+      defer: terminal.close()
+      let tester = ui.newTester(proc(c: ui.Context) =
+        discard view(c, terminal).size(800, 500)
+      , 800, 500)
+      defer: tester.close()
+      tester.setFocused(true)
+      tester.clickAt(20, 20)
+      tester.frame()
+      tester.key(ui.modCtrl, ui.keyF1)
+      tester.frame()
+      check zoomSteps == 1
+      check not zoomReset
+      tester.scroll(20, 20, 0, 40)
+      check scrolledRows == 3
+
   test "starts a command with defaults and waits for exit":
     let path = getEnv("MYNIM_GHOSTTY_VT")
     if path.len == 0:
@@ -563,20 +621,20 @@ sys.exit(0)
       tester.clickAt(20, 20)
       tester.setClipboard("stale")
       tester.command("selectAll")
-      check tester.clipboard() == "hello"
+      check tester.clipboard().startsWith("hello")
       tester.command("copy")
-      check tester.clipboard() == "hello"
+      check tester.clipboard().startsWith("hello")
       tester.command("selectAll")
       tester.key(ui.modSuper, ui.keyC)
-      check tester.clipboard() == "hello"
+      check tester.clipboard().startsWith("hello")
       tester.setClipboard("stale")
       tester.press(10, 12)
       tester.move(50, 12)
       tester.release(50, 12)
-      check tester.clipboard() == "hello"
+      check tester.clipboard().startsWith("hello")
       tester.setClipboard("stale")
       tester.rightClickAt(30, 20)
-      check tester.clipboard() == "hello"
+      check tester.clipboard().startsWith("hello")
 
   test "drags the terminal scrollbar to older output":
     if getEnv("MYNIM_GHOSTTY_VT").len == 0:

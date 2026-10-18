@@ -132,6 +132,46 @@ proc text(frame: TerminalFrame): string =
     result.add '\n'
 
 suite "Ghostty PTY terminal session":
+  test "clear screen drops history and keeps the cursor row on the primary screen":
+    let path = getEnv("MYNIM_GHOSTTY_VT")
+    if path.len == 0:
+      skip()
+    let library = openGhosttyVT(path)
+    defer: library.close()
+    let conn = newTestTerminalConn()
+    let session = newTerminalSession(library, PtyOptions(),
+      connection = conn, cols = 80, rows = 24)
+    defer: session.close()
+
+    var output = ""
+    for row in 0 ..< 29:
+      output.add("line" & $row & "\r\n")
+    output.add("line29")
+    conn.feed(output)
+    var ready = false
+    for _ in 0 ..< 200:
+      if text(session.snapshot()).contains("line29"):
+        ready = true
+        break
+      sleep(10)
+    check ready
+    check session.scrollbar().total > 24
+    check session.clearScreen()
+    let cleared = text(session.snapshot())
+    check cleared.contains("line29")
+    check not cleared.contains("line28")
+    check session.scrollbar().total == 24
+
+    conn.feed("\e[?1049h")
+    var alternate = false
+    for _ in 0 ..< 200:
+      if session.activeScreen():
+        alternate = true
+        break
+      sleep(10)
+    check alternate
+    check not session.clearScreen()
+
   test "connects a caller stream for terminal output, input, resize, and EOF":
     let path = getEnv("MYNIM_GHOSTTY_VT")
     if path.len == 0:

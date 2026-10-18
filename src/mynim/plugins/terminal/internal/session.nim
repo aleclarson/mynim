@@ -1377,6 +1377,26 @@ proc clearScrollback*(session: TerminalSession) =
   finally:
     session.terminalGuard.release()
 
+proc clearScreen*(session: TerminalSession): bool =
+  ## Clears primary-screen history and rows above the cursor like Kitty's
+  ## clear-terminal-to-cursor action. The alternate screen is left alone.
+  if session.isNil:
+    raise newException(ValueError, "terminal session is nil")
+  session.lockTerminal()
+  try:
+    if session.terminal.activeScreen():
+      return false
+    session.terminal.setSelection(none(GhosttySelection))
+    session.terminal.scrollToBottom()
+    let (column, row) = session.terminal.cursor()
+    var command = "\x1b[3J"
+    if row > 0:
+      command.add("\x1b[H\x1b[" & $row & "M\x1b[1;" & $(column + 1) & "H")
+    session.terminal.write(command)
+    result = true
+  finally:
+    session.terminalGuard.release()
+
 proc scrollForSelection*(session: TerminalSession; rows: int) =
   ## Scrolls the viewport and keeps terminal access serialized with its gesture.
   if session.isNil:
