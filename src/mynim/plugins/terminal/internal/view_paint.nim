@@ -1,6 +1,6 @@
 ## Paints owned Ghostty terminal frames through Mynim's native UI painter.
 
-import std/[math, options, strutils, unicode]
+import std/[math, options, strutils, tables, unicode]
 import mynim/ui as ui
 import ./vt/[frame, render, terminal]
 
@@ -24,6 +24,15 @@ type
     cellWidth*, cellHeight*: float32
     cellWidthPixels*, cellHeightPixels*: int
     textOffsetY*: float32
+    baselineOffset*: float32
+
+  ShapeKey = tuple[text, family, features, lang: string, size: float32,
+    weight: int, italic, thicken, antialiased: bool]
+
+  TerminalPaintCache* = ref object
+    ## UI-thread cache of shaped terminal runs, bounded to recent content.
+    shapes: Table[ShapeKey, seq[ui.Glyph]]
+    order: seq[ShapeKey]
 
   TerminalScrollbarGeometry* = object
     track*, thumb*: ui.Rect
@@ -36,9 +45,20 @@ type
     underline: int
 
   TextStyle = object
-    foreground, underlineColor: ui.Color
-    bold, italic, strike: bool
-    underline: int
+    foreground: ui.Color
+    bold, italic: bool
+
+  PaintedGlyphRun = object
+    glyphs: seq[ui.Glyph]
+    columns: seq[int]
+    foreground: ui.Color
+
+  DecorationSpan = object
+    first, past: int
+    kind: int
+    color: ui.Color
+
+const printableAscii = " !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~"
 
 proc defaultTerminalPaintOptions*(fontSize = 13'f32): TerminalPaintOptions =
   ## Returns the default monospace terminal text options.
@@ -52,6 +72,26 @@ proc defaultTerminalPaintOptions*(fontSize = 13'f32): TerminalPaintOptions =
     paddingY: 4,
     focused: true,
     cursorBlinkOn: true)
+
+proc newTerminalPaintCache*(): TerminalPaintCache =
+  ## Creates a bounded shape cache for one terminal view.
+  TerminalPaintCache(shapes: initTable[ShapeKey, seq[ui.Glyph]]())
+
+proc shape(cache: TerminalPaintCache; text: string;
+           font: ui.Font): seq[ui.Glyph] =
+  if cache == nil:
+    return ui.shape(text, font)
+  let key: ShapeKey = (text, font.family, font.features, font.lang, font.size,
+    font.weight, font.italic, font.thicken, font.antialiased)
+  if cache.shapes.hasKey(key):
+    return cache.shapes[key]
+  result = ui.shape(text, font)
+  const maxCachedShapes = 512
+  if cache.order.len >= maxCachedShapes:
+    cache.shapes.del(cache.order[0])
+    cache.order.delete(0)
+  cache.shapes[key] = result
+  cache.order.add(key)
 
 proc uiColor(value: RGB): ui.Color = ui.rgb(value.r, value.g, value.b)
 
@@ -113,25 +153,33 @@ proc paintCell(cell: TerminalFrameCell; colors: RenderColors): PaintedCell =
   result.underline = style.underline
 
 proc grid*(painter: var ui.Painter; bounds: ui.Rect;
-           options: TerminalPaintOptions): TerminalGrid =
+    options: TerminalPaintOptions; cache: TerminalPaintCache = nil): TerminalGrid =
   ## Measures the fixed-width cell grid that fits in an element's bounds.
   let options = options.normalized()
   let fontFamily = options.fontFamily
   let fontSize = options.fontSize
   let fontWeight = options.fontWeight
   let features = options.fontFeatures
-  let measured = painter.measureText(0, ui.Span(text: "M", font: fontFamily,
-    features: features, size: fontSize, weight: fontWeight))
-  let naturalHeight = max(measured.height, fontSize)
+  let font = ui.Font(family: fontFamily, features: features,
+    size: fontSize, weight: fontWeight)
+  let fontMetrics = font.metrics()
+  let naturalHeight = fontMetrics.ascent + fontMetrics.descent +
+    fontMetrics.lineGap
+  var maxAdvance = 0'f32
+  for glyph in cache.shape(printableAscii, font):
+    maxAdvance = max(maxAdvance, glyph.advance)
   let lineHeight = if options.lineHeight > 0: options.lineHeight else: 1'f32
   let scale = max(painter.scale(), 0.01'f32)
-  result.cellWidthPixels = max(1, int(round(
-    max(measured.width, max(fontSize * 0.5'f32, 1'f32)) * scale)))
-  result.cellHeightPixels = max(1, int(round(
-    max(naturalHeight * lineHeight, 1'f32) * scale)))
+  result.cellWidthPixels = max(1, int(ceil(float64(maxAdvance * scale -
+    0.05'f32))))
+  result.cellHeightPixels = max(1, int(ceil(float64(naturalHeight *
+    lineHeight * scale - 0.05'f32))))
   result.cellWidth = float32(result.cellWidthPixels) / scale
   result.cellHeight = float32(result.cellHeightPixels) / scale
   result.textOffsetY = max((result.cellHeight - naturalHeight) / 2, 0'f32)
+  result.baselineOffset = float32(round((float32(result.cellHeightPixels) -
+    (fontMetrics.ascent + fontMetrics.descent) * scale) / 2 +
+    fontMetrics.ascent * scale)) / scale
   let paddingX = max(0, int(round(max(options.paddingX, 0'f32) * scale)))
   let paddingY = max(0, int(round(max(options.paddingY, 0'f32) * scale)))
   let width = max(0, int(round(max(bounds.w, 0'f32) * scale)) - 2 * paddingX)
@@ -206,31 +254,85 @@ proc cellText(cell: TerminalFrameCell; style: PaintedCell): string =
   if result.len == 0:
     result = " "
 
-proc textStyle(cell: PaintedCell; foreground: ui.Color): TextStyle =
-  TextStyle(foreground: foreground, underlineColor: cell.underlineColor,
-    bold: cell.bold, italic: cell.italic, strike: cell.strike,
-    underline: cell.underline)
+proc onlySpaces(value: string): bool =
+  if value.len == 0:
+    return false
+  for rune in value.runes:
+    if rune != Rune(0x20):
+      return false
+  true
 
-proc appendCellText(spans: var seq[ui.Span]; run: var string;
-                     activeStyle: var TextStyle; hasStyle: var bool;
-                     nextText: string; nextStyle: TextStyle;
-                     options: TerminalPaintOptions) =
-  if hasStyle and activeStyle != nextStyle:
-    spans.add(ui.Span(text: move(run), font: options.fontFamily,
-      features: options.fontFeatures, size: options.fontSize,
-      weight: if activeStyle.bold: min(max(options.fontWeight + 300, 700), 900)
-        else: options.fontWeight,
-      italic: activeStyle.italic, color: activeStyle.foreground,
-      decorationColor: activeStyle.underlineColor,
-      underline: activeStyle.underline > 0,
-      wavyUnderline: activeStyle.underline == 3,
-      strikethrough: activeStyle.strike))
-    run.setLen(0)
-    hasStyle = false
-  if not hasStyle:
-    activeStyle = nextStyle
-    hasStyle = true
-  run.add(nextText)
+proc shapedRun(cache: TerminalPaintCache; text: string;
+    columns, widths: openArray[int]; color: ui.Color; bold, italic: bool;
+    cellWidth, scale: float32; options: TerminalPaintOptions): PaintedGlyphRun =
+  if text.len == 0 or columns.len == 0:
+    return
+  let font = ui.Font(family: options.fontFamily,
+    features: options.fontFeatures, size: options.fontSize,
+    weight: if bold: min(max(options.fontWeight + 300, 700), 900)
+      else: options.fontWeight,
+    italic: italic)
+  let shaped = cache.shape(text, font)
+  result.foreground = color
+  var i = 0
+  while i < shaped.len:
+    let firstRune = max(0, min(shaped[i].cluster, columns.high))
+    let col = columns[firstRune]
+    var lastRune = firstRune
+    var j = i
+    var x0 = shaped[i].x
+    var x1 = shaped[i].x + shaped[i].advance
+    while true:
+      let glyph = shaped[j]
+      let glyphEnd = min(glyph.cluster + max(glyph.runes, 1), columns.len)
+      lastRune = max(lastRune, glyphEnd - 1)
+      x0 = min(x0, glyph.x)
+      x1 = max(x1, glyph.x + glyph.advance)
+      if j + 1 >= shaped.len:
+        break
+      let nextRune = max(0, min(shaped[j + 1].cluster, columns.high))
+      if columns[nextRune] != col:
+        break
+      inc j
+
+    var span = 0
+    for runeIndex in firstRune .. lastRune:
+      span += widths[runeIndex]
+    let room = float32(max(span, 1)) * cellWidth
+    var group = shaped[i .. j]
+    if x1 > x0 and room / (x1 - x0) < 0.95'f32:
+      let smallText = text.runeSubStr(firstRune, lastRune - firstRune + 1)
+      var smallFont = font
+      smallFont.size *= max(room / (x1 - x0), 0.5'f32)
+      let smaller = cache.shape(smallText, smallFont)
+      if smaller.len > 0:
+        group = smaller
+        x0 = smaller[0].x
+        x1 = smaller[0].x + smaller[0].advance
+        for glyph in smaller:
+          x0 = min(x0, glyph.x)
+          x1 = max(x1, glyph.x + glyph.advance)
+    var offset = (room - (x1 - x0)) / 2
+    if abs(float64(offset)) < 0.5 / float64(scale):
+      offset = 0
+    let cellX = float32(col) * cellWidth
+    for source in group:
+      var glyph = source
+      glyph.x = cellX + offset + (glyph.x - x0)
+      result.glyphs.add(glyph)
+      result.columns.add(col)
+    i = j + 1
+
+proc addShapedRun(runs: var seq[PaintedGlyphRun]; cache: TerminalPaintCache;
+    text: string; columns, widths: openArray[int]; color: ui.Color;
+    bold, italic: bool; cellWidth, scale: float32;
+    options: TerminalPaintOptions) =
+  if text.len == 0:
+    return
+  let run = shapedRun(cache, text, columns, widths, color, bold, italic,
+    cellWidth, scale, options)
+  if run.glyphs.len > 0:
+    runs.add(run)
 
 proc paintBackgrounds(painter: var ui.Painter; row: TerminalFrameRow;
                       y, x, cellWidth, cellHeight: float32;
@@ -269,68 +371,184 @@ proc paintSelection(painter: var ui.Painter; row: TerminalFrameRow;
     painter.fill(ui.Rect(x: x + float32(first) * cellWidth, y: y,
       w: float32(last - first + 1) * cellWidth, h: cellHeight), selection, 0)
 
-proc paintOverlines(painter: var ui.Painter; row: TerminalFrameRow;
-                    y, x, cellWidth, scale: float32;
-                    colors: RenderColors) =
-  var start = -1
-  var color = ui.transparent
-  for col in 0 .. row.cells.len:
-    if col < row.cells.len and
-        row.cells[col].cell.wide in {cellSpacerTail, cellSpacerHead}:
-      continue
-    var hasLine = false
-    var nextColor = color
-    if col < row.cells.len:
-      let resolved = row.cells[col].paintCell(colors)
-      hasLine = resolved.overline
-      nextColor = resolved.foreground
-    if start >= 0 and (not hasLine or nextColor != color):
-      painter.fill(ui.Rect(x: x + float32(start) * cellWidth, y: y,
-        w: float32(col - start) * cellWidth, h: 1 / scale), color, 0)
-      start = -1
-    if hasLine and start < 0:
-      start = col
-      color = nextColor
+proc addDecoration(spans: var seq[DecorationSpan]; first, past, kind: int;
+                   color: ui.Color) =
+  if first >= past:
+    return
+  if spans.len > 0 and spans[^1].past == first and
+      spans[^1].kind == kind and spans[^1].color == color:
+    spans[^1].past = past
+  else:
+    spans.add(DecorationSpan(first: first, past: past, kind: kind,
+      color: color))
 
-proc paintRowText(painter: var ui.Painter; row: TerminalFrameRow;
-                  x, y, cellWidth: float32; colors: RenderColors;
-                  selectionText, cursorText: ui.Color;
-                  selectedStart, selectedFinish, cursorColumn: int;
-                  blockCursor: bool; options: TerminalPaintOptions) =
-  var spans: seq[ui.Span]
-  var run = ""
-  var activeStyle: TextStyle
-  var hasStyle = false
+proc paintDecoration(painter: var ui.Painter; span: DecorationSpan;
+    x, rowY, cellWidth, baseline, scale, fontSize: float32) =
+  let
+    x0 = x + float32(span.first) * cellWidth
+    x1 = x + float32(span.past) * cellWidth
+    pixel = 1 / scale
+    thickness = max(round(fontSize * scale / 14), 1'f32) * pixel
+    underlineY = rowY + baseline +
+      max(round(fontSize * scale / 10), 1'f32) * pixel
+  case span.kind
+  of 10: # strikethrough
+    painter.fill(ui.Rect(x: x0, y: rowY + baseline - fontSize * 0.3'f32,
+      w: x1 - x0, h: thickness), span.color, 0)
+  of 11: # overline
+    painter.fill(ui.Rect(x: x0, y: rowY, w: x1 - x0, h: thickness),
+      span.color, 0)
+  of 2: # double underline
+    painter.fill(ui.Rect(x: x0, y: underlineY - thickness,
+      w: x1 - x0, h: thickness), span.color, 0)
+    painter.fill(ui.Rect(x: x0, y: underlineY + thickness,
+      w: x1 - x0, h: thickness), span.color, 0)
+  of 3: # curly underline
+    let count = int((x1 - x0) / cellWidth * 8)
+    if count > 0:
+      let amplitude = 1.5'f32 * thickness
+      let path = ui.newPath()
+      discard path.moveTo(x0, underlineY)
+      for i in 1 .. count:
+        let at = x0 + (x1 - x0) * float32(i) / float32(count)
+        discard path.lineTo(at, underlineY + amplitude * float32(sin(
+          float64((at - x0) / cellWidth * 2 * PI))))
+      painter.strokePath(path, thickness, span.color)
+    else:
+      painter.fill(ui.Rect(x: x0, y: underlineY, w: x1 - x0,
+        h: thickness), span.color, 0)
+  of 4, 5: # dotted and dashed underline
+    let step = if span.kind == 5: cellWidth / 2 else: 2 * thickness
+    let dash = if span.kind == 5: cellWidth / 4 else: thickness
+    var at = x0
+    while at < x1:
+      painter.fill(ui.Rect(x: at, y: underlineY, w: min(dash, x1 - at),
+        h: thickness), span.color, 0)
+      at += step
+  else: # single underline
+    painter.fill(ui.Rect(x: x0, y: underlineY, w: x1 - x0,
+      h: thickness), span.color, 0)
+
+proc paintDecorations(painter: var ui.Painter; row: TerminalFrameRow;
+    x, rowY, cellWidth, baseline, scale: float32; colors: RenderColors;
+    selectedStart, selectedFinish: int; selectionText: ui.Color;
+    options: TerminalPaintOptions) =
+  var underlines, strikes, overlines: seq[DecorationSpan]
   for col, cell in row.cells:
+    if cell.cell.wide in {cellSpacerTail, cellSpacerHead}:
+      continue
     let resolved = cell.paintCell(colors)
-    var foreground = resolved.foreground
-    if blockCursor and col == cursorColumn:
-      foreground = cursorText
-    elif selectionText.a > 0 and col >= selectedStart and col <= selectedFinish:
-      foreground = selectionText
+    let selected = selectionText.a > 0 and col >= selectedStart and
+      col <= selectedFinish
+    let foreground = if selected: selectionText else: resolved.foreground
+    let width = if cell.cell.wide == cellWide: 2 else: 1
+    let past = col + width
+    if resolved.underline > 0:
+      underlines.addDecoration(col, past, resolved.underline,
+        if selected: selectionText else: resolved.underlineColor)
+    if resolved.strike:
+      strikes.addDecoration(col, past, 10, foreground)
+    if resolved.overline:
+      overlines.addDecoration(col, past, 11, foreground)
+  for span in underlines:
+    painter.paintDecoration(span, x, rowY, cellWidth, baseline, scale,
+      options.fontSize)
+  for span in strikes:
+    painter.paintDecoration(span, x, rowY, cellWidth, baseline, scale,
+      options.fontSize)
+  for span in overlines:
+    painter.paintDecoration(span, x, rowY, cellWidth, baseline, scale,
+      options.fontSize)
+
+proc paintGlyphRuns(painter: var ui.Painter; runs: openArray[PaintedGlyphRun];
+    x, baseline: float32; override = ui.transparent) =
+  for run in runs:
+    painter.glyphs(run.glyphs, x, baseline,
+      if override.a > 0: override else: run.foreground)
+
+proc paintRowText(painter: var ui.Painter; bounds: ui.Rect;
+    row: TerminalFrameRow; x, rowY, baseline, cellWidth, cellHeight,
+    scale: float32; colors: RenderColors; selectionText, cursorText: ui.Color;
+    selectedStart, selectedFinish, cursorColumn: int; blockCursor: bool;
+    options: TerminalPaintOptions; cache: TerminalPaintCache) =
+  var
+    runs: seq[PaintedGlyphRun]
+    runText = ""
+    runColumns, runWidths: seq[int]
+    activeStyle: TextStyle
+    hasStyle = false
+  for col, cell in row.cells:
+    if cell.cell.wide in {cellSpacerTail, cellSpacerHead}:
+      continue
+    let resolved = cell.paintCell(colors)
     let value = cell.cellText(resolved)
     if value.len == 0:
       continue
-    spans.appendCellText(run, activeStyle, hasStyle, value,
-      resolved.textStyle(foreground), options)
+    let nextStyle = TextStyle(foreground: resolved.foreground,
+      bold: resolved.bold, italic: resolved.italic)
+    if hasStyle and activeStyle != nextStyle and not value.onlySpaces:
+      runs.addShapedRun(cache, runText, runColumns, runWidths,
+        activeStyle.foreground, activeStyle.bold, activeStyle.italic,
+        cellWidth, scale, options)
+      runText.setLen(0)
+      runColumns.setLen(0)
+      runWidths.setLen(0)
+      hasStyle = false
+    if not hasStyle:
+      activeStyle = nextStyle
+      hasStyle = true
+    let cellsWide = if cell.cell.wide == cellWide: 2 else: 1
+    for runeIndex in 0 ..< value.runeLen:
+      runColumns.add(col)
+      runWidths.add(if runeIndex == 0: cellsWide else: 0)
+    runText.add(value)
   if hasStyle:
-    spans.add(ui.Span(text: move(run), font: options.fontFamily,
-      features: options.fontFeatures, size: options.fontSize,
-      weight: if activeStyle.bold: min(max(options.fontWeight + 300, 700), 900)
-        else: options.fontWeight,
-      italic: activeStyle.italic, color: activeStyle.foreground,
-      decorationColor: activeStyle.underlineColor,
-      underline: activeStyle.underline > 0,
-      wavyUnderline: activeStyle.underline == 3,
-      strikethrough: activeStyle.strike))
-  if spans.len > 0:
-    discard painter.richText(x, y, 0, spans)
+    runs.addShapedRun(cache, runText, runColumns, runWidths,
+      activeStyle.foreground, activeStyle.bold, activeStyle.italic,
+      cellWidth, scale, options)
+
+  let firstSelected = max(0, selectedStart)
+  let lastSelected = min(row.cells.high, selectedFinish)
+  if selectionText.a == 0 or firstSelected > lastSelected:
+    painter.paintGlyphRuns(runs, x, baseline)
+  else:
+    let selectedX0 = x + float32(firstSelected) * cellWidth
+    let selectedX1 = x + float32(lastSelected + 1) * cellWidth
+    let left = ui.Rect(x: bounds.x, y: rowY,
+      w: max(selectedX0 - bounds.x, 0'f32), h: cellHeight)
+    let middle = ui.Rect(x: selectedX0, y: rowY,
+      w: selectedX1 - selectedX0, h: cellHeight)
+    let right = ui.Rect(x: selectedX1, y: rowY,
+      w: max(bounds.x + bounds.w - selectedX1, 0'f32), h: cellHeight)
+    if left.w > 0:
+      painter.clip(left, 0, proc(target: var ui.Painter) =
+        target.paintGlyphRuns(runs, x, baseline))
+    if middle.w > 0:
+      painter.clip(middle, 0, proc(target: var ui.Painter) =
+        target.paintGlyphRuns(runs, x, baseline, selectionText))
+    if right.w > 0:
+      painter.clip(right, 0, proc(target: var ui.Painter) =
+        target.paintGlyphRuns(runs, x, baseline))
+
+  if blockCursor and cursorColumn >= 0 and cursorColumn < row.cells.len:
+    let wide = row.cells[cursorColumn].cell.wide == cellWide
+    let cursor = ui.Rect(x: x + float32(cursorColumn) * cellWidth,
+      y: rowY, w: cellWidth * (if wide: 2'f32 else: 1'f32), h: cellHeight)
+    painter.clip(cursor, 0, proc(target: var ui.Painter) =
+      for run in runs:
+        for i, col in run.columns:
+          if col == cursorColumn:
+            target.glyphs(run.glyphs[i .. i], x, baseline, cursorText))
+
+  painter.paintDecorations(row, x, rowY, cellWidth, baseline - rowY, scale,
+    colors, selectedStart, selectedFinish, selectionText, options)
 
 proc paintFrame*(painter: var ui.Painter; bounds: ui.Rect;
-                 frame: TerminalFrame; options: TerminalPaintOptions) =
+    frame: TerminalFrame; options: TerminalPaintOptions;
+    cache: TerminalPaintCache = nil) =
   ## Paints terminal backgrounds, selections, text decorations, and cursor.
   let options = options.normalized()
-  let grid = painter.grid(bounds, options)
+  let grid = painter.grid(bounds, options, cache)
   let background = uiColor(frame.colors.background)
   let foreground = uiColor(frame.colors.foreground)
   let selection = if options.selection.a > 0:
@@ -395,15 +613,14 @@ proc paintFrame*(painter: var ui.Painter; bounds: ui.Rect;
       let (selectedStart, selectedFinish) = if row.selection.isSome:
           (row.selection.get().start, row.selection.get().finish)
         else: (-1, -1)
-      target.paintRowText(row, originX, rowY + grid.textOffsetY,
-        grid.cellWidth, frame.colors,
+      target.paintRowText(bounds, row, originX, rowY,
+        rowY + grid.baselineOffset, grid.cellWidth, grid.cellHeight, scale,
+        frame.colors,
         options.selectionText, cursorText,
         selectedStart, selectedFinish,
         if y == cursorRow: cursorColumn else: -1, blockCursor and y ==
         cursorRow,
-        options)
-      target.paintOverlines(row, rowY, originX, grid.cellWidth, scale,
-        frame.colors)
+        options, cache)
     if cursorRow >= 0 and not blockCursor:
       case cursorStyle
       of cursorBlockHollow:

@@ -11,7 +11,8 @@ import mynim/plugins/terminal/internal/vt/[input as vtInput, library,
 import mynim/plugins/terminal/native_library
 
 export view_paint.TerminalGrid, view_paint.TerminalPaintOptions,
-  view_paint.defaultTerminalPaintOptions
+  view_paint.TerminalPaintCache, view_paint.defaultTerminalPaintOptions,
+  view_paint.newTerminalPaintCache
 export session.TerminalPasteStatus, session.TerminalPasteProgress
 export connection.TerminalConn, connection.read, connection.write,
   connection.resize, connection.close
@@ -176,6 +177,7 @@ type
     clipboardPromptId: uint64
     clipboardPromptOpen: bool
     appliedTheme: TerminalTheme
+    paintCache: TerminalPaintCache
 
   Terminal* = ref object
     options: TerminalOptions
@@ -381,7 +383,8 @@ proc newTerminal*(options = defaultTerminalOptions()): Terminal =
   result.options = options
   result.keybinds = resolveTerminalKeybinds(options)
   result.state = TerminalViewState(blinkStart: getMonoTime(),
-    pasteProviders: initTable[uint64, PendingPasteProvider]())
+    pasteProviders: initTable[uint64, PendingPasteProvider](),
+    paintCache: newTerminalPaintCache())
   result.library = loadGhosttyVT()
   try:
     result.session = newTerminalSession(result.library,
@@ -1401,7 +1404,7 @@ proc view*(context: ui.Context; terminal: Terminal): ui.Element =
     paintOptions.selectionText = theme.selectionText
     paintOptions.cursor = theme.cursor
     paintOptions.cursorText = theme.cursorText
-    let grid = painter.grid(bounds, paintOptions)
+    let grid = painter.grid(bounds, paintOptions, terminal.state.paintCache)
     let changed = not terminal.state.hasGrid or
       grid.cols != terminal.state.grid.cols or
       grid.rows != terminal.state.grid.rows or
@@ -1418,7 +1421,7 @@ proc view*(context: ui.Context; terminal: Terminal): ui.Element =
     terminal.state.cursorBlinking = frame.cursor.visible and
         frame.cursor.blinking
     paintOptions.cursorBlinkOn = cursorBlinkOn
-    painter.paintFrame(bounds, frame, paintOptions)
+    painter.paintFrame(bounds, frame, paintOptions, terminal.state.paintCache)
     terminal.session.clean()
     painter.paintScrollbar(bounds, terminal.session.scrollbar(),
       uiTheme.scrollbar, uiTheme.scrollbarWidth,

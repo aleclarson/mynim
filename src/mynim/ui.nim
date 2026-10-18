@@ -65,6 +65,7 @@ include mynim/ui/direction
 include mynim/ui/list
 include mynim/ui/gridview
 include mynim/ui/paint
+include mynim/ui/glyphs
 include mynim/ui/editable_text
 include mynim/ui/widgets
 include mynim/ui/toolbar
