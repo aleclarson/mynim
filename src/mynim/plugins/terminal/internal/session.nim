@@ -2,6 +2,7 @@
 
 import std/[base64, locks, monotimes, options, os, strutils, times, unicode]
 import mynim/transfer as transfer
+import ./connection
 import ./pty
 import ./vt/[effects, encode, frame, input, library, render, selection, terminal]
 
@@ -78,6 +79,7 @@ type
   TerminalSessionData = object
     terminalGuard: Lock
     inputGuard: Lock
+    connectionGuard: Lock
     inputChanged: Cond
     library: GhosttyVT
     terminal: GhosttyTerminal
@@ -87,6 +89,8 @@ type
     mouseEncoder: GhosttyMouseEncoder
     launchOptions: PtyOptions
     process: Pty
+    connection: TerminalConn
+    connectionClosed: bool
     startupThread, readerThread, writerThread: Thread[TerminalSession]
     startupStarted, readerStarted, writerStarted: bool
     launchPending, launchRequested, processReady: bool
@@ -698,6 +702,8 @@ proc dispatchNotifications(session: TerminalSession) =
     except CatchableError as error:
       session.recordInputError(error.msg)
 
+proc closeConnection(session: TerminalSession)
+
 proc reader(session: TerminalSession) {.thread.} =
   {.cast(gcsafe).}:
     session.inputGuard.acquire()
@@ -711,7 +717,10 @@ proc reader(session: TerminalSession) {.thread.} =
     while true:
       var count: int
       try:
-        count = session.process.read(buffer)
+        count = if session.connection == nil:
+            session.process.read(buffer)
+          else:
+            session.connection.read(buffer)
       except CatchableError as error:
         session.recordInputError(error.msg)
         break
@@ -730,12 +739,34 @@ proc reader(session: TerminalSession) {.thread.} =
 
     var exitCode = 0
     var hasExitCode = false
-    try:
-      exitCode = session.process.wait()
+    if session.connection != nil:
+      session.closeConnection()
       hasExitCode = true
-    except CatchableError as error:
-      session.recordInputError(error.msg)
+    else:
+      try:
+        exitCode = session.process.wait()
+        hasExitCode = true
+      except CatchableError as error:
+        session.recordInputError(error.msg)
     session.terminalGuard.acquire()
+    session.inputGuard.acquire()
+    let showExitMarker = hasExitCode and not session.closing and
+      not session.closed
+    session.inputGuard.release()
+    if showExitMarker:
+      let label = if session.connection != nil:
+          "[Disconnected]"
+        elif exitCode == 0:
+          "[Process exited]"
+        else:
+          "[Process exited with code " & $exitCode & "]"
+      let cursor = session.terminal.cursor()
+      let prefix = if cursor.x > 0: "\r\n" else: ""
+      let message = "\e[0;2m" & prefix & label & "\e[0m"
+      try:
+        session.terminal.write(message.toOpenArrayByte(0, message.high))
+      except CatchableError as error:
+        session.recordInputError(error.msg)
     if hasExitCode:
       session.addEvent(TerminalEvent(kind: terminalProcessExited,
         exitCode: exitCode))
@@ -771,8 +802,12 @@ proc writer(session: TerminalSession) {.thread.} =
       try:
         while offset < packet.data.len:
           let finish = min(offset + 64 * 1024, packet.data.len)
-          let written = session.process.write(packet.data.toOpenArray(offset,
-            finish - 1))
+          let written = if session.connection == nil:
+              session.process.write(packet.data.toOpenArray(offset,
+                finish - 1))
+            else:
+              session.connection.write(packet.data.toOpenArray(offset,
+                finish - 1))
           if written <= 0:
             raise newException(IOError, "terminal PTY accepted no input")
           offset += written
@@ -881,6 +916,21 @@ proc delayedStart(session: TerminalSession) {.thread.} =
     if wake:
       session.signalWake()
 
+proc closeConnection(session: TerminalSession) =
+  if session.connection == nil:
+    return
+  session.connectionGuard.acquire()
+  if session.connectionClosed:
+    session.connectionGuard.release()
+    return
+  session.connectionClosed = true
+  let connection = session.connection
+  session.connectionGuard.release()
+  try:
+    connection.close()
+  except CatchableError as error:
+    session.recordInputError(error.msg)
+
 proc releaseGhostty(session: TerminalSession) =
   if session.callbacksInstalled and not session.terminal.isNil:
     try:
@@ -920,6 +970,7 @@ proc releaseGhostty(session: TerminalSession) =
     session.terminal = nil
 
 proc newTerminalSession*(library: GhosttyVT; process: PtyOptions;
+    connection: TerminalConn = nil;
     cols = 80; rows = 24; cellWidth = 1; cellHeight = 1;
     cursorBlink = true;
     terminfoName = "xterm-256color";
@@ -936,12 +987,13 @@ proc newTerminalSession*(library: GhosttyVT; process: PtyOptions;
   if cellWidth <= 0 or uint64(cellWidth) > uint64(high(uint32)) or
       cellHeight <= 0 or uint64(cellHeight) > uint64(high(uint32)):
     raise newException(ValueError, "terminal session cell size is invalid")
-  if process.path.len == 0:
+  if connection == nil and process.path.len == 0:
     raise newException(ValueError, "terminal session process path is empty")
 
   new(result)
   initLock(result.terminalGuard)
   initLock(result.inputGuard)
+  initLock(result.connectionGuard)
   initCond(result.inputChanged)
   result.pasteOffers.open(1)
   result.pasteOffersOpen = true
@@ -953,6 +1005,8 @@ proc newTerminalSession*(library: GhosttyVT; process: PtyOptions;
   result.noClipboardWrite = noClipboardWrite
   result.clipboardReadPolicy = clipboardReadPolicy
   result.onNotify = onNotify
+  result.connection = connection
+  result.processReady = connection != nil
 
   try:
     result.terminal = newGhosttyTerminal(library, cols, rows)
@@ -965,15 +1019,16 @@ proc newTerminalSession*(library: GhosttyVT; process: PtyOptions;
     result.mouseEncoder = newGhosttyMouseEncoder(library)
     result.renderState = newGhosttyRenderState(library)
     result.launchOptions = process
-    result.launchPending = true
+    result.launchPending = connection == nil
     result.terminal.setCallbacks(cast[pointer](result), sessionCallbacks())
     result.callbacksInstalled = true
     createThread(result.writerThread, writer, result)
     result.writerStarted = true
     createThread(result.readerThread, reader, result)
     result.readerStarted = true
-    createThread(result.startupThread, delayedStart, result)
-    result.startupStarted = true
+    if connection == nil:
+      createThread(result.startupThread, delayedStart, result)
+      result.startupStarted = true
   except CatchableError:
     result.inputGuard.acquire()
     result.closing = true
@@ -983,6 +1038,7 @@ proc newTerminalSession*(library: GhosttyVT; process: PtyOptions;
     if result.startupStarted:
       joinThread(result.startupThread)
       result.startupStarted = false
+    result.closeConnection()
     if result.process != nil:
       try:
         result.process.kill()
@@ -1379,6 +1435,7 @@ proc resize*(session: TerminalSession; cols, rows: int;
       cellHeight <= 0 or uint64(cellHeight) > uint64(high(uint32)):
     raise newException(ValueError, "terminal session cell size is invalid")
   session.lockTerminal()
+  var connection: TerminalConn
   try:
     session.terminal.resize(cols, rows, cellWidth, cellHeight)
     session.cols = cols
@@ -1388,10 +1445,18 @@ proc resize*(session: TerminalSession; cols, rows: int;
     if session.process != nil:
       let pixels = cellPixels(cols, rows, cellWidth, cellHeight)
       session.process.resize(cols, rows, pixels.width, pixels.height)
+    elif session.connection != nil:
+      connection = session.connection
     elif session.launchPending:
       session.launchRequested = true
   finally:
     session.terminalGuard.release()
+  if connection != nil:
+    session.connectionGuard.acquire()
+    let canResize = not session.connectionClosed
+    session.connectionGuard.release()
+    if canResize:
+      connection.resize(cols, rows)
 
 proc size*(session: TerminalSession): tuple[cols, rows: int] =
   ## Returns the current terminal cell dimensions.
@@ -1566,6 +1631,7 @@ proc close*(session: TerminalSession) =
     except CatchableError as error:
       session.recordInputError(error.msg)
     session.process.close()
+  session.closeConnection()
   if session.readerStarted:
     joinThread(session.readerThread)
     session.readerStarted = false

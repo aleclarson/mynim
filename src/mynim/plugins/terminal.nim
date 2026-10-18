@@ -4,7 +4,8 @@ import std/[math, monotimes, options, os, strutils, tables, times, unicode]
 import mynim/ui as ui
 import mynim/transfer as transfer
 import mynim/internal/l10n as l10n
-import mynim/plugins/terminal/internal/[links, pty, session, view_paint]
+import mynim/plugins/terminal/internal/[connection, links, pty, session,
+    view_paint]
 import mynim/plugins/terminal/internal/vt/[input as vtInput, library,
     terminal as vtTerminal]
 import mynim/plugins/terminal/native_library
@@ -12,6 +13,8 @@ import mynim/plugins/terminal/native_library
 export view_paint.TerminalGrid, view_paint.TerminalPaintOptions,
   view_paint.defaultTerminalPaintOptions
 export session.TerminalPasteStatus, session.TerminalPasteProgress
+export connection.TerminalConn, connection.read, connection.write,
+  connection.resize, connection.close
 
 type
   ## Selects what happens to terminal text when a selection ends.
@@ -68,10 +71,12 @@ type
     repeat: bool
 
   TerminalOptions* = object
-    ## Process and native view options for `newTerminal`.
+    ## Process, stream, and native view options for `newTerminal`.
     command*: seq[string]
     dir*: string
     env*: seq[string]
+    ## Connects the terminal to a byte stream instead of launching a process.
+    conn*: TerminalConn
     font*: TerminalPaintOptions
     scrollbackMaxBytes*: int
     copyOnSelect*: TerminalCopyOnSelect
@@ -260,7 +265,8 @@ proc newTerminal*(options = defaultTerminalOptions()): Terminal =
   result.library = loadGhosttyVT()
   try:
     result.session = newTerminalSession(result.library,
-      processOptions(options), cursorBlink = not options.noBlink,
+      if options.conn == nil: processOptions(options) else: PtyOptions(),
+      connection = options.conn, cursorBlink = not options.noBlink,
       scrollbackMaxBytes = max(options.scrollbackMaxBytes, 0),
       noClipboardWrite = options.noClipboardWrite,
       clipboardReadPolicy = case options.clipboardRead

@@ -1,7 +1,87 @@
-import std/[atomics, options, os, sequtils, strutils, unittest]
+import std/[atomics, locks, options, os, sequtils, strutils, unittest]
 import mynim/transfer as transfer
-import mynim/plugins/terminal/internal/[pty, session]
+import mynim/plugins/terminal/internal/[connection, pty, session]
 import mynim/plugins/terminal/internal/vt/[frame, input, library, terminal]
+import mynim/plugins/terminal as terminalApi
+
+type
+  TestTerminalConn = ref object of TerminalConn
+    guard: Lock
+    changed: Cond
+    incoming, sent: seq[byte]
+    closed, readStarted: bool
+    resizeCols, resizeRows: int
+
+proc newTestTerminalConn(): TestTerminalConn =
+  new(result)
+  initLock(result.guard)
+  initCond(result.changed)
+
+method read(conn: TestTerminalConn; buffer: var openArray[byte]): int =
+  conn.guard.acquire()
+  conn.readStarted = true
+  conn.changed.broadcast()
+  while conn.incoming.len == 0 and not conn.closed:
+    conn.changed.wait(conn.guard)
+  if conn.incoming.len == 0:
+    conn.guard.release()
+    return 0
+  result = min(buffer.len, conn.incoming.len)
+  for i in 0 ..< result:
+    buffer[i] = conn.incoming[i]
+  conn.incoming.delete(0 ..< result)
+  conn.guard.release()
+
+method write(conn: TestTerminalConn; buffer: openArray[byte]): int =
+  conn.guard.acquire()
+  if conn.closed:
+    conn.guard.release()
+    raise newException(IOError, "test terminal connection is closed")
+  conn.sent.add(buffer)
+  result = buffer.len
+  conn.changed.broadcast()
+  conn.guard.release()
+
+method resize(conn: TestTerminalConn; cols, rows: int) =
+  conn.guard.acquire()
+  conn.resizeCols = cols
+  conn.resizeRows = rows
+  conn.changed.broadcast()
+  conn.guard.release()
+
+method close(conn: TestTerminalConn) =
+  conn.guard.acquire()
+  conn.closed = true
+  conn.changed.broadcast()
+  conn.guard.release()
+
+proc feed(conn: TestTerminalConn; value: string) =
+  conn.guard.acquire()
+  for c in value:
+    conn.incoming.add byte(ord(c))
+  conn.changed.broadcast()
+  conn.guard.release()
+
+proc sentText(conn: TestTerminalConn): string =
+  conn.guard.acquire()
+  for b in conn.sent:
+    result.add char(b)
+  conn.guard.release()
+
+proc resizedTo(conn: TestTerminalConn): tuple[cols, rows: int] =
+  conn.guard.acquire()
+  result = (conn.resizeCols, conn.resizeRows)
+  conn.guard.release()
+
+proc isClosed(conn: TestTerminalConn): bool =
+  conn.guard.acquire()
+  result = conn.closed
+  conn.guard.release()
+
+proc isReading(conn: TestTerminalConn): bool =
+  conn.guard.acquire()
+  result = conn.readStarted
+  conn.guard.release()
 
 proc text(frame: TerminalFrame): string =
   for row in frame.viewport:
@@ -12,6 +92,66 @@ proc text(frame: TerminalFrame): string =
     result.add '\n'
 
 suite "Ghostty PTY terminal session":
+  test "connects a caller stream for terminal output, input, resize, and EOF":
+    let path = getEnv("MYNIM_GHOSTTY_VT")
+    if path.len == 0:
+      skip()
+    let library = openGhosttyVT(path)
+    defer: library.close()
+    let conn = newTestTerminalConn()
+    let publicOptions = terminalApi.TerminalOptions(conn: conn)
+    check publicOptions.conn == conn
+    let session = newTerminalSession(library, PtyOptions(),
+      connection = conn, cols = 80, rows = 24)
+    defer: session.close()
+
+    session.resize(100, 30)
+    check conn.resizedTo() == (cols: 100, rows: 30)
+    conn.feed("remote-ready")
+    var ready = false
+    for _ in 0 ..< 200:
+      if text(session.snapshot()).contains("remote-ready"):
+        ready = true
+        break
+      sleep(10)
+    check ready
+
+    session.send(@[byte(ord('x'))])
+    var sent = false
+    for _ in 0 ..< 200:
+      if conn.sentText().contains('x'):
+        sent = true
+        break
+      sleep(10)
+    check sent
+
+    conn.close()
+    check session.waitForExit() == 0
+    check session.processExitCode().get() == 0
+    check text(session.snapshot()).contains("[Disconnected]")
+    check session.takeEvents().anyIt(it.kind == terminalProcessExited and
+      it.exitCode == 0)
+    check session.failure().len == 0
+    check conn.isClosed()
+
+  test "closing a connection session unblocks its reader":
+    let path = getEnv("MYNIM_GHOSTTY_VT")
+    if path.len == 0:
+      skip()
+    let library = openGhosttyVT(path)
+    defer: library.close()
+    let conn = newTestTerminalConn()
+    let session = newTerminalSession(library, PtyOptions(), connection = conn)
+    var reading = false
+    for _ in 0 ..< 200:
+      if conn.isReading():
+        reading = true
+        break
+      sleep(10)
+    check reading
+    session.close()
+    check conn.isClosed()
+
   test "connects process output, input, effects, and owned frames":
     let path = getEnv("MYNIM_GHOSTTY_VT")
     if path.len == 0:
@@ -74,6 +214,7 @@ suite "Ghostty PTY terminal session":
         check contents.contains("got:m")
         check normalized.contains("reply: 1b 5b 30 6e")
         check contents.contains("SYNC")
+        check contents.contains("[Process exited with code 7]")
         let events = session.takeEvents()
         check events.anyIt(it.kind == terminalTitleChanged and
           it.title == "Session title")
