@@ -570,8 +570,8 @@ proc dismissModal(rt: Runtime): bool =
       return true
     return false
 
-proc accessibilityTree(layout: LayoutResult;
-                      focusSlot: int): platform.AccessTree =
+proc accessibilityTree(layout: LayoutResult; focusSlot: int;
+                       conn: surface.Conn): platform.AccessTree =
   let owner = layout.owner
   if owner == nil or owner.closed or layout.generation != owner.generation or
       layout.rects.len != owner.nodes.len:
@@ -589,6 +589,9 @@ proc accessibilityTree(layout: LayoutResult;
         owner.effectivelyToolbarCollapsed(slot):
       continue
     let isDisabled = owner.effectivelyDisabled(slot)
+    let nativeWebView = layout.nativeWebView(conn, slot)
+    if node.webView != nil and nativeWebView == nil:
+      continue
     let image = node.bitmap != nil or node.vector != nil
     let listContainer = node.listState != nil and node.listRowIndex == -1
     let listItem = node.listState != nil and node.listRowIndex >= 0 and
@@ -646,6 +649,7 @@ proc accessibilityTree(layout: LayoutResult;
       parent: parent, role: role, label: label,
       bounds: platform.RectF(x: rect.x.float64, y: rect.y.float64,
         w: rect.w.float64, h: rect.h.float64))
+    accessible.webView = nativeWebView
     accessible.description = node.accessDescription
     accessible.value = node.accessValue
     accessible.states = accessible.states or node.accessSort
@@ -754,7 +758,7 @@ proc accessibilityTree(layout: LayoutResult;
 proc updateAccessibility(rt: Runtime) =
   if rt.accessibilityOn and rt.conn.surface != nil:
     let owner = rt.context.owner
-    var tree = rt.frameLayout.accessibilityTree(rt.focusSlot)
+    var tree = rt.frameLayout.accessibilityTree(rt.focusSlot, rt.conn)
     if owner != nil and owner.announcements.len > 0:
       tree.announcements = owner.announcements
       owner.announcements.setLen(0)
@@ -811,6 +815,9 @@ proc applyHandleFocusRequests(rt: Runtime; layout: LayoutResult): bool =
   owner.focusedSlots = @[requestedSlot]
   owner.focusVisibleSlots.setLen(0)
   owner.focusIdentity = owner.nodes[requestedSlot].identity
+  let webView = layout.nativeWebView(rt.conn, requestedSlot)
+  if webView != nil:
+    webView.focus()
   if layout.revealSlot(requestedSlot):
     rt.requestFrame()
   rt.requestFrame()
@@ -850,6 +857,9 @@ proc setRuntimeFocus(rt: Runtime; layout: LayoutResult; slot: int) =
     owner.nodes[slot].focused = true
     owner.focusedSlots.add(slot)
     owner.focusIdentity = owner.nodes[slot].identity
+    let webView = layout.nativeWebView(rt.conn, slot)
+    if webView != nil:
+      webView.focus()
     if layout.revealSlot(slot):
       rt.requestFrame()
   else:
@@ -2254,6 +2264,8 @@ proc renderFrame(rt: Runtime; presentFrame = true) =
   rt.frameScene = layout.paintScene(scale)
   rt.paintLocalDrag(rt.frameScene)
   rt.hasScene = true
+  if presentFrame:
+    layout.placeWebViews(rt.conn, scale)
   rt.updateAccessibility()
   if presentFrame:
     rt.present(rt.frameScene)
@@ -2321,6 +2333,7 @@ proc renderPoseOnlyFrame(rt: Runtime) =
   rt.frameScene = layout.paintScene(scale)
   rt.paintLocalDrag(rt.frameScene)
   rt.hasScene = true
+  layout.placeWebViews(rt.conn, scale)
   rt.updateAccessibility()
   rt.present(rt.frameScene)
   rt.poseOnlyFrame = rt.poseOnlyFrame and layout.poseOnlyAnimating and
@@ -2925,7 +2938,7 @@ proc event(rt: Runtime; ev: platform.SurfaceEvent): bool =
   case ev.kind
   of platform.pointerMove, platform.pointerDown, platform.pointerUp,
       platform.pointerScroll, platform.keyPressed, platform.keyReleased,
-      platform.modifiersChanged:
+      platform.modifiersChanged, platform.webViewPress:
     rt.context.setModifiers(ev.mods)
   else:
     discard
@@ -2991,6 +3004,9 @@ proc event(rt: Runtime; ev: platform.SurfaceEvent): bool =
         rt.cancelKeyPress()
         rt.focusSlot = next
         rt.keyboardFocusVisible = true
+        let webView = rt.frameLayout.nativeWebView(rt.conn, next)
+        if webView != nil:
+          webView.tabInto((ev.mods and platform.modShift) != 0)
         discard rt.frameLayout.revealSlot(next)
         rt.refreshPointer()
         rt.requestFrame()
@@ -3461,6 +3477,9 @@ proc event(rt: Runtime; ev: platform.SurfaceEvent): bool =
       if rt.frameLayout.focusableSlot(slot):
         rt.focusSlot = slot
         rt.keyboardFocusVisible = false
+        let webView = rt.frameLayout.nativeWebView(rt.conn, slot)
+        if webView != nil:
+          webView.focus()
         if targetNode.textClient of TextFieldClient:
           let (pointerX, pointerY, ok) = rt.frameLayout.localPoint(slot,
             rt.pointerX, rt.pointerY)
@@ -3985,6 +4004,9 @@ proc event(rt: Runtime; ev: platform.SurfaceEvent): bool =
         let changed = rt.focusSlot != slot or rt.keyboardFocusVisible
         rt.focusSlot = slot
         rt.keyboardFocusVisible = false
+        let webView = rt.frameLayout.nativeWebView(rt.conn, slot)
+        if webView != nil:
+          webView.focus()
         rt.cancelKeyPress()
         let scrolled = rt.frameLayout.revealSlot(slot)
         if changed or scrolled:
@@ -4052,6 +4074,44 @@ proc event(rt: Runtime; ev: platform.SurfaceEvent): bool =
           rt.inputChanged(slot, before)
           result = true
     return result
+  of platform.webViewPress:
+    let previousHover = rt.hoverSlots
+    rt.pointerX = float32(ev.x)
+    rt.pointerY = float32(ev.y)
+    rt.hasPointer = true
+    discard rt.dismissPopoverOutside(rt.pointerX, rt.pointerY)
+    rt.refreshPointer()
+    if ev.button == 0:
+      let target = rt.frameLayout.targetAt(rt.pointerX, rt.pointerY)
+      if target.owner != nil and
+          target.owner == rt.frameLayout.owner and
+          int(target.slot) < target.owner.nodes.len and
+          target.owner.nodes[int(target.slot)].webView != nil:
+        let slot = int(target.slot)
+        rt.setRuntimeFocus(rt.frameLayout, slot)
+    if rt.hoverSlots != previousHover:
+      rt.requestFrame()
+    true
+  of platform.webViewTabOut:
+    let owner = rt.frameLayout.owner
+    if owner == nil or ev.webView == nil:
+      return false
+    var slot = -1
+    for candidate in 1..<owner.nodes.len:
+      if rt.frameLayout.nativeWebView(rt.conn, candidate) == ev.webView:
+        slot = candidate
+    if slot < 0:
+      return false
+    let back = (ev.mods and platform.modShift) != 0
+    let next = rt.nextFocusSlot(rt.frameLayout, slot, back)
+    if next >= 0:
+      rt.setRuntimeFocus(rt.frameLayout, next)
+      rt.keyboardFocusVisible = true
+      let webView = rt.frameLayout.nativeWebView(rt.conn, next)
+      if webView != nil:
+        webView.tabInto(back)
+    rt.requestFrame()
+    true
   else:
     false
 

@@ -67,6 +67,7 @@ include mynim/ui/gridview
 include mynim/ui/paint
 include mynim/ui/glyphs
 include mynim/ui/editable_text
+include mynim/ui/webview
 include mynim/ui/widgets
 include mynim/ui/toolbar
 include mynim/ui/collapsible

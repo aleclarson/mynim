@@ -580,6 +580,7 @@ type
     tableColumnMinWidth, tableColumnMaxWidth: float32
     tableResizeHandle, tableFitMeasure: bool
     bitmap: Bitmap
+    webView: surface.SurfaceWebView
     imageRegion: Rect
     flipX, flipY: bool
     vector: Svg
@@ -650,6 +651,7 @@ const
   identityKindGrid = 7'u8
   identityKindTextInput = 8'u8
   identityKindIcon = 9'u8
+  identityKindWebView = 10'u8
   transitionGhostChannels = [
     ("\x00mynim.transition.exit.x", "\x00mynim.transition.enter.x"),
     ("\x00mynim.transition.exit.y", "\x00mynim.transition.enter.y"),

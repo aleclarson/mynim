@@ -1548,7 +1548,7 @@ proc paintScene*(layout: LayoutResult; scale = 1'f32;
           node.borderColor.a > 0 and scene.hasBorder(node.border)
         if not fillVisible and not borderVisible and node.shadows.len == 0 and
             node.material == nil and not node.hasText and node.bitmap == nil and
-            node.vector == nil and node.drawFn == nil:
+            node.vector == nil and node.drawFn == nil and node.webView == nil:
           continue
 
         let rect = layout.rects[slot].sceneRect(layout.root, scale)
@@ -1604,6 +1604,19 @@ proc paintScene*(layout: LayoutResult; scale = 1'f32;
           if not node.textInline and shadow.inset:
             result.paintShadow(node, layout.rects[slot], layout.root,
                                scale, opacity, shadow)
+        if node.webView != nil:
+          let inset = [
+            (node.border[0] + node.pad[0]).scaled(scale),
+            (node.border[1] + node.pad[1]).scaled(scale),
+            (node.border[2] + node.pad[2]).scaled(scale),
+            (node.border[3] + node.pad[3]).scaled(scale)]
+          let outerRadii = scene.corners(rect, node.radius.scaledEdges(scale),
+            continuousCorners)
+          let hole = scene.innerRadii(rect, outerRadii, inset)
+          if not hole.inner.empty:
+            result.ops.add(scene.Op(kind: scene.opHole,
+              rect: hole.inner, radii: hole.radii,
+              continuous: continuousCorners, opacity: opacity))
         let clipFieldText = node.textClient of TextFieldClient and
           (node.clipX or node.clipY)
         if clipFieldText:
