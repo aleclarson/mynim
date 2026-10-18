@@ -652,6 +652,10 @@ type
     gen, ver: uint64
     lastFrame: uint64
 
+  target = object
+    tex, fb: uint32
+    w, h: int
+
   ## canvasTexture is the texture a canvas (scene.newCanvas) is drawn
   ## into, through its framebuffer, and what drawing it keeps, for as
   ## long as the canvas lives. Its rows go up, as GL's: images showing
@@ -698,6 +702,9 @@ type
     grab: texture
     backdrop: array[2, texture]
     backdropFB: array[2, uint32]
+    blurred: seq[target]
+    used: int
+    blurTmp: array[2, target]
     ## header is what the shaders start with; effects are the programs
     ## of the effects drawn, made as first drawn.
     header: string
@@ -716,7 +723,7 @@ type
   ## uniforms' locations.
   passProgram = object
     program: uint32
-    origin, limit, shift, dir, down, rad, sigma: int32
+    origin, limit, shift, dir, down, rad, sigma, mode: int32
 
 
 proc `or`(a, b: uint32): uint32 =
@@ -793,6 +800,7 @@ proc passLink(header, name: string):
   p.down = glGetUniformLocation(p.program, "uDown")
   p.rad = glGetUniformLocation(p.program, "uRadius")
   p.sigma = glGetUniformLocation(p.program, "uSigma")
+  p.mode = glGetUniformLocation(p.program, "uMode")
   glUseProgram(0)
   (p, nil)
 
@@ -837,6 +845,7 @@ proc `set`(pp: passProgram, p: gpu.Pass) =
   glUniform1i(pp.down, p.down)
   glUniform1i(pp.rad, p.radius)
   glUniform1f(pp.sigma, p.sigma)
+  glUniform1i(pp.mode, p.mode)
 
 proc init(r: Renderer): ref CatchableError
 proc forget(r: Renderer)
@@ -845,6 +854,7 @@ proc drawCanvas(r: Renderer, c: scene.Image): ref CatchableError
 proc fitBackdrop(r: Renderer, b: var gpu.Builder): ref CatchableError
 proc readBackdrop(r: Renderer, fb: uint32, height: int, bk: scene.Backdrop)
 proc `pass`(r: Renderer, i, w, h: int)
+proc blurImage(r: Renderer; img: scene.Image; bk: scene.Backdrop): uint
 proc bindState(r: Renderer, s: scene.Scene)
 proc blendFunc(r: Renderer, hole: bool)
 proc draw(r: Renderer, s: scene.Scene): ref CatchableError
@@ -1050,6 +1060,7 @@ proc render*(r: Renderer, s: scene.Scene): ref CatchableError =
 
 proc draw(r: Renderer, s: scene.Scene): ref CatchableError =
   r.frame += 1
+  r.used = 0
   glActiveTexture(glTexture0)
   var e = r.syncAtlas(r.mask, s.maskAtlas, int32(glR8), glRed)
   if not e.isNil: return e
@@ -1134,6 +1145,8 @@ proc deleteCanvas(r: Renderer, t: canvasTexture) =
 ## drawScene draws s into the framebuffer bound, with b.
 proc drawSceneImpl(r: Renderer, s: scene.Scene,
                b: var gpu.Builder): ref CatchableError =
+  b.blurredImage = proc(i: scene.Image; bk: scene.Backdrop): uint =
+    r.blurImage(i, bk)
   let s = b.build(s, proc(i: scene.Image): uint = r.imageTexture(i))
   # Canvases' rows go up, as GL's: images showing them sample them
   # flipped, which their source rectangles may be (scene.opImage).
@@ -1294,6 +1307,86 @@ proc `pass`(r: Renderer, i, w, h: int) =
   glScissor(0, 0, int32(w), int32(h))
   glDrawArraysInstanced(glTriangleStrip, 0, 4, 1)
 
+proc fit(t: var target; w, h: int): ref CatchableError =
+  if t.tex != 0 and t.w == w and t.h == h:
+    return nil
+  if t.tex != 0:
+    glDeleteTextures(1, addr t.tex)
+  t.tex = newTexture(int32(glRGBA8), glRGBA, w, h, [], 0)
+  if t.fb == 0:
+    glGenFramebuffers(1, addr t.fb)
+  glBindFramebuffer(glFramebuffer, t.fb)
+  glFramebufferTexture2D(glFramebuffer, glColorAttachment0,
+                         glTexture2D, t.tex, 0)
+  if glCheckFramebufferState(glFramebuffer) != glFramebufferDone:
+    return newException(CatchableError,
+      "gl: cannot draw into a " & $w & "×" & $h & " image blur texture")
+  t.w = w
+  t.h = h
+  nil
+
+proc release(t: var target) =
+  if t.tex != 0:
+    glDeleteTextures(1, addr t.tex)
+  if t.fb != 0:
+    glDeleteFramebuffers(1, addr t.fb)
+  t = target()
+
+proc passInto(r: Renderer; t: target; w, h: int) =
+  glBindFramebuffer(glFramebuffer, t.fb)
+  glViewport(0, 0, int32(t.w), int32(t.h))
+  glScissor(0, 0, int32(w), int32(h))
+  glDrawArraysInstanced(glTriangleStrip, 0, 4, 1)
+
+proc blurImage(r: Renderer; img: scene.Image; bk: scene.Backdrop): uint =
+  ## Blurs an image area into reusable textures before the scene draw.
+  let src = uint32(r.imageTexture(img))
+  let (w, h) = bk.size()
+  if src == 0 or w <= 0 or h <= 0 or w > r.maxSize or h > r.maxSize:
+    return 0
+  var outer: int32
+  glGetIntegerv(glFramebufferBinding, addr outer)
+  defer: glBindFramebuffer(glFramebuffer, uint32(outer))
+  for i in 0 ..< r.blurTmp.len:
+    if r.blurTmp[i].w < w or r.blurTmp[i].h < h:
+      let e = r.blurTmp[i].fit(max(w, r.blurTmp[i].w),
+                               max(h, r.blurTmp[i].h))
+      if not e.isNil:
+        return 0
+  if r.used == r.blurred.len:
+    r.blurred.add(target())
+  let blurredTarget = addr r.blurred[r.used]
+  inc r.used
+  if blurredTarget[].w < w or blurredTarget[].h < h:
+    let e = blurredTarget[].fit(w, h)
+    if not e.isNil:
+      return 0
+  glDisable(glBlend)
+  glEnable(glScissorTest)
+  glBindVertexArray(r.passVAO)
+  glActiveTexture(glTexture0)
+  glBindTexture(glTexture2D, src)
+  var p = gpu.imageDownPass(bk)
+  if not img.scene.isNil:
+    p.shift = [0'i32, int32(img.h - 1)]
+  else:
+    p.mode = p.mode or gpu.passUnflipped
+  r.down.`set`(p)
+  if bk.radius == 0:
+    r.passInto(blurredTarget[], w, h)
+    glDisable(glScissorTest)
+    return uint(blurredTarget[].tex)
+  r.passInto(r.blurTmp[0], w, h)
+  r.blur.`set`(gpu.imageBlurPass(bk, [1'i32, 0]))
+  glBindTexture(glTexture2D, r.blurTmp[0].tex)
+  r.passInto(r.blurTmp[1], w, h)
+  r.blur.`set`(gpu.imageBlurPass(bk, [0'i32, 1]))
+  glBindTexture(glTexture2D, r.blurTmp[1].tex)
+  r.passInto(blurredTarget[], w, h)
+  glBindTexture(glTexture2D, 0)
+  glDisable(glScissorTest)
+  uint(blurredTarget[].tex)
+
 ## fitBackdrop makes the textures of backdrops as large as the scene
 ## built needs, and the texture the area read is copied to.
 proc fitBackdrop(r: Renderer, b: var gpu.Builder): ref CatchableError =
@@ -1351,6 +1444,9 @@ proc forget(r: Renderer) =
   r.grab = texture()
   r.backdrop = [texture(), texture()]
   r.backdropFB = [0'u32, 0]
+  r.blurred.setLen(0)
+  r.used = 0
+  r.blurTmp = [target(), target()]
   r.mask = texture()
   r.color = texture()
   r.images.clear()
@@ -1371,6 +1467,11 @@ proc release*(r: Renderer) =
     glDeleteTextures(1, addr t.tex)
   for t in r.canvases.values:
     r.deleteCanvas(t)
+  for i in 0 ..< r.blurred.len:
+    r.blurred[i].release()
+  r.blurred.setLen(0)
+  for i in 0 ..< r.blurTmp.len:
+    r.blurTmp[i].release()
   for tex in [addr r.mask.tex, addr r.color.tex, addr r.empty,
               addr r.grab.tex, addr r.backdrop[0].tex,
               addr r.backdrop[1].tex]:

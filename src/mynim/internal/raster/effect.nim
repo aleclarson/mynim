@@ -2,6 +2,11 @@
 ## effect render path.
 
 type
+  blurredImage = object
+    ## An opImage's image blurred into a temporary bitmap and its new source.
+    image: scene.Image
+    src: scene.Rect
+
   drawer = object
     ## What draw keeps from scene to scene: the renderers of the bands
     ## and the team drawing them, the backdrop of an effect, and the
@@ -11,6 +16,7 @@ type
     job: bandJob
     bd: backdrop
     fx: Table[uint, scene.EffectPixels]
+    blurred: seq[blurredImage]
 
   bandJob = object
     ## What the bands of drawOps draw: operations first to last of s
@@ -24,6 +30,7 @@ type
     rows: int
     px: scene.EffectPixels
     b: scene.BackdropImage
+    blurred: seq[blurredImage]
 
   backdrop = object
     ## Computes the backdrop of an effect, as the GPU renderers do in
@@ -52,6 +59,86 @@ const texelWork = 64 shl 10
 proc texel(v: float32): float32 {.inline.} =
   ## v as an 8-bit channel of a texture holds it.
   float32(to8(v)) / 255
+
+proc blurLine(dst, src: var seq[float32]; weights: seq[float32]; sum: float32;
+              step, base, n: int) =
+  ## Blurs one line with transparent samples beyond its two ends.
+  let radius = weights.len - 1
+  for i in 0 ..< n:
+    let p = base + i * step
+    var c = [src[p] * weights[0], src[p + 1] * weights[0],
+             src[p + 2] * weights[0], src[p + 3] * weights[0]]
+    for offset in 1 .. radius:
+      let weight = weights[offset]
+      if i >= offset:
+        let at = base + (i - offset) * step
+        for channel in 0 ..< 4:
+          c[channel] += src[at + channel] * weight
+      if i + offset < n:
+        let at = base + (i + offset) * step
+        for channel in 0 ..< 4:
+          c[channel] += src[at + channel] * weight
+    let dstIndex = base + i * step
+    for channel in 0 ..< 4:
+      dst[dstIndex + channel] = texel(c[channel] / sum)
+
+proc blurLines(dst, src: var seq[float32]; weights: seq[float32];
+               step, next, n, lines: int) =
+  var sum = weights[0]
+  for i in 1 ..< weights.len:
+    sum += 2 * weights[i]
+  for line in 0 ..< lines:
+    blurLine(dst, src, weights, sum, step, line * next, n)
+
+proc blurImage(img: scene.Image; src: scene.Rect; blur: float32): blurredImage =
+  ## Blurs an image source as the GPU passes do, rounding each pass to RGBA8.
+  if img.isNil or img.w <= 0 or img.h <= 0 or
+      img.pix.len < 4 * img.w * img.h:
+    return blurredImage(image: img, src: src)
+  let bk = scene.imageBlur(scene.imageArea(src, img.w, img.h), blur)
+  let (w, h) = bk.size()
+  result.src = bk.imageSrc(src)
+  if w <= 0 or h <= 0:
+    return
+  var pixels = newSeq[float32](4 * w * h)
+  let down = bk.down
+  let inv = 1'f32 / float32(down * down)
+  for y in 0 ..< h:
+    for x in 0 ..< w:
+      var color: array[4, float32]
+      for dy in 0 ..< down:
+        let iy = bk.area.min.y + y * down + dy
+        if iy >= bk.area.max.y:
+          continue
+        for dx in 0 ..< down:
+          let ix = bk.area.min.x + x * down + dx
+          if ix >= bk.area.max.x:
+            continue
+          let at = 4 * (iy * img.w + ix)
+          for channel in 0 ..< 4:
+            color[channel] += float32(img.pix[at + channel]) / 255
+      let dstIndex = 4 * (y * w + x)
+      for channel in 0 ..< 4:
+        pixels[dstIndex + channel] = texel(color[channel] * inv)
+  if bk.radius > 0:
+    var weights = newSeq[float32](bk.radius + 1)
+    for i in 0 .. bk.radius:
+      weights[i] = scene.blurWeight(i, bk.sigma)
+    var tmp = newSeq[float32](pixels.len)
+    blurLines(tmp, pixels, weights, 4, 4 * w, w, h)
+    blurLines(pixels, tmp, weights, 4 * w, 4, h, w)
+  var bytes = newSeq[byte](pixels.len)
+  for i, pixel in pixels:
+    bytes[i] = to8(pixel)
+  result.image = scene.newImageRgba(w, h, bytes)
+
+proc blurImages(s: scene.Scene; area: image.Rectangle;
+                bounds: seq[image.Rectangle]): seq[blurredImage] =
+  result = newSeq[blurredImage](s.ops.len)
+  for i, op in s.ops:
+    if op.kind == scene.opImage and op.blur > 0 and not op.image.isNil and
+        op.image.w > 0 and op.image.h > 0 and bounds[i].overlaps(area):
+      result[i] = blurImage(op.image, op.src, op.blur)
 
 proc pixels(d: var drawer; e: ref scene.Effect): scene.EffectPixels =
   ## What draws e on the CPU, made the first time, or nil for an

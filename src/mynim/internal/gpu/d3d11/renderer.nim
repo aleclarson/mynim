@@ -82,6 +82,9 @@ type
     instanceCapacity: int
     mask, color, grab: Texture
     backdrop: array[2, Texture]
+    blurred: seq[Texture]
+    used: int
+    blurTmp: array[2, Texture]
     images: Table[uint64, Texture]
     canvases: Table[uint64, CanvasTexture]
     effects: Table[uint, tuple[effect: ref scene.Effect, shader: uint]]
@@ -367,6 +370,11 @@ proc release*(r: Renderer) =
   r.grab.releaseTexture()
   for i in 0 ..< r.backdrop.len:
     r.backdrop[i].releaseTexture()
+  for i in 0 ..< r.blurred.len:
+    r.blurred[i].releaseTexture()
+  r.blurred.setLen(0)
+  for i in 0 ..< r.blurTmp.len:
+    r.blurTmp[i].releaseTexture()
   for _, effect in r.effects.mpairs:
     var shader = effect.shader
     com.release(shader)
@@ -692,6 +700,7 @@ proc imageView(r: Renderer; image: scene.Image): uint =
 proc drawCanvas(r: Renderer; canvas: scene.Image): string
 proc drawScene(r: Renderer; s: scene.Scene; b: var gpu.Builder;
                target: uint): string
+proc blurImage(r: Renderer; image: scene.Image; bk: scene.Backdrop): uint
 
 proc drawCanvas(r: Renderer; canvas: scene.Image): string =
   if r.canvases.hasKey(canvas.id):
@@ -789,6 +798,8 @@ proc bindState(r: Renderer; s: scene.Scene; backdrop: uint) =
 proc drawScene(r: Renderer; s: scene.Scene; b: var gpu.Builder;
                target: uint): string =
   r.drawing = target
+  b.blurredImage = proc(image: scene.Image; bk: scene.Backdrop): uint =
+    r.blurImage(image, bk)
   discard b.build(s, proc(image: scene.Image): uint = r.imageView(image))
   result = r.fitBackdrop(b)
   if result.len > 0:
@@ -868,8 +879,51 @@ proc drawScene(r: Renderer; s: scene.Scene; b: var gpu.Builder;
     discard com.call(r.context, contextDrawInstanced, 4,
       uint(batch.count), 0, uint(batch.start))
 
+proc blurImage(r: Renderer; image: scene.Image; bk: scene.Backdrop): uint =
+  ## Blurs an image into reusable render targets before drawing the scene.
+  let src = r.imageView(image)
+  let (width, height) = bk.size()
+  if src == 0 or width <= 0 or height <= 0:
+    return 0
+  for i in 0 ..< r.blurTmp.len:
+    if r.blurTmp[i].width < width or r.blurTmp[i].height < height:
+      let error = r.newTarget(r.blurTmp[i],
+        max(width, r.blurTmp[i].width), max(height, r.blurTmp[i].height), true)
+      if error.len > 0:
+        return 0
+  if r.used == r.blurred.len:
+    r.blurred.add(Texture())
+  let blurredTarget = addr r.blurred[r.used]
+  inc r.used
+  if blurredTarget[].tex == 0 or blurredTarget[].width != width or
+      blurredTarget[].height != height:
+    if r.newTarget(blurredTarget[], width, height, true).len > 0:
+      return 0
+  let ctx = r.context
+  var none: array[5, uint]
+  discard com.call(ctx, contextPsSetShaderResources, 0, uint(none.len),
+    address(none[0]))
+  discard com.call(ctx, contextOmSetBlendState, 0, 0, 0xffffffff'u)
+  discard com.call(ctx, contextRsSetState, r.raster)
+  discard com.call(ctx, contextIaSetPrimitiveTopology, topologyTriangleStrip)
+  discard com.call(ctx, contextIaSetInputLayout, 0)
+  discard com.call(ctx, contextVsSetShader, r.passVs, 0, 0)
+  discard com.call(ctx, contextPsSetConstantBuffers, 1, 1,
+    address(r.passBuffer))
+  if bk.radius == 0:
+    r.pass(r.downPs, src, blurredTarget[], width, height,
+      gpu.imageDownPass(bk))
+    return blurredTarget[].srv
+  r.pass(r.downPs, src, r.blurTmp[0], width, height, gpu.imageDownPass(bk))
+  r.pass(r.blurPs, r.blurTmp[0].srv, r.blurTmp[1], width, height,
+    gpu.imageBlurPass(bk, [1'i32, 0]))
+  r.pass(r.blurPs, r.blurTmp[1].srv, blurredTarget[], width, height,
+    gpu.imageBlurPass(bk, [0'i32, 1]))
+  blurredTarget[].srv
+
 proc draw(r: Renderer; s: scene.Scene): string =
   inc r.frame
+  r.used = 0
   result = r.resize(s.width, s.height)
   if result.len > 0:
     return

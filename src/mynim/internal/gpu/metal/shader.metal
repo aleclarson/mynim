@@ -619,7 +619,7 @@ struct Pass {
 	int down;	 // down: the size of the squares averaged
 	int radius;	 // blur: how far it reaches each way
 	float sigma; // blur: its standard deviation, 0 for none
-	float pad;
+	int mode; // transparent beyond image bounds when bit 0 is set
 };
 
 struct PassVSOut {
@@ -641,7 +641,10 @@ fragment float4 down(PassVSOut v [[stage_in]], texture2d<float> src [[texture(0)
 	float4 c = float4(0.0f);
 	for (int y = 0; y < p.down; y++) {
 		for (int x = 0; x < p.down; x++) {
-			c += src.read(uint2(min(o + int2(x, y), p.limit) - p.shift));
+			int2 at = o + int2(x, y);
+			if ((p.mode & 1) != 0 && any(at > p.limit)) continue;
+			if ((p.mode & 1) == 0) at = min(at, p.limit);
+			c += src.read(uint2(at - p.shift));
 		}
 	}
 	return c * (1.0f / float(p.down * p.down));
@@ -656,8 +659,10 @@ fragment float4 blur(PassVSOut v [[stage_in]], texture2d<float> src [[texture(0)
 	for (int o = -p.radius; o <= p.radius; o++) {
 		float x = float(o);
 		float w = p.sigma > 0.0f ? exp(-(x * x) / (2.0f * p.sigma * p.sigma)) : 1.0f;
-		c += src.read(uint2(clamp(at + p.dir * o, int2(0), p.limit))) * w;
 		sum += w;
+		int2 q = at + p.dir * o;
+		if ((p.mode & 1) != 0 && (any(q < int2(0)) || any(q > p.limit))) continue;
+		c += src.read(uint2(clamp(q, int2(0), p.limit))) * w;
 	}
 	return c / sum;
 }

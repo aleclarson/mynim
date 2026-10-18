@@ -195,6 +195,9 @@ type
     images: Table[uint64, ref texture]
     ## canvases are the textures canvases are drawn into.
     canvases: Table[uint64, ref canvasTexture]
+    blurred: seq[texture]
+    used: int
+    blurTmp: array[2, texture]
     frame: uint64
     ## last is the command buffer of the last frame, which the next
     ## waits for before it changes what the GPU reads.
@@ -703,6 +706,57 @@ proc readBackdrop(r: Renderer; cb, target: id; bk: scene.Backdrop) =
   r.passDraw(cb, f.blurPipe, f.backdrop[1].tex, f.backdrop[0].tex, w, h,
            gpu.blurPass(bk, [0'i32, 1]))
 
+proc blurImage(r: Renderer; cb: id; img: scene.Image;
+               bk: scene.Backdrop): uint =
+  ## Encodes an image blur into reusable BGRA8 textures.
+  let src = cast[id](r.imageTexture(img))
+  let (w, h) = bk.size()
+  if src.isNil or w <= 0 or h <= 0:
+    return 0
+  let f = addr r.formats[0]
+  if f.downPipe.isNil:
+    try:
+      r.makePipelines(f)
+    except CatchableError:
+      return 0
+  for i in 0 ..< r.blurTmp.len:
+    let t = addr r.blurTmp[i]
+    if t.w < w or t.h < h:
+      rel(t.tex)
+      let nw = max(w, t.w)
+      let nh = max(h, t.h)
+      t.tex = r.newTexture(nw, nh, pixelFormatBGRA8Unorm,
+        usageRenderTarget or usageShaderRead, [], 0)
+      if t.tex.isNil:
+        t[] = texture()
+        return 0
+      t.w = nw
+      t.h = nh
+  if r.used == r.blurred.len:
+    r.blurred.add(texture())
+  let blurredTarget = addr r.blurred[r.used]
+  inc r.used
+  if blurredTarget[].tex.isNil or blurredTarget[].w != w or
+      blurredTarget[].h != h:
+    rel(blurredTarget[].tex)
+    blurredTarget[].tex = r.newTexture(w, h, pixelFormatBGRA8Unorm,
+      usageRenderTarget or usageShaderRead, [], 0)
+    if blurredTarget[].tex.isNil:
+      blurredTarget[] = texture()
+      return 0
+    blurredTarget[].w = w
+    blurredTarget[].h = h
+  var p = gpu.imageDownPass(bk)
+  if bk.radius == 0:
+    r.passDraw(cb, f.downPipe, src, blurredTarget[].tex, w, h, p)
+    return cast[uint](blurredTarget[].tex)
+  r.passDraw(cb, f.downPipe, src, r.blurTmp[0].tex, w, h, p)
+  p = gpu.imageBlurPass(bk, [1'i32, 0])
+  r.passDraw(cb, f.blurPipe, r.blurTmp[0].tex, r.blurTmp[1].tex, w, h, p)
+  p = gpu.imageBlurPass(bk, [0'i32, 1])
+  r.passDraw(cb, f.blurPipe, r.blurTmp[1].tex, blurredTarget[].tex, w, h, p)
+  cast[uint](blurredTarget[].tex)
+
 proc fitBackdrop(r: Renderer; b: var gpu.Builder) =
   ## Makes the textures of backdrops as large as the scene built
   ## needs.
@@ -729,6 +783,8 @@ proc fitBackdrop(r: Renderer; b: var gpu.Builder) =
 proc drawInto(r: Renderer; cb: id; s: scene.Scene; target: id;
               d: var drawState) =
   ## Encodes drawing s into target with d, in the format r.cur is.
+  d.b.blurredImage = proc(i: scene.Image; bk: scene.Backdrop): uint =
+    r.blurImage(cb, i, bk)
   let built = d.b.build(s, proc(i: scene.Image): uint =
     r.imageTexture(i))
   if d.b.instances.len > d.instCap:
@@ -837,6 +893,7 @@ proc encode(r: Renderer; s: scene.Scene; target: id): id =
   if r.cur.pipeline.isNil:
     r.makePipelines(r.cur)
   inc r.frame
+  r.used = 0
   r.syncAtlas(r.mask, s.maskAtlas, pixelFormatR8Unorm)
   r.syncAtlas(r.color, s.colorAtlas, pixelFormatRGBA8Unorm)
   let cb = send(r.queue, "commandBuffer")
@@ -886,6 +943,13 @@ proc releaseTextures(r: Renderer) =
     gone.add key
   for key in gone:
     r.canvases.del(key)
+  for i in 0 ..< r.blurred.len:
+    rel(r.blurred[i].tex)
+  r.blurred.setLen(0)
+  r.used = 0
+  for i in 0 ..< r.blurTmp.len:
+    rel(r.blurTmp[i].tex)
+    r.blurTmp[i] = texture()
   rel(r.ds.instBuf)
   r.ds.instCap = 0
   for i in 0 ..< r.formats.len:

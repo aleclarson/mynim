@@ -88,6 +88,7 @@ type
     dashed*: bool
     ## inset makes an opShadow an inner shadow.
     inset*: bool
+    ## The standard deviation of an opShadow or opImage blur.
     blur*: float32
     ## cast is the box casting an opShadow, with castRadii.
     `cast`*: Rect
@@ -145,11 +146,9 @@ type
     ## Draws an effect on the CPU, for one renderer.
 
   Backdrop* = object
-    ## What an effect reads of what is behind it: the pixels of area,
-    ## averaged over squares of down pixels a side into a smaller
-    ## image (size), which a Gaussian of standard deviation sigma
-    ## (blurWeight) blurs, out to radius texels each way, first along
-    ## rows, then along columns.
+    ## The area averaged over squares of down pixels a side, then
+    ## blurred along rows and columns. Effects read the frame behind
+    ## them; image blur treats pixels beyond this area as transparent.
     area*: image.Rectangle
     down*: int
     sigma*: float32
@@ -580,6 +579,31 @@ proc size*(b: Backdrop): tuple[w, h: int] =
   ## The size of the averaged image, in texels.
   ((b.area.max.x - b.area.min.x + b.down - 1) div b.down,
    (b.area.max.y - b.area.min.y + b.down - 1) div b.down)
+
+proc imageBlur*(area: image.Rectangle; blur: float32): Backdrop =
+  ## The passes blurring an image area, transparent beyond its edges.
+  result = backdropOf(Rect(), blur, 0, 0)
+  result.area = area
+
+proc imageSrc*(b: Backdrop; src: Rect): Rect =
+  ## The source rectangle in the texels of an image blurred by b.
+  let k = float32(b.down)
+  Rect(x: (src.x - float32(b.area.min.x)) / k,
+       y: (src.y - float32(b.area.min.y)) / k,
+       w: src.w / k, h: src.h / k)
+
+proc imageArea*(src: Rect; w, h: int): image.Rectangle =
+  ## The pixels of an image that a source rectangle overlaps.
+  var src = src
+  if src.w < 0:
+    src.x += src.w
+    src.w = -src.w
+  if src.h < 0:
+    src.y += src.h
+    src.h = -src.h
+  image.rect(int(floor(src.x)), int(floor(src.y)),
+             int(ceil(src.x + src.w)), int(ceil(src.y + src.h))).
+    intersect(image.rect(0, 0, w, h))
 
 proc blurWeight*(i: int; sigma: float32): float32 =
   ## The weight of the texel i texels away in a blur of standard

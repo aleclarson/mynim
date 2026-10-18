@@ -117,6 +117,8 @@ type
     maskUsed: int
     frame: uint64
     imageTexture: proc(i: scene.Image): uint
+    ## Makes a texture holding an image's blurred area for an opImage.
+    blurredImage*: proc(i: scene.Image; b: scene.Backdrop): uint
     preparedMask: uint
 
   Pass* = object
@@ -125,11 +127,12 @@ type
     ## pixels, at their place less shift in its source, and averages
     ## squares of down pixels a side; blur reads texels up to limit,
     ## radius of them each way along dir, weighted by a Gaussian of
-    ## standard deviation sigma.
+    ## standard deviation sigma. mode selects transparent image bounds
+    ## and, for GL, the image's row orientation.
     origin*, limit*, shift*, dir*: array[2, int32]
     down*, radius*: int32
     sigma*: float32
-    pad: float32
+    mode*: int32
 
   clip = object
     rect: scene.Rect
@@ -160,6 +163,10 @@ type
 ## uses keep, the least recently used dropped first.
 const idleMaskBytes = 32 shl 20
 
+const
+  passClear* = 1'i32
+  passUnflipped* = 2'i32
+
 proc downPass*(bk: scene.Backdrop; shift: array[2, int32]): Pass =
   ## The pass averaging the squares of bk's area, whose frame pixel
   ## (x, y) is at (x, y) less shift in the texture it reads.
@@ -173,6 +180,16 @@ proc blurPass*(bk: scene.Backdrop; dir: array[2, int32]): Pass =
   let (w, h) = bk.size()
   Pass(limit: [int32(w - 1), int32(h - 1)], dir: dir,
        radius: int32(bk.radius), sigma: bk.sigma)
+
+proc imageDownPass*(bk: scene.Backdrop): Pass =
+  ## A downsample pass that treats pixels beyond an image area as clear.
+  result = downPass(bk, [0'i32, 0])
+  result.mode = passClear
+
+proc imageBlurPass*(bk: scene.Backdrop; dir: array[2, int32]): Pass =
+  ## A blur pass that treats texels beyond an image area as clear.
+  result = blurPass(bk, dir)
+  result.mode = passClear
 
 proc backdropSize*(b: Builder): tuple[w, h: int] =
   ## How large the textures of the backdrops of the last scene built
@@ -581,12 +598,23 @@ proc build*(b: var Builder; s: scene.Scene;
       let img = op.image
       if img.isNil or op.rect.empty() or img.w == 0 or img.h == 0:
         continue
-      let tex = `image`(img)
+      var src = op.src
+      var iw = float32(img.w)
+      var ih = float32(img.h)
+      var tex: uint
+      if op.blur > 0 and not b.blurredImage.isNil:
+        let bk = scene.imageBlur(scene.imageArea(op.src, img.w, img.h), op.blur)
+        let (w, h) = bk.size()
+        if w <= 0 or h <= 0:
+          continue
+        tex = b.blurredImage(img, bk)
+        src = bk.imageSrc(op.src)
+        iw = float32(w)
+        ih = float32(h)
+      else:
+        tex = `image`(img)
       if tex == 0:
         continue
-      let
-        iw = float32(img.w)
-        ih = float32(img.h)
       var
         gray = 0'f32
         nearest = 0'f32
@@ -601,12 +629,13 @@ proc build*(b: var Builder; s: scene.Scene;
         rect: rect(op.rect),
         radii: scene.corners(op.rect, op.radii, op.continuous),
         color: tint,
-        uv: [op.src.x / iw, op.src.y / ih,
-             (op.src.x + op.src.w) / iw, (op.src.y + op.src.h) / ih],
+        uv: [src.x / iw, src.y / ih,
+             (src.x + src.w) / iw, (src.y + src.h) / ih],
         params: [4'f32, gray, nearest, opacity(op.opacity)]),
         tex, op.transform)
   b.dropIdleMasks(idleMaskBytes)
   b.imageTexture = nil
+  b.blurredImage = nil
   s
 
 proc sourceSum*(src: string): string =

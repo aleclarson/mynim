@@ -572,6 +572,7 @@ uniform ivec2 uOrigin;
 uniform ivec2 uLimit;
 uniform ivec2 uShift;
 uniform int uDown;
+uniform int uMode;
 
 out vec4 passColor;
 
@@ -580,8 +581,12 @@ void main() {
 	vec4 c = vec4(0.0);
 	for (int y = 0; y < uDown; y++) {
 		for (int x = 0; x < uDown; x++) {
-			ivec2 at = min(o + ivec2(x, y), uLimit);
-			c += texelFetch(uSrc, ivec2(at.x - uShift.x, uShift.y - at.y), 0);
+			ivec2 at = o + ivec2(x, y);
+			if ((uMode & 1) != 0 && any(greaterThan(at, uLimit))) {
+				continue;
+			}
+			int row = (uMode & 2) != 0 ? at.y - uShift.y : uShift.y - at.y;
+			c += texelFetch(uSrc, ivec2(at.x - uShift.x, row), 0);
 		}
 	}
 	passColor = c * (1.0 / float(uDown * uDown));
@@ -597,6 +602,7 @@ uniform ivec2 uLimit;
 uniform ivec2 uDir;
 uniform int uRadius;
 uniform float uSigma;
+uniform int uMode;
 
 out vec4 passColor;
 
@@ -607,8 +613,12 @@ void main() {
 	for (int o = -uRadius; o <= uRadius; o++) {
 		float x = float(o);
 		float w = uSigma > 0.0 ? exp(-(x * x) / (2.0 * uSigma * uSigma)) : 1.0;
-		c += texelFetch(uSrc, clamp(at + uDir * o, ivec2(0), uLimit), 0) * w;
 		sum += w;
+		ivec2 q = at + uDir * o;
+		if ((uMode & 1) != 0 && (any(lessThan(q, ivec2(0))) || any(greaterThan(q, uLimit)))) {
+			continue;
+		}
+		c += texelFetch(uSrc, clamp(q, ivec2(0), uLimit), 0) * w;
 	}
 	passColor = c / sum;
 }

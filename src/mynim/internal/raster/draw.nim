@@ -540,7 +540,7 @@ proc image(r: var renderer; op: scene.Op) =
 proc render(r: var renderer; dst: ptr Image; s: scene.Scene;
             area: image.Rectangle; bounds: seq[image.Rectangle];
             first, last: int; px: scene.EffectPixels;
-            b: scene.BackdropImage) =
+            b: scene.BackdropImage; blurred: seq[blurredImage]) =
   ## Draws the pixels of s within area, operations first to last but
   ## those whose bounds miss it, over the clear color from the first;
   ## those before only clip. px draws operation first when it is an
@@ -582,10 +582,15 @@ proc render(r: var renderer; dst: ptr Image; s: scene.Scene;
       else:
         r.glyphs(op[])
     of scene.opImage:
-      if op.transform.`set`:
-        r.transformed(op[], nil, nil)
+      var imageOp = op[]
+      if i < blurred.len and not blurred[i].image.isNil:
+        imageOp.image = blurred[i].image
+        imageOp.src = blurred[i].src
+        imageOp.blur = 0
+      if imageOp.transform.`set`:
+        r.transformed(imageOp, nil, nil)
       else:
-        r.image(op[])
+        r.image(imageOp)
     of scene.opHole:
       if op.transform.`set`:
         r.transformed(op[], nil, nil)
@@ -627,7 +632,7 @@ proc band(j: ptr bandJob; member, part: int) =
   band.min.y = j.area.min.y + part * j.rows
   band.max.y = min(band.min.y + j.rows, j.area.max.y)
   j.renderers[member].render(j.dst, j.s, band, j.bounds, j.first,
-                             j.last, j.px, j.b)
+                             j.last, j.px, j.b, j.blurred)
 
 proc drawBandWork(context: pointer; member, part: int)
     {.gcsafe, nimcall.} =
@@ -655,11 +660,11 @@ proc drawOps(d: var drawer; dst: ptr Image; s: scene.Scene;
   while d.rs.len < n2:
     d.rs.add(renderer())
   if n2 == 1:
-    d.rs[0].render(dst, s, area, bounds, first, last, px, b)
+    d.rs[0].render(dst, s, area, bounds, first, last, px, b, d.blurred)
     return
   d.job = bandJob(renderers: d.rs, dst: dst, s: s, area: area,
                   bounds: bounds, first: first, last: last, rows: rows,
-                  px: px, b: b)
+                  px: px, b: b, blurred: d.blurred)
   d.bands.work = drawBandWork
   d.bands.context = cast[pointer](addr d.job)
   try:
@@ -682,6 +687,7 @@ proc draw*(d: var drawer; dst: ptr Image; s: scene.Scene;
   ## up to the next. The area holds the backdrops of the effects in
   ## it (Renderer.diff).
   let area = area.intersect(image.rect(0, 0, dst.w, dst.h))
+  d.blurred = blurImages(s, area, bounds)
   ## px draws operation first, an effect over the backdrop b.
   var
     first = 0

@@ -484,7 +484,7 @@ cbuffer PassConstants : register(b1) {
 	int passDown;	 // down: the size of the squares averaged
 	int passRadius;	 // blur: how far it reaches each way
 	float passSigma; // blur: its standard deviation, 0 for none
-	float passPad;
+	int passMode; // transparent beyond image bounds when bit 0 is set
 };
 
 Texture2D passSrc : register(t4);
@@ -501,7 +501,10 @@ float4 downps(float4 pos : SV_Position) : SV_Target {
 	float4 c = float4(0, 0, 0, 0);
 	for (int y = 0; y < passDown; y++) {
 		for (int x = 0; x < passDown; x++) {
-			c += passSrc.Load(int3(min(o + int2(x, y), passLimit) - passShift, 0));
+			int2 at = o + int2(x, y);
+			if ((passMode & 1) != 0 && any(at > passLimit)) continue;
+			if ((passMode & 1) == 0) at = min(at, passLimit);
+			c += passSrc.Load(int3(at - passShift, 0));
 		}
 	}
 	return c * (1.0 / float(passDown * passDown));
@@ -515,8 +518,10 @@ float4 blurps(float4 pos : SV_Position) : SV_Target {
 	for (int o = -passRadius; o <= passRadius; o++) {
 		float x = float(o);
 		float w = passSigma > 0 ? exp(-(x * x) / (2 * passSigma * passSigma)) : 1;
-		c += passSrc.Load(int3(clamp(at + passDir * o, int2(0, 0), passLimit), 0)) * w;
 		sum += w;
+		int2 q = at + passDir * o;
+		if ((passMode & 1) != 0 && (any(q < int2(0, 0)) || any(q > passLimit))) continue;
+		c += passSrc.Load(int3(clamp(q, int2(0, 0), passLimit), 0)) * w;
 	}
 	return c / sum;
 }
