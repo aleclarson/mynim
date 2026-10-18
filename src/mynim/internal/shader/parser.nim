@@ -85,6 +85,24 @@ type
     declarations: seq[ShaderParameterDecl]
     error: ShaderParseError
 
+  ShaderGlobalDeclKind* = enum
+    sgdkVariable
+    sgdkConstant
+
+  ShaderGlobalDecl* = object
+    ## One source-level var/const specification.
+    kind*: ShaderGlobalDeclKind
+    token*: ShaderToken
+    names*: seq[string]
+    typeExpr*: ShaderAstExpr
+    values*: seq[ShaderAstExpr]
+    specIndex*: int
+    inheritsPrevious*: bool
+
+  GlobalParseResult = object
+    declarations: seq[ShaderGlobalDecl]
+    error: ShaderParseError
+
   ShaderFunctionDecl* = object
     ## A package-level function header, body syntax tree, and source tokens.
     name*: string
@@ -98,6 +116,7 @@ type
 
   ShaderSourceFile* = object
     packageName*: string
+    globals*: seq[ShaderGlobalDecl]
     functions*: seq[ShaderFunctionDecl]
     tokens*: seq[ShaderToken]
 
@@ -187,6 +206,7 @@ proc endPosition(source: string): tuple[line, column: int]
 proc parseShaderStatements*(tokens: seq[ShaderToken]): ShaderStatementResult
 proc parseParameterDeclarations(tokens: seq[ShaderToken]): ParameterParseResult
 proc parseResultDeclarations(tokens: seq[ShaderToken]): ParameterParseResult
+proc parseGlobalDeclaration(p: var Parser): GlobalParseResult
 
 proc parseFunctionDecl(p: var Parser): ShaderFunctionDecl =
   discard p.advance() # func
@@ -300,7 +320,15 @@ proc parseShaderFile*(source: string): ShaderFileResult =
           function.body = body.statement
       if parser.error.message.len == 0:
         result.file.functions.add function
-    elif parser.current.text in ["var", "const", "type", "import"] and
+    elif parser.current.text in ["var", "const"] and
+        parser.current.kind == stkKeyword:
+      let globals = parser.parseGlobalDeclaration()
+      if globals.error.message.len > 0:
+        parser.error = globals.error
+      else:
+        for declaration in globals.declarations:
+          result.file.globals.add declaration
+    elif parser.current.text in ["type", "import"] and
         parser.current.kind == stkKeyword:
       parser.skipDeclaration()
     else:
@@ -604,6 +632,59 @@ proc parseExpressionList(p: var Parser): seq[ShaderAstExpr] =
   result.add p.parseExpression()
   while p.take(",") and p.error.message.len == 0:
     result.add p.parseExpression()
+
+proc parseValueSpec(p: var Parser; kind: ShaderGlobalDeclKind;
+                    specIndex: int; grouped: bool): ShaderGlobalDecl =
+  result.kind = kind
+  result.specIndex = specIndex
+  result.token = p.current
+  if p.current.kind != stkIdentifier:
+    p.fail("expected a name in variable declaration")
+    return
+  result.names.add p.advance().text
+  while p.take(","):
+    if p.current.kind != stkIdentifier:
+      p.fail("expected a name after ',' in variable declaration")
+      return
+    result.names.add p.advance().text
+
+  if not p.matches("=") and p.current.kind != stkSemicolon and
+      not p.matches(")") and not p.atEnd:
+    result.typeExpr = p.parseTypeExpression()
+  if p.take("="):
+    result.values = p.parseExpressionList()
+  elif kind == sgdkConstant:
+    if grouped and specIndex > 0:
+      result.inheritsPrevious = true
+    else:
+      p.fail("a constant declaration requires a value")
+  elif result.typeExpr == nil:
+    p.fail("a variable declaration requires a type or value")
+
+proc parseGlobalDeclaration(p: var Parser): GlobalParseResult =
+  let keyword = p.advance()
+  let kind = if keyword.text == "const": sgdkConstant else: sgdkVariable
+  let grouped = p.take("(")
+  if grouped:
+    var specIndex = 0
+    while not p.atEnd and not p.matches(")") and p.error.message.len == 0:
+      if p.current.kind == stkSemicolon:
+        discard p.advance()
+        continue
+      let declaration = p.parseValueSpec(kind, specIndex, grouped = true)
+      if p.error.message.len > 0:
+        break
+      result.declarations.add declaration
+      inc specIndex
+      if p.current.kind == stkSemicolon:
+        discard p.advance()
+      elif not p.matches(")"):
+        p.fail("expected ';' or ')' after declaration")
+    if p.error.message.len == 0:
+      discard p.expect(")")
+  else:
+    result.declarations.add p.parseValueSpec(kind, 0, grouped = false)
+  result.error = p.error
 
 proc parseSimpleStatement(p: var Parser): ShaderAstStmt =
   let token = p.current

@@ -125,6 +125,34 @@ suite "shader file parser":
     check function.results[0].names == @["color"]
     check function.results[0].typeExpr.name == "vec4"
 
+  test "parses package variable and constant declarations":
+    let parsed = parseShaderFile("""
+      package main
+      const scale = 2
+      const (
+        unit float = 1
+        twice
+      )
+      var color vec4 = vec4(1)
+      var samples [4]vec2
+    """)
+    check parsed.error.message.len == 0
+    check parsed.file.globals.len == 5
+    check parsed.file.globals[0].kind == sgdkConstant
+    check parsed.file.globals[0].names == @["scale"]
+    check parsed.file.globals[0].values[0].name == "2"
+    check parsed.file.globals[1].specIndex == 0
+    check parsed.file.globals[1].typeExpr.name == "float"
+    check parsed.file.globals[2].inheritsPrevious
+    check parsed.file.globals[3].kind == sgdkVariable
+    check parsed.file.globals[3].values[0].kind == saekCall
+    check parsed.file.globals[4].typeExpr.kind == saekArrayType
+    check parsed.file.globals[4].typeExpr.operator == "array"
+
+  test "requires constant initializers":
+    let parsed = parseShaderFile("package main\nconst missing")
+    check parsed.error.message == "a constant declaration requires a value"
+
   test "parses assignments, conditionals, loops, range, and return":
     let parsed = parseShaderFile("""
       package main
