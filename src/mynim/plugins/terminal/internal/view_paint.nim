@@ -30,10 +30,16 @@ type
   ShapeKey = tuple[text, family, features, lang: string, size: float32,
     weight: int, italic, thicken, antialiased: bool]
 
+  RowPaintKey = tuple[first, second: uint64]
+
   TerminalPaintCache* = ref object
-    ## UI-thread cache of shaped terminal runs, bounded to recent content.
+    ## UI-thread caches of shaped runs and derived row paint data.
     shapes: Table[ShapeKey, seq[ui.Glyph]]
     order: seq[ShapeKey]
+    rows: Table[RowPaintKey, CachedRowPaint]
+    rowOrder: seq[RowPaintKey]
+    colors: RenderColors
+    hasColors: bool
 
   TerminalScrollbarGeometry* = object
     track*, thumb*: ui.Rect
@@ -59,10 +65,21 @@ type
     kind: int
     color: ui.Color
 
+  BackgroundSpan = object
+    first, past: int
+    color: ui.Color
+
   VectorCell = object
     column, width: int
     codepoint: uint32
     foreground: ui.Color
+
+  CachedRowPaint = object
+    ## Keeps the immutable input snapshot alive for dirty-frame reuse checks.
+    sourceCells: seq[TerminalFrameCell]
+    backgrounds: seq[BackgroundSpan]
+    underlines, strikes, overlines: seq[DecorationSpan]
+    vectorCells: seq[VectorCell]
 
 const printableAscii = " !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~"
 
@@ -80,8 +97,10 @@ proc defaultTerminalPaintOptions*(fontSize = 13'f32): TerminalPaintOptions =
     cursorBlinkOn: true)
 
 proc newTerminalPaintCache*(): TerminalPaintCache =
-  ## Creates a bounded shape cache for one terminal view.
-  TerminalPaintCache(shapes: initTable[ShapeKey, seq[ui.Glyph]]())
+  ## Creates bounded shape and row paint caches for one terminal view.
+  TerminalPaintCache(
+    shapes: initTable[ShapeKey, seq[ui.Glyph]](),
+    rows: initTable[RowPaintKey, CachedRowPaint]())
 
 proc shape(cache: TerminalPaintCache; text: string;
            font: ui.Font): seq[ui.Glyph] =
@@ -340,30 +359,12 @@ proc addShapedRun(runs: var seq[PaintedGlyphRun]; cache: TerminalPaintCache;
   if run.glyphs.len > 0:
     runs.add(run)
 
-proc paintBackgrounds(painter: var ui.Painter; row: TerminalFrameRow;
-                      y, x, cellWidth, cellHeight: float32;
-                      defaultBackground: ui.Color; colors: RenderColors) =
-  var start = -1
-  var color = defaultBackground
-  for col in 0 .. row.cells.len:
-    if col < row.cells.len and
-        row.cells[col].cell.wide in {cellSpacerTail, cellSpacerHead}:
-      continue
-    var nextColor = color
-    var hasColor = false
-    if col < row.cells.len and
-        row.cells[col].cell.wide notin {cellSpacerTail, cellSpacerHead}:
-      let cell = row.cells[col].paintCell(colors)
-      hasColor = cell.hasBackground and cell.background != defaultBackground
-      if hasColor:
-        nextColor = cell.background
-    if start >= 0 and (not hasColor or nextColor != color):
-      painter.fill(ui.Rect(x: x + float32(start) * cellWidth, y: y,
-        w: float32(col - start) * cellWidth, h: cellHeight), color, 0)
-      start = -1
-    if hasColor and start < 0:
-      start = col
-      color = nextColor
+proc paintBackgrounds(painter: var ui.Painter;
+    spans: openArray[BackgroundSpan]; y, x, cellWidth, cellHeight: float32) =
+  for span in spans:
+    painter.fill(ui.Rect(x: x + float32(span.first) * cellWidth, y: y,
+      w: float32(span.past - span.first) * cellWidth, h: cellHeight),
+      span.color, 0)
 
 proc paintSelection(painter: var ui.Painter; row: TerminalFrameRow;
                     y, x, cellWidth, cellHeight: float32;
@@ -387,6 +388,101 @@ proc addDecoration(spans: var seq[DecorationSpan]; first, past, kind: int;
   else:
     spans.add(DecorationSpan(first: first, past: past, kind: kind,
       color: color))
+
+proc sameColors(a, b: RenderColors): bool =
+  if a.background != b.background or a.foreground != b.foreground or
+      a.cursor != b.cursor or a.hasCursor != b.hasCursor:
+    return false
+  for i, color in a.palette:
+    if color != b.palette[i]:
+      return false
+  true
+
+proc buildRowPaint(row: TerminalFrameRow; colors: RenderColors):
+    CachedRowPaint =
+  result.sourceCells = row.cells
+  let defaultBackground = uiColor(colors.background)
+  var start = -1
+  var background = defaultBackground
+  for col in 0 .. row.cells.len:
+    let spacer = col < row.cells.len and
+      row.cells[col].cell.wide in {cellSpacerTail, cellSpacerHead}
+    if not spacer:
+      var resolved: PaintedCell
+      let hasCell = col < row.cells.len
+      if hasCell:
+        resolved = row.cells[col].paintCell(colors)
+
+      let hasBackground = hasCell and resolved.hasBackground and
+        resolved.background != defaultBackground
+      if start >= 0 and (not hasBackground or
+          resolved.background != background):
+        result.backgrounds.add(BackgroundSpan(first: start, past: col,
+          color: background))
+        start = -1
+      if hasBackground and start < 0:
+        start = col
+        background = resolved.background
+
+      if hasCell:
+        let cell = row.cells[col]
+        let width = if cell.cell.wide == cellWide: 2 else: 1
+        if not resolved.invisible and cell.codepoints.len == 1 and
+            boxes.drawn(cell.codepoints[0]):
+          result.vectorCells.add(VectorCell(column: col, width: width,
+            codepoint: cell.codepoints[0], foreground: resolved.foreground))
+        if resolved.underline > 0:
+          result.underlines.addDecoration(col, col + width,
+            resolved.underline, resolved.underlineColor)
+        if resolved.strike:
+          result.strikes.addDecoration(col, col + width, 10,
+            resolved.foreground)
+        if resolved.overline:
+          result.overlines.addDecoration(col, col + width, 11,
+            resolved.foreground)
+
+proc clearRows(cache: TerminalPaintCache) =
+  if cache == nil:
+    return
+  cache.rows.clear()
+  cache.rowOrder.setLen(0)
+
+proc prepareColors(cache: TerminalPaintCache; colors: RenderColors) =
+  if cache == nil:
+    return
+  if not cache.hasColors or not cache.colors.sameColors(colors):
+    cache.clearRows()
+    cache.colors = colors
+    cache.hasColors = true
+
+proc rowPaint(cache: TerminalPaintCache; row: TerminalFrameRow;
+    colors: RenderColors; fullFrame: bool): CachedRowPaint =
+  if cache == nil:
+    return buildRowPaint(row, colors)
+
+  let key: RowPaintKey = (row.id.bits[0], row.id.bits[1])
+  if key.first == 0 and key.second == 0:
+    return buildRowPaint(row, colors)
+  if cache.rows.hasKey(key):
+    let cached = cache.rows[key]
+    if not row.dirty and not fullFrame:
+      return cached
+    if cached.sourceCells == row.cells:
+      return cached
+
+  result = buildRowPaint(row, colors)
+  if cache.rows.hasKey(key):
+    cache.rows[key] = result
+    let index = cache.rowOrder.find(key)
+    if index >= 0:
+      cache.rowOrder.delete(index)
+  else:
+    const maxCachedRows = 512
+    if cache.rowOrder.len >= maxCachedRows:
+      cache.rows.del(cache.rowOrder[0])
+      cache.rowOrder.delete(0)
+    cache.rows[key] = result
+  cache.rowOrder.add(key)
 
 proc paintDecoration(painter: var ui.Painter; span: DecorationSpan;
     x, rowY, cellWidth, baseline, scale, fontSize: float32) =
@@ -435,36 +531,29 @@ proc paintDecoration(painter: var ui.Painter; span: DecorationSpan;
     painter.fill(ui.Rect(x: x0, y: underlineY, w: x1 - x0,
       h: thickness), span.color, 0)
 
-proc paintDecorations(painter: var ui.Painter; row: TerminalFrameRow;
-    x, rowY, cellWidth, baseline, scale: float32; colors: RenderColors;
+proc paintDecorations(painter: var ui.Painter;
+    spans: openArray[DecorationSpan]; x, rowY, cellWidth, baseline,
+    scale: float32;
     selectedStart, selectedFinish: int; selectionText: ui.Color;
     options: TerminalPaintOptions) =
-  var underlines, strikes, overlines: seq[DecorationSpan]
-  for col, cell in row.cells:
-    if cell.cell.wide in {cellSpacerTail, cellSpacerHead}:
-      continue
-    let resolved = cell.paintCell(colors)
-    let selected = selectionText.a > 0 and col >= selectedStart and
-      col <= selectedFinish
-    let foreground = if selected: selectionText else: resolved.foreground
-    let width = if cell.cell.wide == cellWide: 2 else: 1
-    let past = col + width
-    if resolved.underline > 0:
-      underlines.addDecoration(col, past, resolved.underline,
-        if selected: selectionText else: resolved.underlineColor)
-    if resolved.strike:
-      strikes.addDecoration(col, past, 10, foreground)
-    if resolved.overline:
-      overlines.addDecoration(col, past, 11, foreground)
-  for span in underlines:
-    painter.paintDecoration(span, x, rowY, cellWidth, baseline, scale,
-      options.fontSize)
-  for span in strikes:
-    painter.paintDecoration(span, x, rowY, cellWidth, baseline, scale,
-      options.fontSize)
-  for span in overlines:
-    painter.paintDecoration(span, x, rowY, cellWidth, baseline, scale,
-      options.fontSize)
+  for span in spans:
+    let selectedFirst = max(span.first, selectedStart)
+    let selectedPast = min(span.past, selectedFinish + 1)
+    if selectionText.a == 0 or selectedFirst >= selectedPast:
+      painter.paintDecoration(span, x, rowY, cellWidth, baseline, scale,
+        options.fontSize)
+    else:
+      if span.first < selectedFirst:
+        painter.paintDecoration(DecorationSpan(first: span.first,
+          past: selectedFirst, kind: span.kind, color: span.color),
+          x, rowY, cellWidth, baseline, scale, options.fontSize)
+      painter.paintDecoration(DecorationSpan(first: selectedFirst,
+        past: selectedPast, kind: span.kind, color: selectionText),
+        x, rowY, cellWidth, baseline, scale, options.fontSize)
+      if selectedPast < span.past:
+        painter.paintDecoration(DecorationSpan(first: selectedPast,
+          past: span.past, kind: span.kind, color: span.color),
+          x, rowY, cellWidth, baseline, scale, options.fontSize)
 
 proc paintGlyphRuns(painter: var ui.Painter; runs: openArray[PaintedGlyphRun];
     x, baseline: float32; override = ui.transparent) =
@@ -487,13 +576,13 @@ proc paintVectorCells(painter: var ui.Painter; cells: openArray[VectorCell];
       h: cellHeight), color)
 
 proc paintRowText(painter: var ui.Painter; bounds: ui.Rect;
-    row: TerminalFrameRow; x, rowY, baseline, cellWidth, cellHeight,
+    row: TerminalFrameRow; painted: CachedRowPaint;
+    x, rowY, baseline, cellWidth, cellHeight,
     scale: float32; colors: RenderColors; selectionText, cursorText: ui.Color;
     selectedStart, selectedFinish, cursorColumn: int; blockCursor: bool;
     options: TerminalPaintOptions; cache: TerminalPaintCache) =
   var
     runs: seq[PaintedGlyphRun]
-    vectorCells: seq[VectorCell]
     runText = ""
     runColumns, runWidths: seq[int]
     activeStyle: TextStyle
@@ -508,8 +597,6 @@ proc paintRowText(painter: var ui.Painter; bounds: ui.Rect;
     let cellsWide = if cell.cell.wide == cellWide: 2 else: 1
     if not resolved.invisible and cell.codepoints.len == 1 and
         boxes.drawn(cell.codepoints[0]):
-      vectorCells.add(VectorCell(column: col, width: cellsWide,
-        codepoint: cell.codepoints[0], foreground: resolved.foreground))
       value = if cellsWide == 2: "  " else: " "
     let nextStyle = TextStyle(foreground: resolved.foreground,
       bold: resolved.bold, italic: resolved.italic)
@@ -556,7 +643,7 @@ proc paintRowText(painter: var ui.Painter; bounds: ui.Rect;
       painter.clip(right, 0, proc(target: var ui.Painter) =
         target.paintGlyphRuns(runs, x, baseline))
 
-  painter.paintVectorCells(vectorCells, x, rowY, cellWidth, cellHeight,
+  painter.paintVectorCells(painted.vectorCells, x, rowY, cellWidth, cellHeight,
     selectedStart, selectedFinish, selectionText)
 
   if blockCursor and cursorColumn >= 0 and cursorColumn < row.cells.len:
@@ -568,12 +655,19 @@ proc paintRowText(painter: var ui.Painter; bounds: ui.Rect;
         for i, col in run.columns:
           if col == cursorColumn:
             target.glyphs(run.glyphs[i .. i], x, baseline, cursorText)
-      for cell in vectorCells:
+      for cell in painted.vectorCells:
         if cell.column == cursorColumn:
           target.draw(cell.codepoint, cursor, cursorText))
 
-  painter.paintDecorations(row, x, rowY, cellWidth, baseline - rowY, scale,
-    colors, selectedStart, selectedFinish, selectionText, options)
+  painter.paintDecorations(painted.underlines, x, rowY, cellWidth,
+    baseline - rowY, scale, selectedStart, selectedFinish, selectionText,
+    options)
+  painter.paintDecorations(painted.strikes, x, rowY, cellWidth,
+    baseline - rowY, scale, selectedStart, selectedFinish, selectionText,
+    options)
+  painter.paintDecorations(painted.overlines, x, rowY, cellWidth,
+    baseline - rowY, scale, selectedStart, selectedFinish, selectionText,
+    options)
 
 proc paintFrame*(painter: var ui.Painter; bounds: ui.Rect;
     frame: TerminalFrame; options: TerminalPaintOptions;
@@ -581,6 +675,12 @@ proc paintFrame*(painter: var ui.Painter; bounds: ui.Rect;
   ## Paints terminal backgrounds, selections, text decorations, and cursor.
   let options = options.normalized()
   let grid = painter.grid(bounds, options, cache)
+  let visibleRows = min(frame.rows, frame.viewport.len)
+  cache.prepareColors(frame.colors)
+  var rowPaints = newSeq[CachedRowPaint](visibleRows)
+  for y in 0 ..< visibleRows:
+    rowPaints[y] = cache.rowPaint(frame.viewport[y], frame.colors,
+      frame.dirty == renderFull)
   let background = uiColor(frame.colors.background)
   let foreground = uiColor(frame.colors.foreground)
   let selection = if options.selection.a > 0:
@@ -599,11 +699,11 @@ proc paintFrame*(painter: var ui.Painter; bounds: ui.Rect;
   painter.clip(bounds, 0, proc(target: var ui.Painter) =
     if not options.transparent:
       target.fill(bounds, background, 0)
-    for y in 0 ..< min(frame.rows, frame.viewport.len):
+    for y in 0 ..< visibleRows:
       let row = frame.viewport[y]
       let rowY = originY + float32(y) * grid.cellHeight
-      target.paintBackgrounds(row, rowY, originX, grid.cellWidth,
-        grid.cellHeight, background, frame.colors)
+      target.paintBackgrounds(rowPaints[y].backgrounds, rowY, originX,
+        grid.cellWidth, grid.cellHeight)
       target.paintSelection(row, rowY, originX, grid.cellWidth,
         grid.cellHeight, selection)
 
@@ -615,8 +715,7 @@ proc paintFrame*(painter: var ui.Painter; bounds: ui.Rect;
     let cursorOn = options.preedit.len == 0 and
       (options.cursorBlinkOn or not frame.cursor.blinking)
     if cursorOn and frame.cursor.inView and frame.cursor.visible and
-        frame.cursor.y >= 0 and frame.cursor.y < min(frame.rows,
-            frame.viewport.len):
+        frame.cursor.y >= 0 and frame.cursor.y < visibleRows:
       cursorColumn = frame.cursor.x
       if frame.cursor.wideTail and cursorColumn > 0:
         dec cursorColumn
@@ -639,13 +738,13 @@ proc paintFrame*(painter: var ui.Painter; bounds: ui.Rect;
       if blockCursor:
         target.fill(cursorRect, cursorColor, 0)
 
-    for y in 0 ..< min(frame.rows, frame.viewport.len):
+    for y in 0 ..< visibleRows:
       let row = frame.viewport[y]
       let rowY = originY + float32(y) * grid.cellHeight
       let (selectedStart, selectedFinish) = if row.selection.isSome:
           (row.selection.get().start, row.selection.get().finish)
         else: (-1, -1)
-      target.paintRowText(bounds, row, originX, rowY,
+      target.paintRowText(bounds, row, rowPaints[y], originX, rowY,
         rowY + grid.baselineOffset, grid.cellWidth, grid.cellHeight, scale,
         frame.colors,
         options.selectionText, cursorText,
@@ -670,8 +769,7 @@ proc paintFrame*(painter: var ui.Painter; bounds: ui.Rect;
         discard
     if options.preedit.len > 0 and options.focused and
         frame.cursor.inView and frame.cursor.visible and
-        frame.cursor.y >= 0 and frame.cursor.y < min(frame.rows,
-            frame.viewport.len):
+        frame.cursor.y >= 0 and frame.cursor.y < visibleRows:
       var preeditColumn = frame.cursor.x
       if frame.cursor.wideTail and preeditColumn > 0:
         dec preeditColumn

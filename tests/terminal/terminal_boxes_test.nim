@@ -6,6 +6,11 @@ import mynim/plugins/terminal/internal/view_paint
 import mynim/plugins/terminal/internal/vt/[frame, render]
 import mynim/ui as ui
 
+proc hasFillColor(painted: scene.Scene; color: scene.Color): bool =
+  for op in painted.ops:
+    if op.kind == scene.opFill and op.color == color:
+      return true
+
 block custom_terminal_glyphs:
   doAssert boxes.drawn(0x2500'u32)
   doAssert boxes.drawn(0x256d'u32)
@@ -26,8 +31,8 @@ block custom_terminal_glyphs:
       foreground: RGB(r: 220, g: 230, b: 240),
       background: RGB(r: 10, g: 15, b: 20)),
     viewport: @[
-      TerminalFrameRow(selection: some(RowSelection(start: 0, finish: 0)),
-        cells: @[
+      TerminalFrameRow(id: RowID(bits: [1'u64, 2'u64]),
+        selection: some(RowSelection(start: 0, finish: 0)), cells: @[
         TerminalFrameCell(cell: RenderCell(wide: cellNarrow),
           codepoints: @[0x2500'u32]),
         TerminalFrameCell(cell: RenderCell(wide: cellNarrow),
@@ -35,6 +40,7 @@ block custom_terminal_glyphs:
         TerminalFrameCell(cell: RenderCell(wide: cellNarrow),
           codepoints: @[0xe0b0'u32])])])
 
+  let cache = newTerminalPaintCache()
   let context = ui.newContext()
   context.build(proc(c: ui.Context) =
     discard c.box().size(160, 36).draw(proc(painter: var ui.Painter;
@@ -46,7 +52,7 @@ block custom_terminal_glyphs:
       options.selectionText = ui.rgb(240, 120, 20)
       options.cursor = ui.rgb(20, 120, 240)
       options.cursorText = ui.rgb(250, 250, 250)
-      painter.paintFrame(bounds, frame, options)
+      painter.paintFrame(bounds, frame, options, cache)
     )
   )
   let painted = context.layout(ui.Rect(w: 160, h: 36)).paintScene(1)
@@ -68,4 +74,28 @@ block custom_terminal_glyphs:
   doAssert sawSelected, "selected vector glyph should use selection text color"
   doAssert sawForeground, "unselected vector glyph should keep its foreground"
   doAssert sawCursorText, "block cursor should redraw its vector glyph"
+
+  let foreground = scene.Color(r: 220, g: 230, b: 240, a: 255)
+  let changedForeground = scene.Color(r: 40, g: 190, b: 90, a: 255)
+  frame.viewport[0].cells[1].style.foreground = RenderColor(
+    kind: renderColorRgb, rgb: RGB(r: 40, g: 190, b: 90))
+  let reused = context.layout(ui.Rect(w: 160, h: 36)).paintScene(1)
+  doAssert reused.hasFillColor(foreground),
+    "clean row should reuse its cached box color"
+  doAssert not reused.hasFillColor(changedForeground),
+    "clean row should ignore changes outside a dirty frame snapshot"
+
+  frame.viewport[0].dirty = true
+  let refreshed = context.layout(ui.Rect(w: 160, h: 36)).paintScene(1)
+  doAssert refreshed.hasFillColor(changedForeground),
+    "dirty row should rebuild its cached box color"
+
+  let changedBackground = scene.Color(r: 80, g: 60, b: 200, a: 255)
+  frame.colors.palette[7] = RGB(r: 80, g: 60, b: 200)
+  frame.viewport[0].cells[1].style.background = RenderColor(
+    kind: renderColorPalette, paletteIndex: 7)
+  frame.viewport[0].dirty = false
+  let recolored = context.layout(ui.Rect(w: 160, h: 36)).paintScene(1)
+  doAssert recolored.hasFillColor(changedBackground),
+    "palette change should rebuild cached background spans"
   context.close()
