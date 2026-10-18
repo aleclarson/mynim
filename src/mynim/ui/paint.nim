@@ -754,6 +754,37 @@ proc strokePath*(painter: var Painter; path: Path; width: float32;
   ## Draws a vector path with round joins and caps.
   painter.paintPath(path, width, color, LinearGradient(), false)
 
+proc strokePolyline*(painter: var Painter;
+    points: openArray[array[2, float32]]; width: float32; color: Color) =
+  ## Draws finite runs of points with round joins and caps; lone points are ignored.
+  let scaledWidth = width * painter.scale
+  if painter.frame == nil or width <= 0 or not width.finite or
+      scaledWidth <= 0 or
+      not scaledWidth.finite or color.a == 0:
+    return
+  var first = [0'f32, 0'f32]
+  var hasPoint, hasSegment, hasAnySegment = false
+  let path = newPath()
+  for point in points:
+    let x = point[0] * painter.scale
+    let y = point[1] * painter.scale
+    if not point[0].finite or not point[1].finite or
+        not x.finite or not y.finite:
+      hasPoint = false
+      hasSegment = false
+    elif not hasPoint:
+      first = point
+      hasPoint = true
+    elif not hasSegment:
+      discard path.moveTo(first[0], first[1])
+        .lineTo(point[0], point[1])
+      hasSegment = true
+      hasAnySegment = true
+    else:
+      discard path.lineTo(point[0], point[1])
+  if hasAnySegment:
+    painter.strokePath(path, width, color)
+
 proc strokePathGradient*(painter: var Painter; path: Path; width: float32;
                          gradient: LinearGradient) =
   ## Draws a vector path with a gradient across its bounds.
