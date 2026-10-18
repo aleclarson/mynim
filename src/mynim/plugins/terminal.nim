@@ -280,6 +280,13 @@ proc paste*(terminal: Terminal; text: string) =
     raise newException(IOError, "terminal is closed")
   terminal.session.paste(text)
 
+proc pasteData*(terminal: Terminal; data: transfer.Data) =
+  ## Pastes clipboard data, offering its MIME types to Kitty mode 5522.
+  ## Formats are materialized on this caller before the PTY session reads them.
+  if terminal == nil or terminal.closed:
+    raise newException(IOError, "terminal is closed")
+  terminal.session.pasteData(data)
+
 proc size*(terminal: Terminal): tuple[cols, rows: int] =
   ## Returns the current terminal grid dimensions.
   if terminal == nil or terminal.closed:
@@ -498,22 +505,21 @@ proc selectAll(terminal: Terminal; services: ui.Services) =
   services.invalidate()
 
 proc pasteClipboard(terminal: Terminal; services: ui.Services) =
-  if services.clipboardFormats().len == 0:
+  let formats = services.clipboardFormats()
+  if formats.len == 0:
     return
-  var data: transfer.Data
-  if terminal.options.onPaste != nil:
-    data = services.readClipboardData()
-    if terminal.options.onPaste(data):
-      return
+  let data = if terminal.options.onPaste != nil or
+      terminal.session.mode(vtTerminal.modePasteEvents):
+    services.readClipboardData()
   else:
-    data = services.readClipboardData(transfer.Text)
-  let read = data.read(transfer.Text)
-  let text = if read.err == nil: transfer.bytesToString(read.data) else: ""
+    services.readClipboardData(transfer.Text)
+  if terminal.options.onPaste != nil and terminal.options.onPaste(data):
+    return
   terminal.state.preedit.setLen(0)
   terminal.state.hasPendingKey = false
   terminal.session.scrollToBottom()
   terminal.session.clearSelection()
-  terminal.session.paste(text)
+  terminal.session.pasteData(data)
 
 proc tickSelection(terminal: Terminal) =
   if not terminal.state.selecting or not terminal.state.ticking or

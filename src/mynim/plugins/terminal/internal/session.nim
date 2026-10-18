@@ -1,6 +1,7 @@
 ## A PTY process connected to a serialized Ghostty terminal and render state.
 
 import std/[base64, locks, options, os, strutils, unicode]
+import mynim/transfer as transfer
 import ./pty
 import ./vt/[effects, encode, frame, input, library, render, selection, terminal]
 
@@ -33,10 +34,19 @@ type
     mimes*: seq[string]
     list*, primary*: bool
     text*: string
+    granted: bool
     kitty: bool
     kittyId, prefix, terminator, refusal: string
     ready, suppressOnly, completed: bool
     answer: int8
+
+  PasteContent = object
+    mime: string
+    data: seq[byte]
+
+  PasteOffer = object
+    mimes: seq[string]
+    contents: seq[PasteContent]
 
   TerminalWake* = proc() {.closure.}
   TerminalNotify = proc(title, body: string) {.closure.}
@@ -68,6 +78,8 @@ type
     onNotify: TerminalNotify
     noClipboardWrite: bool
     clipboardReadPolicy: ClipboardReadPolicy
+    pasteOffers: system.Channel[PasteOffer]
+    pasteOffersOpen: bool
     capturingClipboardRead: ClipboardReadRequest
     nextClipboardReadId: uint64
     renderHeld: bool
@@ -207,6 +219,7 @@ proc copyClipboardRead(session: TerminalSession;
     id: session.nextClipboardReadId,
     list: request.list,
     primary: request.location != clipboardLocationStandard,
+    granted: request.granted,
     suppressOnly: request.canRemember)
   if request.mimesLen > 0:
     for mime in request.mimes.toOpenArray(0, int(request.mimesLen) - 1):
@@ -215,6 +228,81 @@ proc copyClipboardRead(session: TerminalSession;
       if not valid:
         return nil
       result.mimes.add(copied)
+
+proc offerMime(format: transfer.Format): string =
+  if format == transfer.FileList:
+    return transfer.URIList
+  if format.find('/') <= 0 or format.contains({' ', '\t'}) or
+      format.startsWith("application/x-mygo-"):
+    return
+  format
+
+proc newPasteOffer(data: transfer.Data): PasteOffer =
+  let snapshot = data.snapshot()
+  for format in snapshot.formats():
+    let mime = offerMime(format)
+    if mime.len > 0 and mime notin result.mimes:
+      result.mimes.add(mime)
+  for mime in result.mimes:
+    var read = snapshot.read(transfer.Format(mime))
+    if read.err != nil and mime == transfer.URIList:
+      read = snapshot.read(transfer.FileList)
+    if read.err == nil:
+      result.contents.add(PasteContent(mime: mime, data: read.data))
+
+proc ghosttyString(value: string): GhosttyString =
+  if value.len > 0:
+    result = GhosttyString(data: cast[pointer](unsafeAddr value[0]),
+      len: csize_t(value.len))
+
+proc readPasteMime(offer: PasteOffer; mime: string): seq[byte] =
+  for content in offer.contents:
+    if content.mime == mime:
+      return content.data
+
+proc answerPasteOffer(request: ptr GhosttyClipboardRead; offer: PasteOffer) =
+  if request.isNil or request.reply == nil:
+    return
+  var mimeNames: seq[string]
+  var payloads: seq[seq[byte]]
+  var contents: seq[GhosttyClipboardContent]
+  for mime in offer.mimes:
+    var requested = false
+    if request.mimesLen > 0 and not request.mimes.isNil:
+      for index in 0 ..< int(request.mimesLen):
+        var valid = true
+        if copyGhosttyString(request.mimes[index], valid) == mime and valid:
+          requested = true
+          break
+    if not requested:
+      continue
+    let payload = offer.readPasteMime(mime)
+    if payload.len == 0:
+      continue
+    mimeNames.add(mime)
+    payloads.add(payload)
+    contents.add(GhosttyClipboardContent(
+      mime: ghosttyString(mimeNames[^1]),
+      data: GhosttyString(data: cast[pointer](addr payloads[^1][0]),
+        len: csize_t(payloads[^1].len))))
+
+  var available: seq[GhosttyString]
+  if request.list:
+    for mime in offer.mimes:
+      available.add(ghosttyString(mime))
+
+  var reply = GhosttyClipboardReadReply(
+    size: csize_t(sizeof(GhosttyClipboardReadReply)),
+    result: clipboardWriteSuccess)
+  if contents.len > 0:
+    reply.contents = cast[ptr UncheckedArray[GhosttyClipboardContent]](
+      addr contents[0])
+    reply.contentsLen = csize_t(contents.len)
+  if available.len > 0:
+    reply.available = cast[ptr UncheckedArray[GhosttyString]](
+      addr available[0])
+    reply.availableLen = csize_t(available.len)
+  request.reply(cast[pointer](request), addr reply)
 
 proc onWritePty(rawTerminal, userdata: pointer;
                 data: ptr UncheckedArray[byte]; length: csize_t) {.cdecl.} =
@@ -377,6 +465,15 @@ proc onClipboardRead(rawTerminal, userdata: pointer;
   if session.isNil or request.isNil or request.size <
       csize_t(sizeof(GhosttyClipboardRead)):
     return
+  if request.granted:
+    let pending = session.pasteOffers.tryRecv()
+    if pending.dataAvailable:
+      let offer = pending.msg
+      try:
+        answerPasteOffer(request, offer)
+      except CatchableError as error:
+        session.recordInputError(error.msg)
+      return
   if session.clipboardReadPolicy == clipboardAccessDeny and
       not request.canRemember:
     return
@@ -777,6 +874,8 @@ proc newTerminalSession*(library: GhosttyVT; process: PtyOptions;
   initLock(result.terminalGuard)
   initLock(result.inputGuard)
   initCond(result.inputChanged)
+  result.pasteOffers.open(1)
+  result.pasteOffersOpen = true
   result.library = library
   result.cols = cols
   result.rows = rows
@@ -834,6 +933,8 @@ proc newTerminalSession*(library: GhosttyVT; process: PtyOptions;
     result.terminalGuard.acquire()
     result.releaseGhostty()
     result.terminalGuard.release()
+    result.pasteOffers.close()
+    result.pasteOffersOpen = false
     result.inputGuard.acquire()
     result.closed = true
     result.inputChanged.broadcast()
@@ -1111,24 +1212,50 @@ proc setColors*(session: TerminalSession; foreground, background: TerminalColor;
   finally:
     session.terminalGuard.release()
 
-proc paste*(session: TerminalSession; text: string) =
-  ## Sanitizes and brackets clipboard text according to current terminal mode.
+proc clearPasteOffers(session: TerminalSession) =
+  var pending = session.pasteOffers.tryRecv()
+  while pending.dataAvailable:
+    pending.msg = PasteOffer()
+    pending = session.pasteOffers.tryRecv()
+
+proc pasteData*(session: TerminalSession; data: transfer.Data) =
+  ## Offers clipboard MIME types to mode 5522, or sends its text normally.
+  ## Transfer providers are materialized on the caller thread before the
+  ## offer crosses to the PTY reader thread.
   if session.isNil:
     raise newException(ValueError, "terminal session is nil")
-  session.terminalGuard.acquire()
-  session.inputGuard.acquire()
-  let stopped = session.closing or session.closed
-  session.inputGuard.release()
-  if stopped or session.terminal.isNil:
-    session.terminalGuard.release()
-    raise newException(IOError, "terminal session is closed")
+  var offer = newPasteOffer(data)
+  session.lockTerminal()
   var encoded: seq[byte]
+  var offered = false
   try:
-    encoded = encodePaste(session.library, text,
-      session.terminal.mode(modeBracketedPaste))
+    session.clearPasteOffers()
+    var fallbackText: string
+    for content in offer.contents:
+      if content.mime == transfer.Text:
+        fallbackText = transfer.bytesToString(content.data)
+        break
+    let mimes = offer.mimes
+    if mimes.len > 0 and session.terminal.mode(modePasteEvents):
+      session.pasteOffers.send(move(offer))
+      offered = session.terminal.pasteEvent(mimes)
+      if not offered:
+        session.clearPasteOffers()
+    if not offered:
+      encoded = encodePaste(session.library, fallbackText,
+        session.terminal.mode(modeBracketedPaste))
+    session.terminal.scrollToBottom()
+  except CatchableError:
+    session.clearPasteOffers()
+    raise
   finally:
     session.terminalGuard.release()
-  session.send(encoded)
+  if not offered:
+    session.send(encoded)
+
+proc paste*(session: TerminalSession; text: string) =
+  ## Sanitizes and brackets clipboard text according to current terminal mode.
+  session.pasteData(transfer.textData(text))
 
 proc mouseTracking*(session: TerminalSession): bool =
   ## Reports whether the active screen tracks mouse clicks or motion.
@@ -1345,6 +1472,11 @@ proc close*(session: TerminalSession) =
   if session.writerStarted:
     joinThread(session.writerThread)
     session.writerStarted = false
+
+  if session.pasteOffersOpen:
+    session.clearPasteOffers()
+    session.pasteOffers.close()
+    session.pasteOffersOpen = false
 
   session.terminalGuard.acquire()
   session.releaseGhostty()

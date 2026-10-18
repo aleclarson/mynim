@@ -1,6 +1,7 @@
 import std/[atomics, options, os, sequtils, strutils, unittest]
+import mynim/transfer as transfer
 import mynim/plugins/terminal/internal/[pty, session]
-import mynim/plugins/terminal/internal/vt/[frame, input, library]
+import mynim/plugins/terminal/internal/vt/[frame, input, library, terminal]
 
 proc text(frame: TerminalFrame): string =
   for row in frame.viewport:
@@ -115,3 +116,113 @@ suite "Ghostty PTY terminal session":
     session.resize(100, 30, cellWidth = 9, cellHeight = 18)
     check session.waitForExit() == 0
     check text(session.snapshot()).contains("30 100")
+
+  test "offers rich clipboard data through Kitty mode 5522":
+    let path = getEnv("MYNIM_GHOSTTY_VT")
+    if path.len == 0:
+      skip()
+    let library = openGhosttyVT(path)
+    defer: library.close()
+    let script = """
+import base64, os, re, select, sys, termios, time
+attrs = termios.tcgetattr(0)
+attrs[3] &= ~(termios.ICANON | termios.ECHO)
+attrs[6][termios.VMIN] = 1
+attrs[6][termios.VTIME] = 0
+termios.tcsetattr(0, termios.TCSANOW, attrs)
+os.write(1, b'\x1b[?5522hREADY\r\n')
+def read_until(needle, timeout=3):
+    result = b''
+    deadline = time.monotonic() + timeout
+    while needle not in result and time.monotonic() < deadline:
+        ready, _, _ = select.select([0], [], [], 0.1)
+        if ready:
+            part = os.read(0, 1)
+            if not part:
+                break
+            result += part
+    return result
+event = read_until(b'status=DONE')
+if b'status=DONE' not in event:
+    os.write(1, b'\r\nNO_EVENT\r\n')
+    sys.exit(13)
+match = re.search(rb':pw=([^;\x1b]+)', event)
+if not match:
+    sys.exit(11)
+pw = match.group(1)
+mimes = b'text/plain text/html'
+mime = base64.b64encode(mimes)
+name = base64.b64encode(b'Paste event')
+listing = base64.b64encode(mimes + b'\n')
+if b';' + listing not in event:
+    os.write(1, b'\r\nBAD_LISTING:' + base64.b64encode(event) + b'\r\n')
+    sys.exit(15)
+request = b'\x1b]5522;type=read:pw=' + pw + b':name=' + name + b';' + mime + b'\x1b\\'
+os.write(1, request)
+reply = read_until(b'status=DONE')
+if b'status=DONE' not in reply:
+    os.write(1, b'\r\nNO_REPLY\r\n')
+    sys.exit(14)
+expected_text = b'status=DATA:mime=' + base64.b64encode(b'text/plain') + b';' + base64.b64encode(b'pasted')
+expected_html = b'status=DATA:mime=' + base64.b64encode(b'text/html') + b';' + base64.b64encode(b'<b>pasted</b>')
+ok = expected_text in reply and expected_html in reply
+if not ok:
+    os.write(1, b'\r\nOFFER_BAD:' + base64.b64encode(reply) + b'\r\n')
+    sys.exit(12)
+os.write(1, b'\r\nFIRST_OK\r\nEMPTY_READY\r\n')
+event = read_until(b'status=DONE')
+match = re.search(rb':pw=([^;\x1b]+)', event)
+if not match:
+    os.write(1, b'\r\nEMPTY_NO_EVENT\r\n')
+    sys.exit(16)
+pw = match.group(1)
+mime = base64.b64encode(b'text/plain')
+name = base64.b64encode(b'Paste event')
+request = b'\x1b]5522;type=read:pw=' + pw + b':name=' + name + b';' + mime + b'\x1b\\'
+os.write(1, request)
+reply = read_until(b'status=DONE')
+ok = b'status=OK' in reply and b'status=EPERM' not in reply and b'status=DATA' not in reply
+marker = b'EMPTY_OK' if ok else b'EMPTY_BAD:' + base64.b64encode(reply)
+os.write(1, b'\r\n' + marker + b'\r\n')
+sys.exit(0 if ok else 17)
+"""
+    let session = newTerminalSession(library,
+      PtyOptions(path: "/usr/bin/python3",
+        args: @["/usr/bin/python3", "-c", script]),
+      cols = 80, rows = 24)
+    defer: session.close()
+    session.resize(80, 24)
+
+    var ready = false
+    for _ in 0 ..< 500:
+      if text(session.snapshot()).contains("READY"):
+        ready = true
+        break
+      sleep(10)
+    check ready
+    if ready:
+      check session.mode(modePasteEvents)
+      if session.processExitCode().isSome:
+        checkpoint("paste child exited " & $session.processExitCode().get() &
+          ": " & text(session.snapshot()))
+      check session.processExitCode().isNone
+      let data = transfer.newData(transfer.newItem(
+        transfer.bytes(transfer.Text, "pasted"),
+        transfer.bytes(transfer.HTML, "<b>pasted</b>")))
+      session.pasteData(data)
+      var secondReady = false
+      for _ in 0 ..< 500:
+        if text(session.snapshot()).contains("EMPTY_READY"):
+          secondReady = true
+          break
+        sleep(10)
+      check secondReady
+      if secondReady:
+        session.pasteData(transfer.textData(""))
+      let exitCode = session.waitForExit()
+      let contents = text(session.snapshot())
+      check exitCode == 0
+      if exitCode != 0:
+        checkpoint("paste child exited " & $exitCode & ": " & contents)
+      check contents.contains("FIRST_OK")
+      check contents.contains("EMPTY_OK")
